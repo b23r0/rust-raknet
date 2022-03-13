@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use std::time::Duration;
 use std::{io::Result, net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
@@ -85,7 +85,7 @@ impl RaknetListener {
 
                 sleep(Duration::from_secs(RAKNET_TIMEOUT)).await;
                 
-                let mut map = pre_connection_next_status.lock().unwrap();
+                let mut map = pre_connection_next_status.lock().await;
                 map.retain(|_ , v| !is_timeout(v.1, RAKNET_TIMEOUT));
             });
         }
@@ -106,7 +106,7 @@ impl RaknetListener {
                 Err(e) => return Err(e),
             };
 
-            let mut pre_connection_next_status = self.pre_connection_next_status.lock().unwrap();
+            let mut pre_connection_next_status = self.pre_connection_next_status.lock().await;
             let mut next_status : PacketID = PacketID::Unknown;
             let cur_status = transaction_packet_id(buf[0]);
 
