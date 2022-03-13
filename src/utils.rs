@@ -1,5 +1,7 @@
 use chrono::prelude::*;
 
+pub const RAKNET_PROTOCOL_VERSION : u8 = 10;
+
 pub fn cur_timestamp() -> i64{
     let dt = Local::now();
     dt.timestamp()

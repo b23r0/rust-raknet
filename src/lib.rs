@@ -4,7 +4,9 @@ mod utils;
 mod reader;
 mod writer;
 pub mod server;
+
 pub use crate::server::*;
+pub use crate::socket::*;
 
 #[tokio::test]
 async fn test_ping_pong(){
@@ -34,3 +36,16 @@ async fn test_ping_pong(){
     assert!(latency < 10 && latency >= 0);
 }
 
+#[tokio::test]
+async fn test_connect(){
+    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let local_addr = server.local_addr().unwrap();
+    server.listen().await;
+    tokio::spawn(async move {
+        let client1 = server.accept().await.unwrap();
+        assert!(client1.local_addr().unwrap() == local_addr);
+    });
+    let client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    assert!(client2.peer_addr().unwrap() == local_addr);
+
+}
