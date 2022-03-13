@@ -1,6 +1,6 @@
 use std::io::Result;
-use crate::reader::{Reader, Endian};
-use crate::writer::{Writer};
+use crate::datatype::{RaknetWriter , RaknetReader};
+use crate::utils::Endian;
 
 #[warn(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,7 +110,7 @@ pub struct IncompatibleProtocolVersion {
 }
 
 pub async fn read_packet_ping(buf : &[u8]) -> Result<PacketUnconnectedPing>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(PacketUnconnectedPing {
         time: unwrap_or_return!(cursor.read_i64(Endian::Big)),
@@ -120,7 +120,7 @@ pub async fn read_packet_ping(buf : &[u8]) -> Result<PacketUnconnectedPing>{
 }
 
 pub async fn write_packet_ping(packet : &PacketUnconnectedPing) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::UnconnectedPing1)));
     unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
     unwrap_or_return!(cursor.write_magic());
@@ -129,7 +129,7 @@ pub async fn write_packet_ping(packet : &PacketUnconnectedPing) -> Result<Vec<u8
 }
 
 pub async fn read_packet_pong(buf : &[u8]) -> Result<PacketUnconnectedPong>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(PacketUnconnectedPong {
         time: unwrap_or_return!(cursor.read_i64(Endian::Big)),
@@ -140,7 +140,7 @@ pub async fn read_packet_pong(buf : &[u8]) -> Result<PacketUnconnectedPong>{
 }
 
 pub async fn write_packet_pong(packet : &PacketUnconnectedPong) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::UnconnectedPong)));
     unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
@@ -150,7 +150,7 @@ pub async fn write_packet_pong(packet : &PacketUnconnectedPong) -> Result<Vec<u8
 }
 
 pub async fn read_packet_connection_open_request_1(buf : &[u8]) -> Result<OpenConnectionRequest1>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(OpenConnectionRequest1 {
         magic: unwrap_or_return!(cursor.read_magic()),
@@ -160,7 +160,7 @@ pub async fn read_packet_connection_open_request_1(buf : &[u8]) -> Result<OpenCo
 }
 
 pub async fn write_packet_connection_open_request_1(packet : &OpenConnectionRequest1) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionRequest1)));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u8(packet.protocol_version));
@@ -171,7 +171,7 @@ pub async fn write_packet_connection_open_request_1(packet : &OpenConnectionRequ
 }
 
 pub async fn read_packet_connection_open_request_2(buf : &[u8]) -> Result<OpenConnectionRequest2>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(OpenConnectionRequest2 {
         magic: unwrap_or_return!(cursor.read_magic()),
@@ -182,7 +182,7 @@ pub async fn read_packet_connection_open_request_2(buf : &[u8]) -> Result<OpenCo
 }
 
 pub async fn write_packet_connection_open_request_2(packet : &OpenConnectionRequest2) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionRequest2)));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_address(packet.address));
@@ -193,7 +193,7 @@ pub async fn write_packet_connection_open_request_2(packet : &OpenConnectionRequ
 }
 
 pub async fn read_packet_connection_open_reply_1(buf : &[u8]) -> Result<OpenConnectionReply1>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(OpenConnectionReply1 {
         magic: unwrap_or_return!(cursor.read_magic()),
@@ -204,7 +204,7 @@ pub async fn read_packet_connection_open_reply_1(buf : &[u8]) -> Result<OpenConn
 }
 
 pub async fn write_packet_connection_open_reply_1(packet : &OpenConnectionReply1) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionReply1)));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
@@ -215,7 +215,7 @@ pub async fn write_packet_connection_open_reply_1(packet : &OpenConnectionReply1
 }
 
 pub async fn read_packet_connection_open_reply_2(buf : &[u8]) -> Result<OpenConnectionReply2>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(OpenConnectionReply2 {
         magic: unwrap_or_return!(cursor.read_magic()),
@@ -227,7 +227,7 @@ pub async fn read_packet_connection_open_reply_2(buf : &[u8]) -> Result<OpenConn
 }
 
 pub async fn write_packet_connection_open_reply_2(packet : &OpenConnectionReply2) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionReply2)));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
@@ -240,7 +240,7 @@ pub async fn write_packet_connection_open_reply_2(packet : &OpenConnectionReply2
 }
 
 pub async fn read_packet_incompatible_protocol_version(buf : &[u8]) -> Result<IncompatibleProtocolVersion>{
-    let mut cursor = Reader::new(buf);
+    let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     Ok(IncompatibleProtocolVersion {
         server_protocol: unwrap_or_return!(cursor.read_u8()),
@@ -250,7 +250,7 @@ pub async fn read_packet_incompatible_protocol_version(buf : &[u8]) -> Result<In
 }
 
 pub async fn write_packet_incompatible_protocol_version(packet : &IncompatibleProtocolVersion) -> Result<Vec<u8>>{
-    let mut cursor = Writer::new(vec![]);
+    let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::IncompatibleProtocolVersion)));
     unwrap_or_return!(cursor.write_u8(packet.server_protocol));
     unwrap_or_return!(cursor.write_magic());

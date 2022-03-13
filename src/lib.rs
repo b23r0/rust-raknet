@@ -1,8 +1,7 @@
 mod socket;
 mod packet;
 mod utils;
-mod reader;
-mod writer;
+mod datatype;
 pub mod server;
 
 pub use crate::server::*;
