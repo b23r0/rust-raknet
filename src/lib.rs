@@ -2,6 +2,7 @@ mod socket;
 mod packet;
 mod utils;
 mod datatype;
+mod arq;
 pub mod server;
 
 pub use crate::server::*;

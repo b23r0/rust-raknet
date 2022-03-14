@@ -1,6 +1,8 @@
-use std::{io::Result , net::{SocketAddr}, sync::Arc};
-use tokio::net::UdpSocket;
+use std::{io::Result , net::{SocketAddr}, sync::{Arc}};
+use tokio::{net::UdpSocket, sync::Mutex};
 use rand;
+use tokio::sync::mpsc::{Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{packet::*, utils::*};
 
@@ -8,17 +10,47 @@ pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
     s : Arc<UdpSocket>,
-    guid : u64
+    connected : Arc<AtomicBool>,
+    _mtu : u16,
+    _guid : u64
 }
 
 impl RaknetSocket {
-    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket>) -> Self {
-        Self{
+    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,mut receiver : Receiver<Vec<u8>>) -> Self {
+        let ret = RaknetSocket{
             peer_addr : addr.clone(),
             local_addr : s.local_addr().unwrap(),
             s: s.clone(),
-            guid : rand::random()
-        }
+            connected : Arc::new(AtomicBool::new(true)),
+            _mtu : RAKNET_MTU,
+            _guid : rand::random()
+        };
+
+        let connected = ret.connected.clone();
+        tokio::spawn(async move {
+            loop{
+                match receiver.recv().await{
+                    Some(p) => {
+                        match transaction_packet_id(p[0]){
+                            PacketID::Disconnect => {
+                                connected.fetch_and(false, Ordering::Relaxed);
+                                break;
+                            },
+                            _ => {
+                                // handle packet in here
+                            },
+                        }
+                        
+                    },
+                    None => {
+                        connected.fetch_and(false, Ordering::Relaxed);
+                        break;
+                    },
+                };  
+            }
+        });
+
+        ret
     }
 
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
@@ -33,7 +65,7 @@ impl RaknetSocket {
         let packet = OpenConnectionRequest1{
             magic: true,
             protocol_version: RAKNET_PROTOCOL_VERSION,
-            mtu_size: 1500,
+            mtu_size: RAKNET_MTU,
         };
 
         let buf = write_packet_connection_open_request_1(&packet).await.unwrap();
@@ -98,7 +130,9 @@ impl RaknetSocket {
             peer_addr : addr.clone(),
             local_addr : s.local_addr().unwrap(),
             s: Arc::new(s),
-            guid : guid
+            connected : Arc::new(AtomicBool::new(true)),
+            _mtu : RAKNET_MTU,
+            _guid : guid
         })
     }
 
@@ -134,6 +168,19 @@ impl RaknetSocket {
 
     pub fn handle_packet(&self , _buf : &[u8]){
 
+    }
+
+    pub async fn close(&mut self) -> Result<()>{
+        match self.s.send_to(&[0x15], self.peer_addr).await{
+            Ok(_) => {
+                self.connected.fetch_and(false, Ordering::Relaxed);
+                Ok(())
+            },
+            Err(_) => {
+                self.connected.fetch_and(false, Ordering::Relaxed);
+                Err(std::io::Error::new(std::io::ErrorKind::Other , "send disconnect message faild , but connection still closed"))
+            },
+        }
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr>{

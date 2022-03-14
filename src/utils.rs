@@ -1,6 +1,7 @@
 use chrono::prelude::*;
 
 pub const RAKNET_PROTOCOL_VERSION : u8 = 10;
+pub const RAKNET_MTU : u16 = 1500;
 
 pub enum Endian {
     Big,

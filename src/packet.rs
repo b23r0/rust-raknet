@@ -1,4 +1,5 @@
 use std::io::Result;
+use crate::arq::{is_reliable, is_sequenced, is_sequenced_or_ordered};
 use crate::datatype::{RaknetWriter , RaknetReader};
 use crate::utils::Endian;
 
@@ -12,7 +13,12 @@ pub enum PacketID {
     OpenConnectionReply1 = 0x06,
     OpenConnectionRequest2 = 0x07,
     OpenConnectionReply2 = 0x08,
+    Disconnect = 0x15,
     IncompatibleProtocolVersion = 0x19,
+    FrameSetPacketBegin = 0x80,
+    FrameSetPacketEnd = 0x8d,
+    NACK = 0xa0,
+    ACK = 0xc0,
     Unknown = 0xff
 }
 
@@ -25,7 +31,12 @@ pub fn transaction_packet_id(id : u8) -> PacketID {
         0x06 => PacketID::OpenConnectionReply1,
         0x07 => PacketID::OpenConnectionRequest2,
         0x08 => PacketID::OpenConnectionReply2,
+        0x15 => PacketID::Disconnect,
         0x19 => PacketID::IncompatibleProtocolVersion,
+        0x80 => PacketID::FrameSetPacketBegin,
+        0x8d => PacketID::FrameSetPacketEnd,
+        0xa0 => PacketID::NACK,
+        0xc0 => PacketID::ACK,
         _ => PacketID::Unknown
     }
 }
@@ -39,8 +50,13 @@ pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
         PacketID::OpenConnectionReply1 => 0x06,
         PacketID::OpenConnectionRequest2 => 0x07,
         PacketID::OpenConnectionReply2 => 0x08,
+        PacketID::Disconnect => 0x15,
         PacketID::IncompatibleProtocolVersion => 0x19,
         PacketID::Unknown => 0xff,
+        PacketID::FrameSetPacketBegin => 0x80,
+        PacketID::FrameSetPacketEnd => 0x8d,
+        PacketID::NACK => 0xa0,
+        PacketID::ACK => 0xc0,
     }
 }
 
@@ -107,6 +123,35 @@ pub struct IncompatibleProtocolVersion {
     pub server_protocol: u8,
     pub magic: bool,
     pub server_guid: u64,
+}
+
+#[derive(Clone)]
+pub struct FrameSetPacket {
+    pub sequence_number : u32,
+    pub flags : u8 , 
+    pub length_in_bits : u16 ,
+    pub reliable_frame_index : u32,
+    pub sequenced_frame_index : u32, 
+    pub ordered_frame_index : u32,
+    pub order_channel : u8 ,
+    pub compound_size : u32,
+    pub compound_id : u16,
+    pub fragment_index : u32,
+    pub data : Vec<u8>
+}
+
+#[derive(Clone)]
+pub struct NACK {
+    pub record_count: u16,
+    pub single_sequence_number: bool,
+    pub sequences: (u32, u32),
+}
+
+#[derive(Clone)]
+pub struct ACK {
+    pub record_count: u16,
+    pub single_sequence_number: bool,
+    pub sequences: (u32, u32),
 }
 
 pub async fn read_packet_ping(buf : &[u8]) -> Result<PacketUnconnectedPing>{
@@ -255,6 +300,155 @@ pub async fn write_packet_incompatible_protocol_version(packet : &IncompatiblePr
     unwrap_or_return!(cursor.write_u8(packet.server_protocol));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.server_guid, Endian::Big));
+
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
+    let single_sequence_number = unwrap_or_return!(cursor.read_u8());
+    let sequences = {
+        let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
+        if single_sequence_number == 0x01 {
+            (sequence, sequence)
+        } else {
+            let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
+            (sequence, sequence_max)
+        }
+    };
+    Ok(NACK {
+        record_count : record_count,
+        single_sequence_number : single_sequence_number == 0x01,
+        sequences : sequences,
+    })
+}
+
+pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    cursor.write_u16(packet.record_count, Endian::Big).await?;
+    cursor.write_u8(packet.single_sequence_number as u8).await?;
+    cursor.write_u24(packet.sequences.0, Endian::Little).await?;
+    if !packet.single_sequence_number {
+        cursor.write_u24(packet.sequences.1, Endian::Little).await?;
+    }
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
+    let single_sequence_number = unwrap_or_return!(cursor.read_u8());
+    let sequences = {
+        let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
+        if single_sequence_number == 0x01 {
+            (sequence, sequence)
+        } else {
+            let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
+            (sequence, sequence_max)
+        }
+    };
+    Ok(ACK {
+        record_count : record_count,
+        single_sequence_number : single_sequence_number == 0x01,
+        sequences : sequences,
+    })
+}
+
+pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    cursor.write_u16(packet.record_count, Endian::Big).await?;
+    cursor.write_u8(packet.single_sequence_number as u8).await?;
+    cursor.write_u24(packet.sequences.0, Endian::Little).await?;
+    if !packet.single_sequence_number {
+        cursor.write_u24(packet.sequences.1, Endian::Little).await?;
+    }
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn init_packet_frame_set_packet() -> FrameSetPacket {
+    FrameSetPacket{
+        sequence_number: 0,
+        flags: 0,
+        length_in_bits: 0,
+        reliable_frame_index: 0,
+        sequenced_frame_index: 0,
+        ordered_frame_index: 0,
+        order_channel: 0,
+        compound_size: 0,
+        compound_id: 0,
+        fragment_index: 0,
+        data: vec![]
+    }
+}
+
+pub async fn read_packet_frame_set_packet(buf : &[u8]) -> Result<FrameSetPacket>{
+
+    let mut ret = init_packet_frame_set_packet().await;
+
+    let mut cursor = RaknetReader::new(buf.to_vec());
+
+    let _id = cursor.read_u8().await?;
+
+    ret.sequence_number = cursor.read_u24(Endian::Little).await?;
+    ret.flags = cursor.read_u8().await?;
+    ret.length_in_bits = cursor.read_u16(Endian::Big).await?;
+
+    if is_reliable(ret.flags){
+        ret.reliable_frame_index = cursor.read_u24(Endian::Little).await?;
+    }
+    
+    if is_sequenced(ret.flags) {
+        ret.sequenced_frame_index = cursor.read_u24(Endian::Little).await?;
+    }
+    if is_sequenced_or_ordered(ret.flags){
+        ret.ordered_frame_index = cursor.read_u24(Endian::Little).await?;
+        ret.order_channel = cursor.read_u8().await?;
+    }
+
+    //Top 3 bits are reliability type, fourth bit is 1 when the frame is fragmented and part of a compound.
+    //So flags and 1000(b) == is fragmented
+    if (ret.flags & 0x08) != 0 {
+        ret.compound_size = cursor.read_u32(Endian::Big).await?;
+        ret.compound_id = cursor.read_u16(Endian::Big).await?;
+        ret.fragment_index = cursor.read_u32(Endian::Big).await?;
+    }
+
+    let mut buf = vec![0u8 ; ret.length_in_bits as usize].into_boxed_slice();
+    cursor.read(&mut buf).await?;
+    ret.data.append(&mut buf.to_vec());
+    Ok(ret)
+}
+
+pub async fn write_packet_frame_set_packet(packet : &FrameSetPacket) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+
+    cursor.write_u8(0x80).await?;
+
+    cursor.write_u24(packet.sequence_number , Endian::Little).await?;
+    cursor.write_u8(packet.flags).await?;
+    cursor.write_u16(packet.length_in_bits ,Endian::Big).await?;
+
+    if is_reliable(packet.flags){
+        cursor.write_u24(packet.reliable_frame_index, Endian::Little).await?;
+    }
+    
+    if is_sequenced(packet.flags) {
+        cursor.write_u24(packet.sequenced_frame_index ,Endian::Little).await?;
+    }
+    if is_sequenced_or_ordered(packet.flags){
+        cursor.write_u24(packet.ordered_frame_index , Endian::Little).await?;
+        cursor.write_u8(packet.order_channel).await?;
+    }
+
+    //Top 3 bits are reliability type, fourth bit is 1 when the frame is fragmented and part of a compound.
+    //So flags and 1000(b) == is fragmented
+    if (packet.flags & 0x08) != 0 {
+        cursor.write_u32(packet.compound_size , Endian::Big).await?;
+        cursor.write_u16(packet.compound_id , Endian::Big).await?;
+        cursor.write_u32(packet.fragment_index , Endian::Big).await?;
+    }
+    cursor.write(&packet.data.as_slice()).await?;
 
     Ok(cursor.get_raw_payload())
 }

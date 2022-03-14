@@ -42,6 +42,31 @@ impl RaknetWriter {
         }
     }
 
+    pub async fn write_u24(&mut self, v: u32, n: Endian) -> Result<()> {
+        match n {
+            Endian::Big => {
+                let a = v.to_be_bytes();
+                self.buf.put_u8(a[1]);
+                self.buf.put_u8(a[2]);
+                self.buf.put_u8(a[3]);
+            },
+            Endian::Little => {
+                let a = v.to_le_bytes();
+                self.buf.put_u8(a[0]);
+                self.buf.put_u8(a[1]);
+                self.buf.put_u8(a[2]);
+            },
+        }
+        Ok(())
+    }
+
+    pub async fn write_u32(&mut self, v: u32, n: Endian) -> Result<()> {
+        match n {
+            Endian::Big => Ok(self.buf.put_u32(v)),
+            Endian::Little => Ok(self.buf.put_u32_le(v))
+        }
+    }
+
     pub async fn write_i32(&mut self, v: i32, n: Endian) -> Result<()> {
         match n {
             Endian::Big => Ok(self.buf.put_i32(v)),
@@ -138,6 +163,29 @@ impl RaknetReader {
             Endian::Little => Ok(self.buf.get_u16_le()),
         }
     }
+
+    pub async fn read_u24(&mut self , n : Endian) -> Result<u32>{
+        match n {
+            Endian::Big => {
+
+                let a = self.buf.get_u8();
+                let b = self.buf.get_u8();
+                let c = self.buf.get_u8();
+
+                let ret = u32::from_be_bytes([0 , a, b ,c]);
+                Ok(ret)
+            },
+            Endian::Little => {
+                let a = self.buf.get_u8();
+                let b = self.buf.get_u8();
+                let c = self.buf.get_u8();
+
+                let ret = u32::from_le_bytes([a , b , c , 0]);
+                Ok(ret)
+            },
+        }
+    }
+
     pub async fn read_u32(&mut self, n: Endian) -> Result<u32> {
         match n {
             Endian::Big => Ok(self.buf.get_u32()),
@@ -216,7 +264,30 @@ impl RaknetReader {
         self.buf.set_position(self.buf.position() + n);
     }
 
-    pub fn pos(&self) -> u64 {
+    pub fn _pos(&self) -> u64 {
         self.buf.position()
     }
+}
+
+
+#[tokio::test]
+async fn test_u24_encode_decode(){
+
+    let a : u32 = 65535*21; 
+    let b = a.to_le_bytes();
+    let mut reader = RaknetReader::new(b.to_vec());
+
+    let c = reader.read_u24(Endian::Little).await.unwrap();
+
+    assert!(a == c);
+
+    let mut writer = RaknetWriter::new();
+    writer.write_u24(a, Endian::Little).await.unwrap();
+
+    let buf = writer.get_raw_payload();
+    let mut reader = RaknetReader::new(buf);
+
+    let c = reader.read_u24(Endian::Little).await.unwrap();
+
+    assert!(a == c);
 }

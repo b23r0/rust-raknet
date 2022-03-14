@@ -20,9 +20,10 @@ pub struct RaknetListener {
     motd : String,
     socket : Arc<UdpSocket>,
     guid : u64,
+    listened : bool, 
     connection_receiver : Receiver<Arc<RaknetSocket>>,
     connection_sender : Sender<Arc<RaknetSocket>>,
-    connected : Arc<Mutex<HashMap<SocketAddr , Arc<RaknetSocket>>>>,
+    connected : Arc<Mutex<HashMap<SocketAddr , Sender<Vec<u8>>>>>,
     pre_connection_next_status : Arc<Mutex<HashMap<SocketAddr , (PacketID, i64)>>>,
     pre_connection_next_status_check_opened : Arc<AtomicBool>
 }
@@ -51,6 +52,7 @@ impl RaknetListener {
             motd : String::new(),
             socket : Arc::new(s),
             guid : rand::random(),
+            listened : false,
             connection_receiver : connection_receiver,
             connection_sender : connection_sender,
             connected : Arc::new(Mutex::new(HashMap::new())),
@@ -77,6 +79,7 @@ impl RaknetListener {
             motd : String::new(),
             socket : Arc::new(s),
             guid : rand::random(),
+            listened : false,
             connection_receiver : connection_receiver,
             connection_sender : connection_sender,
             connected : Arc::new(Mutex::new(HashMap::new())),
@@ -118,6 +121,8 @@ impl RaknetListener {
         let connected = self.connected.clone();
         let connection_sender = self.connection_sender.clone();
         let motd = self.get_motd().await;
+
+        self.listened = true;
 
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
@@ -241,16 +246,25 @@ impl RaknetListener {
                             socket.send_to(&reply, addr).await.unwrap();
     
                             pre_connection_next_status.remove(&addr);
+
+                            let (sender , receiver) = channel::<Vec<u8>>(10);
     
-                            let s = Arc::new(RaknetSocket::from(&addr, &socket));
+                            let s = Arc::new(RaknetSocket::from(&addr, &socket, receiver));
     
-                            connected.lock().await.insert(addr, s.clone());
+                            connected.lock().await.insert(addr, sender);
                             let _ = connection_sender.send(s).await;
                         },
+                        PacketID::Disconnect => {
+                            let mut connected = connected.lock().await;
+                            if connected.contains_key(&addr){
+                                connected[&addr].send(buf[..size].to_vec()).await.unwrap();
+                                connected.remove(&addr);
+                            }
+                        }
                         _ => {
                             let connected = connected.lock().await;
                             if connected.contains_key(&addr){
-                                connected[&addr].handle_packet(&buf[..size]);
+                                connected[&addr].send(buf[..size].to_vec()).await.unwrap();
                             }
                         },
                     }
@@ -261,7 +275,11 @@ impl RaknetListener {
     }
 
     pub async fn accept(&mut self) -> Result<Arc<RaknetSocket>> {
-        Ok(self.connection_receiver.recv().await.unwrap())
+        if !self.listened{
+            Err(std::io::Error::new(std::io::ErrorKind::Other , "not listen"))
+        }else {
+            Ok(self.connection_receiver.recv().await.unwrap())
+        }
     }
 
     pub async fn set_motd(&mut self , mc_protocol_version : &str , mc_version : &str , guid : u64 ,  game_type : &str ,port : u16 ) {
