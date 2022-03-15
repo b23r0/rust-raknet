@@ -49,3 +49,16 @@ async fn test_connect(){
     assert!(client2.peer_addr().unwrap() == local_addr);
 
 }
+
+/*
+#[tokio::test]
+async fn chore_test(){
+    let mut server = RaknetListener::bind("0.0.0.0:19132".parse().unwrap()).await.unwrap();
+    server.listen().await;
+    let local_addr = server.local_addr().unwrap();
+    loop{
+        let client1 = server.accept().await.unwrap();
+        assert!(client1.local_addr().unwrap() == local_addr);
+    }
+}
+*/

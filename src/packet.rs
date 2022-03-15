@@ -13,12 +13,14 @@ pub enum PacketID {
     OpenConnectionReply1 = 0x06,
     OpenConnectionRequest2 = 0x07,
     OpenConnectionReply2 = 0x08,
+    AlreadyConnected = 0x12,
     Disconnect = 0x15,
     IncompatibleProtocolVersion = 0x19,
     FrameSetPacketBegin = 0x80,
     FrameSetPacketEnd = 0x8d,
     NACK = 0xa0,
     ACK = 0xc0,
+    Connected = 0xf0, //internal id
     Unknown = 0xff
 }
 
@@ -31,6 +33,7 @@ pub fn transaction_packet_id(id : u8) -> PacketID {
         0x06 => PacketID::OpenConnectionReply1,
         0x07 => PacketID::OpenConnectionRequest2,
         0x08 => PacketID::OpenConnectionReply2,
+        0x12 => PacketID::AlreadyConnected,
         0x15 => PacketID::Disconnect,
         0x19 => PacketID::IncompatibleProtocolVersion,
         0x80 => PacketID::FrameSetPacketBegin,
@@ -50,12 +53,14 @@ pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
         PacketID::OpenConnectionReply1 => 0x06,
         PacketID::OpenConnectionRequest2 => 0x07,
         PacketID::OpenConnectionReply2 => 0x08,
+        PacketID::AlreadyConnected => 0x12,
         PacketID::Disconnect => 0x15,
         PacketID::IncompatibleProtocolVersion => 0x19,
         PacketID::Unknown => 0xff,
         PacketID::FrameSetPacketBegin => 0x80,
         PacketID::FrameSetPacketEnd => 0x8d,
         PacketID::NACK => 0xa0,
+        PacketID::Connected => 0xf0,
         PacketID::ACK => 0xc0,
     }
 }
@@ -126,10 +131,16 @@ pub struct IncompatibleProtocolVersion {
 }
 
 #[derive(Clone)]
+pub struct AlreadyConnected {
+    pub magic: bool,
+    pub guid: u64,
+}
+
+#[derive(Clone)]
 pub struct FrameSetPacket {
     pub sequence_number : u32,
     pub flags : u8 , 
-    pub length_in_bits : u16 ,
+    pub length_in_bytes : u16 ,
     pub reliable_frame_index : u32,
     pub sequenced_frame_index : u32, 
     pub ordered_frame_index : u32,
@@ -284,6 +295,23 @@ pub async fn write_packet_connection_open_reply_2(packet : &OpenConnectionReply2
     Ok(cursor.get_raw_payload())
 }
 
+pub async fn _read_packet_already_connected(buf : &[u8]) -> Result<AlreadyConnected>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(AlreadyConnected {
+        magic: unwrap_or_return!(cursor.read_magic()),
+        guid:  unwrap_or_return!(cursor.read_u64(Endian::Big)),
+    })
+}
+
+pub async fn write_packet_already_connected(packet : &AlreadyConnected) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::AlreadyConnected)));
+    unwrap_or_return!(cursor.write_magic());
+    unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
+    Ok(cursor.get_raw_payload())
+}
+
 pub async fn read_packet_incompatible_protocol_version(buf : &[u8]) -> Result<IncompatibleProtocolVersion>{
     let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
@@ -370,7 +398,7 @@ pub async fn init_packet_frame_set_packet() -> FrameSetPacket {
     FrameSetPacket{
         sequence_number: 0,
         flags: 0,
-        length_in_bits: 0,
+        length_in_bytes: 0,
         reliable_frame_index: 0,
         sequenced_frame_index: 0,
         ordered_frame_index: 0,
@@ -380,75 +408,4 @@ pub async fn init_packet_frame_set_packet() -> FrameSetPacket {
         fragment_index: 0,
         data: vec![]
     }
-}
-
-pub async fn read_packet_frame_set_packet(buf : &[u8]) -> Result<FrameSetPacket>{
-
-    let mut ret = init_packet_frame_set_packet().await;
-
-    let mut cursor = RaknetReader::new(buf.to_vec());
-
-    let _id = cursor.read_u8().await?;
-
-    ret.sequence_number = cursor.read_u24(Endian::Little).await?;
-    ret.flags = cursor.read_u8().await?;
-    ret.length_in_bits = cursor.read_u16(Endian::Big).await?;
-
-    if is_reliable(ret.flags){
-        ret.reliable_frame_index = cursor.read_u24(Endian::Little).await?;
-    }
-    
-    if is_sequenced(ret.flags) {
-        ret.sequenced_frame_index = cursor.read_u24(Endian::Little).await?;
-    }
-    if is_sequenced_or_ordered(ret.flags){
-        ret.ordered_frame_index = cursor.read_u24(Endian::Little).await?;
-        ret.order_channel = cursor.read_u8().await?;
-    }
-
-    //Top 3 bits are reliability type, fourth bit is 1 when the frame is fragmented and part of a compound.
-    //So flags and 1000(b) == is fragmented
-    if (ret.flags & 0x08) != 0 {
-        ret.compound_size = cursor.read_u32(Endian::Big).await?;
-        ret.compound_id = cursor.read_u16(Endian::Big).await?;
-        ret.fragment_index = cursor.read_u32(Endian::Big).await?;
-    }
-
-    let mut buf = vec![0u8 ; ret.length_in_bits as usize].into_boxed_slice();
-    cursor.read(&mut buf).await?;
-    ret.data.append(&mut buf.to_vec());
-    Ok(ret)
-}
-
-pub async fn write_packet_frame_set_packet(packet : &FrameSetPacket) -> Result<Vec<u8>>{
-    let mut cursor = RaknetWriter::new();
-
-    cursor.write_u8(0x80).await?;
-
-    cursor.write_u24(packet.sequence_number , Endian::Little).await?;
-    cursor.write_u8(packet.flags).await?;
-    cursor.write_u16(packet.length_in_bits ,Endian::Big).await?;
-
-    if is_reliable(packet.flags){
-        cursor.write_u24(packet.reliable_frame_index, Endian::Little).await?;
-    }
-    
-    if is_sequenced(packet.flags) {
-        cursor.write_u24(packet.sequenced_frame_index ,Endian::Little).await?;
-    }
-    if is_sequenced_or_ordered(packet.flags){
-        cursor.write_u24(packet.ordered_frame_index , Endian::Little).await?;
-        cursor.write_u8(packet.order_channel).await?;
-    }
-
-    //Top 3 bits are reliability type, fourth bit is 1 when the frame is fragmented and part of a compound.
-    //So flags and 1000(b) == is fragmented
-    if (packet.flags & 0x08) != 0 {
-        cursor.write_u32(packet.compound_size , Endian::Big).await?;
-        cursor.write_u16(packet.compound_id , Endian::Big).await?;
-        cursor.write_u32(packet.fragment_index , Endian::Big).await?;
-    }
-    cursor.write(&packet.data.as_slice()).await?;
-
-    Ok(cursor.get_raw_payload())
 }

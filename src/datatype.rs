@@ -264,7 +264,7 @@ impl RaknetReader {
         self.buf.set_position(self.buf.position() + n);
     }
 
-    pub fn _pos(&self) -> u64 {
+    pub fn pos(&self) -> u64 {
         self.buf.position()
     }
 }

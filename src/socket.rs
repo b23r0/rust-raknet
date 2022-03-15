@@ -1,5 +1,5 @@
 use std::{io::Result , net::{SocketAddr}, sync::{Arc}};
-use tokio::{net::UdpSocket, sync::Mutex};
+use tokio::{net::UdpSocket};
 use rand;
 use tokio::sync::mpsc::{Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +38,7 @@ impl RaknetSocket {
                             },
                             _ => {
                                 // handle packet in here
+                                dbg!(p);
                             },
                         }
                         
@@ -164,10 +165,6 @@ impl RaknetSocket {
         };
 
         Ok(pong.time - packet.time)
-    }
-
-    pub fn handle_packet(&self , _buf : &[u8]){
-
     }
 
     pub async fn close(&mut self) -> Result<()>{
