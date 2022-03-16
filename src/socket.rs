@@ -1,10 +1,10 @@
-use std::{io::Result , net::{SocketAddr}, sync::{Arc}};
+use std::{io::{Result, Read} , net::{SocketAddr}, sync::{Arc}};
 use tokio::{net::UdpSocket, sync::Mutex, time::sleep};
 use rand;
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{packet::*, utils::*, arq::{Frame, ACKSet}};
+use crate::{packet::*, utils::*, arq::{Frame, ACKSet, is_sequenced_or_ordered}};
 
 pub struct RaknetSocket{
     local_addr : SocketAddr,
@@ -135,13 +135,12 @@ impl RaknetSocket {
                             },
                             _ => {
                                 // handle packet in here
-                                dbg!(buf.clone());
-                                
                                 if buf[0] >= transaction_packet_id_to_u8(PacketID::FrameSetPacketBegin) && 
                                    buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
 
                                     let mut ackset = ackset.lock().await;
                                     let frame = Frame::deserialize(buf).await;
+
                                     ackset.insert(frame.sequence_number).await;
                                     for i in ackset.get_nack().await{
                                         let nack = NACK{
@@ -153,7 +152,40 @@ impl RaknetSocket {
                                         let buf = write_packet_nack(&nack).await.unwrap(); 
                                         s.send_to(&buf, peer_addr).await.unwrap();
                                     }
+
+                                    for packet in frame.data {
+                                        if !is_sequenced_or_ordered((packet.flags & 254) >> 5){
+
+                                            match transaction_packet_id(packet.data[0]) {
+                                                PacketID::ConnectionRequest => {
+                                                    let packet = read_packet_connection_request(&packet.data.as_slice()).await.unwrap();
+                                                    
+                                                    let packet_reply = ConnectionRequestAccepted{
+                                                        client_address: peer_addr,
+                                                        system_index: 0,
+                                                        request_timestamp: packet.time,
+                                                        accepted_timestamp: cur_timestamp(),
+                                                    };
+
+                                                    let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
+                                                    s.send_to(&buf, peer_addr).await.unwrap();
+                                                    continue;
+                                                },
+                                                PacketID::Disconnect => {
+                                                    connected.fetch_and(false, Ordering::Relaxed);
+                                                    break;
+                                                },
+                                                _ => {
+                                                    dbg!(packet.data);
+                                                },
+                                            }
+                                            
+                                        } else { // handle slicing
+
+                                        }
+                                    }
                                     
+
                                 }
                             },
                         }
@@ -193,7 +225,7 @@ impl RaknetSocket {
                         };
 
                         let buf = write_packet_ack(&packet).await.unwrap();
-                        s.send_to(&buf, peer_addr);
+                        s.send_to(&buf, peer_addr).await.unwrap();
                     }
                 }else{
                     break;

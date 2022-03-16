@@ -50,7 +50,7 @@ async fn test_connect(){
 
 }
 
-/*
+/* 
 #[tokio::test]
 async fn chore_test(){
     let mut server = RaknetListener::bind("0.0.0.0:19132".parse().unwrap()).await.unwrap();

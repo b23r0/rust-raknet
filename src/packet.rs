@@ -13,6 +13,8 @@ pub enum PacketID {
     OpenConnectionReply1 = 0x06,
     OpenConnectionRequest2 = 0x07,
     OpenConnectionReply2 = 0x08,
+    ConnectionRequest = 0x09,
+    ConnectionRequestAccepted = 0x10,
     AlreadyConnected = 0x12,
     Disconnect = 0x15,
     IncompatibleProtocolVersion = 0x19,
@@ -20,7 +22,6 @@ pub enum PacketID {
     FrameSetPacketEnd = 0x8d,
     NACK = 0xa0,
     ACK = 0xc0,
-    Connected = 0xf0, //internal id
     Unknown = 0xff
 }
 
@@ -33,6 +34,8 @@ pub fn transaction_packet_id(id : u8) -> PacketID {
         0x06 => PacketID::OpenConnectionReply1,
         0x07 => PacketID::OpenConnectionRequest2,
         0x08 => PacketID::OpenConnectionReply2,
+        0x09 => PacketID::ConnectionRequest,
+        0x10 => PacketID::ConnectionRequestAccepted,
         0x12 => PacketID::AlreadyConnected,
         0x15 => PacketID::Disconnect,
         0x19 => PacketID::IncompatibleProtocolVersion,
@@ -53,6 +56,8 @@ pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
         PacketID::OpenConnectionReply1 => 0x06,
         PacketID::OpenConnectionRequest2 => 0x07,
         PacketID::OpenConnectionReply2 => 0x08,
+        PacketID::ConnectionRequest => 0x09,
+        PacketID::ConnectionRequestAccepted => 0x10,
         PacketID::AlreadyConnected => 0x12,
         PacketID::Disconnect => 0x15,
         PacketID::IncompatibleProtocolVersion => 0x19,
@@ -60,7 +65,6 @@ pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
         PacketID::FrameSetPacketBegin => 0x80,
         PacketID::FrameSetPacketEnd => 0x8d,
         PacketID::NACK => 0xa0,
-        PacketID::Connected => 0xf0,
         PacketID::ACK => 0xc0,
     }
 }
@@ -121,6 +125,21 @@ pub struct OpenConnectionReply2 {
     pub address: std::net::SocketAddr,
     pub mtu: u16,
     pub encryption_enabled: u8,
+}
+
+#[derive(Clone)]
+pub struct ConnectionRequest {
+    pub guid: u64,
+    pub time: i64,
+    pub use_encryption: u8,
+}
+
+#[derive(Clone)]
+pub struct ConnectionRequestAccepted {
+    pub client_address: std::net::SocketAddr,
+    pub system_index: u16,
+    pub request_timestamp: i64,
+    pub accepted_timestamp: i64,
 }
 
 #[derive(Clone)]
@@ -334,6 +353,7 @@ pub async fn write_packet_incompatible_protocol_version(packet : &IncompatiblePr
 
 pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
     let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
     let single_sequence_number = unwrap_or_return!(cursor.read_u8());
     let sequences = {
@@ -354,6 +374,7 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
 
 pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::NACK)));
     cursor.write_u16(packet.record_count, Endian::Big).await?;
     cursor.write_u8(packet.single_sequence_number as u8).await?;
     cursor.write_u24(packet.sequences.0, Endian::Little).await?;
@@ -365,6 +386,7 @@ pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
 
 pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
     let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
     let single_sequence_number = unwrap_or_return!(cursor.read_u8());
     let sequences = {
@@ -385,12 +407,61 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
 
 pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    cursor.write_u16(packet.record_count, Endian::Big).await?;
-    cursor.write_u8(packet.single_sequence_number as u8).await?;
-    cursor.write_u24(packet.sequences.0, Endian::Little).await?;
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ACK)));
+    unwrap_or_return!(cursor.write_u16(packet.record_count, Endian::Big));
+    unwrap_or_return!(cursor.write_u8(packet.single_sequence_number as u8));
+    unwrap_or_return!(cursor.write_u24(packet.sequences.0, Endian::Little));
     if !packet.single_sequence_number {
-        cursor.write_u24(packet.sequences.1, Endian::Little).await?;
+        unwrap_or_return!(cursor.write_u24(packet.sequences.1, Endian::Little));
     }
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_connection_request(buf : &[u8]) -> Result<ConnectionRequest>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(ConnectionRequest {
+        guid: unwrap_or_return!(cursor.read_u64(Endian::Big)),
+        time: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+        use_encryption: unwrap_or_return!(cursor.read_u8()),
+    })
+}
+
+pub async fn write_packet_connection_request(packet : &ConnectionRequest) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectionRequest)));
+    unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
+    unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
+    unwrap_or_return!(cursor.write_u8(packet.use_encryption));
+
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_connection_request_accepted(buf : &[u8]) -> Result<ConnectionRequestAccepted>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(ConnectionRequestAccepted {
+        client_address: unwrap_or_return!(cursor.read_address()),
+        system_index: unwrap_or_return!(cursor.read_u16(Endian::Big)),
+        request_timestamp: {
+            cursor.next(((buf.len() - 16) - cursor.pos() as usize) as u64);
+            unwrap_or_return!(cursor.read_i64(Endian::Big))
+        },
+        accepted_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+    })
+}
+
+pub async fn write_packet_connection_request_accepted(packet : &ConnectionRequestAccepted) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectionRequestAccepted)));
+    unwrap_or_return!(cursor.write_address(packet.client_address));
+    unwrap_or_return!(cursor.write_u16(packet.system_index, Endian::Big));
+    for _ in 0..10 {
+        cursor.write_u8(0x06).await?;
+    }
+    unwrap_or_return!(cursor.write_i64(packet.request_timestamp, Endian::Big));
+    unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
+
     Ok(cursor.get_raw_payload())
 }
 
