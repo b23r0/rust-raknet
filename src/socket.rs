@@ -1,10 +1,10 @@
-use std::{io::{Result, Read} , net::{SocketAddr}, sync::{Arc}};
+use std::{io::{Result} , net::{SocketAddr}, sync::{Arc}};
 use tokio::{net::UdpSocket, sync::Mutex, time::sleep};
 use rand;
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{packet::*, utils::*, arq::{Frame, ACKSet, is_sequenced_or_ordered}};
+use crate::{packet::*, utils::*, arq::{ACKSet, is_sequenced_or_ordered, Reliability, FrameSetPacket}};
 
 pub struct RaknetSocket{
     local_addr : SocketAddr,
@@ -18,7 +18,7 @@ pub struct RaknetSocket{
 }
 
 impl RaknetSocket {
-    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>>) -> Self {
+    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16) -> Self {
         let ret = RaknetSocket{
             peer_addr : addr.clone(),
             local_addr : s.local_addr().unwrap(),
@@ -26,7 +26,7 @@ impl RaknetSocket {
             sender : None,
             connected : Arc::new(AtomicBool::new(true)),
             ackset : Arc::new(Mutex::new(ACKSet::new())),
-            _mtu : RAKNET_MTU,
+            _mtu : mtu,
             _guid : rand::random()
         };
         ret.start_receiver(receiver);
@@ -46,7 +46,7 @@ impl RaknetSocket {
         let packet = OpenConnectionRequest1{
             magic: true,
             protocol_version: RAKNET_PROTOCOL_VERSION,
-            mtu_size: RAKNET_MTU,
+            mtu_size: RAKNET_CLIENT_MTU,
         };
 
         let buf = write_packet_connection_open_request_1(&packet).await.unwrap();
@@ -114,7 +114,7 @@ impl RaknetSocket {
             sender : None,
             connected : Arc::new(AtomicBool::new(true)),
             ackset : Arc::new(Mutex::new(ACKSet::new())),
-            _mtu : RAKNET_MTU,
+            _mtu : RAKNET_CLIENT_MTU,
             _guid : guid
         })
     }
@@ -139,7 +139,7 @@ impl RaknetSocket {
                                    buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
 
                                     let mut ackset = ackset.lock().await;
-                                    let frame = Frame::deserialize(buf).await;
+                                    let frame = FrameSetPacket::deserialize(buf).await;
 
                                     ackset.insert(frame.sequence_number).await;
                                     for i in ackset.get_nack().await{
@@ -153,36 +153,37 @@ impl RaknetSocket {
                                         s.send_to(&buf, peer_addr).await.unwrap();
                                     }
 
-                                    for packet in frame.data {
-                                        if !is_sequenced_or_ordered((packet.flags & 254) >> 5){
+                                    if !is_sequenced_or_ordered((frame.flags & 254) >> 5){
 
-                                            match transaction_packet_id(packet.data[0]) {
-                                                PacketID::ConnectionRequest => {
-                                                    let packet = read_packet_connection_request(&packet.data.as_slice()).await.unwrap();
-                                                    
-                                                    let packet_reply = ConnectionRequestAccepted{
-                                                        client_address: peer_addr,
-                                                        system_index: 0,
-                                                        request_timestamp: packet.time,
-                                                        accepted_timestamp: cur_timestamp(),
-                                                    };
+                                        match transaction_packet_id(frame.data[0]) {
+                                            PacketID::ConnectionRequest => {
+                                                let packet = read_packet_connection_request(&frame.data.as_slice()).await.unwrap();
+                                                
+                                                let packet_reply = ConnectionRequestAccepted{
+                                                    client_address: peer_addr,
+                                                    system_index: 0,
+                                                    request_timestamp: packet.time,
+                                                    accepted_timestamp: cur_timestamp(),
+                                                };
 
-                                                    let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                                                    s.send_to(&buf, peer_addr).await.unwrap();
-                                                    continue;
-                                                },
-                                                PacketID::Disconnect => {
-                                                    connected.fetch_and(false, Ordering::Relaxed);
-                                                    break;
-                                                },
-                                                _ => {
-                                                    dbg!(packet.data);
-                                                },
-                                            }
-                                            
-                                        } else { // handle slicing
-
+                                                let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
+                                                let _reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                                
+                                                
+                                                //s.send_to(&buf, peer_addr).await.unwrap();
+                                                continue;
+                                            },
+                                            PacketID::Disconnect => {
+                                                connected.fetch_and(false, Ordering::Relaxed);
+                                                break;
+                                            },
+                                            _ => {
+                                                dbg!(frame.data);
+                                            },
                                         }
+                                        
+                                    } else { // handle slicing
+
                                     }
                                     
 

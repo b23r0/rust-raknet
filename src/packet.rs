@@ -1,5 +1,4 @@
 use std::io::Result;
-use crate::arq::{is_reliable, is_sequenced, is_sequenced_or_ordered};
 use crate::datatype::{RaknetWriter , RaknetReader};
 use crate::utils::Endian;
 
@@ -156,21 +155,6 @@ pub struct AlreadyConnected {
 }
 
 #[derive(Clone)]
-pub struct FrameSetPacket {
-    pub sequence_number : u32,
-    pub flags : u8 , 
-    pub length_in_bytes : u16 ,
-    pub reliable_frame_index : u32,
-    pub sequenced_frame_index : u32, 
-    pub ordered_frame_index : u32,
-    pub order_channel : u8 ,
-    pub compound_size : u32,
-    pub compound_id : u16,
-    pub fragment_index : u32,
-    pub data : Vec<u8>
-}
-
-#[derive(Clone)]
 pub struct NACK {
     pub record_count: u16,
     pub single_sequence_number: bool,
@@ -230,7 +214,9 @@ pub async fn read_packet_connection_open_request_1(buf : &[u8]) -> Result<OpenCo
     Ok(OpenConnectionRequest1 {
         magic: unwrap_or_return!(cursor.read_magic()),
         protocol_version: unwrap_or_return!(cursor.read_u8()),
-        mtu_size: (buf.len() + 29).try_into().unwrap(),
+        //28 udp overhead
+        //1492 - 46 +18 + 28 == 1492
+        mtu_size: (buf.len() + 28).try_into().unwrap(),
     })
 }
 
@@ -239,8 +225,8 @@ pub async fn write_packet_connection_open_request_1(packet : &OpenConnectionRequ
     unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionRequest1)));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u8(packet.protocol_version));
-    unwrap_or_return!(cursor
-        .write(vec![0; (packet.mtu_size as usize) - (cursor.pos() as usize + 28) - 1].as_slice()));
+    //The MTU sent in the response appears to be somewhere around the size of this padding + 46 (28 udp overhead, 1 packet id, 16 magic, 1 protocol version). This padding seems to be used to discover the maximum packet size the network can handle.
+    unwrap_or_return!(cursor.write(vec![0; (packet.mtu_size as usize) - 46].as_slice()));
 
     Ok(cursor.get_raw_payload())
 }
@@ -463,20 +449,4 @@ pub async fn write_packet_connection_request_accepted(packet : &ConnectionReques
     unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
 
     Ok(cursor.get_raw_payload())
-}
-
-pub async fn init_packet_frame_set_packet() -> FrameSetPacket {
-    FrameSetPacket{
-        sequence_number: 0,
-        flags: 0,
-        length_in_bytes: 0,
-        reliable_frame_index: 0,
-        sequenced_frame_index: 0,
-        ordered_frame_index: 0,
-        order_channel: 0,
-        compound_size: 0,
-        compound_id: 0,
-        fragment_index: 0,
-        data: vec![]
-    }
 }

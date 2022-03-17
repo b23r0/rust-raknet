@@ -1,7 +1,8 @@
 use chrono::prelude::*;
 
 pub const RAKNET_PROTOCOL_VERSION : u8 = 10;
-pub const RAKNET_MTU : u16 = 1500;
+//the MTU is minecraft bedrock 1.18.2 give me
+pub const RAKNET_CLIENT_MTU : u16 = 1492;
 
 pub enum Endian {
     Big,
@@ -14,7 +15,7 @@ pub fn cur_timestamp() -> i64{
     dt.timestamp()
 }
 
-pub fn is_timeout(time : i64, timeout : u64) -> bool{
+pub fn _is_timeout(time : i64, timeout : u64) -> bool{
     let cur = cur_timestamp();
     cur >= time + timeout as i64
 }

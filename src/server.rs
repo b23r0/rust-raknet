@@ -2,17 +2,13 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::channel;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
 use std::{io::Result, net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
-use tokio::time::sleep;
 use rand;
-use std::sync::atomic::{AtomicBool, Ordering};
 use crate::socket::*;
 use crate::packet::*;
 use crate::utils::*;
 
-const RAKNET_TIMEOUT: u64 = 30;
 const SERVER_NAME : &str = "Rust Raknet Server";
 const MAX_CONNECTION : u64 = 99999;
 
@@ -213,7 +209,7 @@ impl RaknetListener {
 
                         let (sender , receiver) = channel::<Vec<u8>>(10);
 
-                        let s = Arc::new(RaknetSocket::from(&addr, &socket, receiver));
+                        let s = Arc::new(RaknetSocket::from(&addr, &socket, receiver , req.mtu));
 
                         connected.insert(addr, sender);
                         let _ = connection_sender.send(s).await;

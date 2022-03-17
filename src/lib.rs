@@ -3,6 +3,7 @@ mod packet;
 mod utils;
 mod datatype;
 mod arq;
+mod fragment;
 pub mod server;
 
 pub use crate::server::*;
@@ -50,7 +51,7 @@ async fn test_connect(){
 
 }
 
-/* 
+/*
 #[tokio::test]
 async fn chore_test(){
     let mut server = RaknetListener::bind("0.0.0.0:19132".parse().unwrap()).await.unwrap();
