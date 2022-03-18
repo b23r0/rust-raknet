@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{datatype::*, utils::*, fragment::FragmentQ};
+use crate::{datatype::*, utils::*, fragment::FragmentQ, packet::ACK};
 
 
 // if client send 1,2,3,4,5,6 to server ,then server maybe received
@@ -347,7 +347,7 @@ struct RecvQ{
     max_order_index : u32,
     old_order_index : u32,
     packets : HashMap<u32 , FrameSetPacket>,
-    fragment_queue : FragmentQ,
+    fragment_queue : FragmentQ
 }
 
 impl RecvQ {
@@ -362,25 +362,31 @@ impl RecvQ {
 
     pub fn insert(&mut self , frame : FrameSetPacket) {
         if frame.is_fragment() {
+
+            if frame.ordered_frame_index >= self.max_order_index {
+                self.max_order_index = frame.ordered_frame_index + 1;
+            }
+            
             self.fragment_queue.insert(frame);
 
             for i in self.fragment_queue.flush(){
                 self.packets.insert(i.ordered_frame_index , i);
             }
-        }else {
-            if self.packets.contains_key(&frame.ordered_frame_index) {
-                return;
-            }
-
-            if self.old_order_index > frame.ordered_frame_index {
-                return;
-            }
-
-            if frame.ordered_frame_index >= self.max_order_index {
-                self.max_order_index = frame.ordered_frame_index + 1;
-            }
-            self.packets.insert(frame.ordered_frame_index, frame);
+            return;
         }
+
+        if self.packets.contains_key(&frame.ordered_frame_index) {
+            return;
+        }
+
+        if self.old_order_index > frame.ordered_frame_index {
+            return;
+        }
+
+        if frame.ordered_frame_index >= self.max_order_index {
+            self.max_order_index = frame.ordered_frame_index + 1;
+        }
+        self.packets.insert(frame.ordered_frame_index, frame);
 
     }
 
@@ -402,6 +408,79 @@ impl RecvQ {
     }
 }
 
+struct SendQ{
+    pub current_sequence_number : u32,
+    //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
+    pub packets : HashMap<u32, (FrameSetPacket , bool , i64)>,
+    //packet : FrameSetPacket , last_tick : i64 
+    pub repeat_request : HashMap<u32, (FrameSetPacket , i64)>,
+}
+
+impl SendQ{
+    pub fn new() -> Self{
+        Self{
+            current_sequence_number : 0,
+            packets: HashMap::new(),
+            repeat_request: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, frame : FrameSetPacket , tick :i64){
+        if frame.sequence_number == self.current_sequence_number {
+            self.packets.insert(frame.sequence_number, (frame , false , tick));
+            self.current_sequence_number += 1;
+        }
+    }
+
+    pub fn ack(&mut self , sequence_number : u32){
+        if self.packets.contains_key(&sequence_number) {
+            self.packets.remove(&sequence_number);
+        }
+
+        if self.repeat_request.contains_key(&sequence_number) {
+            self.repeat_request.remove(&sequence_number);
+        }
+    }
+
+    pub fn tick(&mut self , tick : i64){
+        let keys : Vec<u32> = self.packets.keys().cloned().collect();
+
+        for i in keys{
+            let p = self.packets.get_mut(&i).unwrap();
+            
+            if tick - p.2 >= 1000 && !self.repeat_request.contains_key(&i){
+                self.repeat_request.insert(i, (p.0.clone() ,tick));
+            }
+        }
+    }
+
+    pub fn flush(&mut self) -> Vec<FrameSetPacket> {
+
+        let mut ret = vec![];
+
+        if !self.repeat_request.is_empty(){
+            for i in self.repeat_request.keys(){
+                ret.push(self.repeat_request.get(i).unwrap().0.clone());
+            }
+            return ret;
+        }
+
+        if !self.packets.is_empty(){
+
+            let mut keys : Vec<u32> = self.packets.keys().cloned().collect();
+            keys.sort();
+
+            for i in keys{
+                let p = self.packets.get_mut(&i).unwrap();
+                if !p.1{
+                    ret.push(p.0.clone());
+                    p.1 = true;
+                }
+            }
+        }
+        return ret;
+    }
+}
 
 #[tokio::test]
 async fn test_get_acks(){
@@ -411,6 +490,7 @@ async fn test_get_acks(){
     ackset.insert(1).await;
     ackset.insert(2).await;
     ackset.insert(4).await;
+    ackset.insert(2).await;
 
     assert!(ackset.get_nack().await == vec![3]);
 
@@ -512,4 +592,91 @@ async fn test_frame_serialize_deserialize(){
     let a = FrameSetPacket::deserialize(p.clone()).await;
     assert!(a.serialize().await == p);
 
+}
+
+#[tokio::test]
+async fn test_recvq(){
+    let mut r = RecvQ::new();
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
+    p.sequence_number = 0;
+    p.ordered_frame_index = 0;
+    r.insert(p);
+
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
+    p.sequence_number = 1;
+    p.ordered_frame_index = 1;
+    r.insert(p);
+
+    let ret = r.flush();
+    assert!(ret.len() == 2);
+}
+
+#[tokio::test]
+async fn test_recvq_fragment(){
+    let mut r = RecvQ::new();
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![1]);
+    p.flags |= 8;
+    p.sequence_number = 0;
+    p.ordered_frame_index = 0;
+    p.compound_id = 1;
+    p.compound_size = 3;
+    p.fragment_index = 1;
+    r.insert(p);
+
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![2]);
+    p.flags |= 8;
+    p.sequence_number = 1;
+    p.ordered_frame_index = 1;
+    p.compound_id = 1;
+    p.compound_size = 3;
+    p.fragment_index = 2;
+    r.insert(p);
+
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![3]);
+    p.flags |= 8;
+    p.sequence_number = 2;
+    p.ordered_frame_index = 2;
+    p.compound_id = 1;
+    p.compound_size = 3;
+    p.fragment_index = 3;
+    r.insert(p);
+
+    let ret = r.flush();
+    assert!(ret.len() == 1);
+    assert!(ret[0].data == vec![1,2,3]);
+}
+
+#[tokio::test]
+async fn test_sendq(){
+    let mut s = SendQ::new();
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
+    p.sequence_number = 0;
+    s.insert(p, 0);
+
+    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
+    p.sequence_number = 1;
+    s.insert(p, 50);
+
+    let ret = s.flush();
+    assert!(ret.len() == 2);
+
+    s.tick(1000);
+
+    let ret = s.flush();
+    assert!(ret.len() == 1);
+
+    s.tick(1050);
+
+    let ret = s.flush();
+    assert!(ret.len() == 2);
+
+    s.ack(0);
+
+    let ret = s.flush();
+    assert!(ret.len() == 1);
+
+    s.ack(1);
+
+    let ret = s.flush();
+    assert!(ret.len() == 0);
 }
