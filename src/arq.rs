@@ -134,7 +134,7 @@ impl FrameSetPacket {
         }
     }
 
-    pub async fn deserialize(buf : Vec<u8>) -> Self{
+    pub async fn deserialize(buf : Vec<u8>) -> (Self , bool){
 
         let mut reader = RaknetReader::new(buf);
 
@@ -187,7 +187,7 @@ impl FrameSetPacket {
         reader.read(&mut buf).await.unwrap();
         ret.data.append(&mut buf.to_vec());
 
-        ret
+        (ret , reader.pos() == buf.len() as u64)
     }
 
     pub async fn serialize(&self) -> Vec<u8>{
@@ -267,6 +267,121 @@ impl FrameSetPacket {
         //body
         ret += self.data.len();
         ret
+    }
+}
+
+pub struct FrameVec{
+    pub id : u8, 
+    pub sequence_number : u32,
+    pub frames : Vec<FrameSetPacket>
+}
+
+impl FrameVec {
+    pub async fn new(buf : Vec<u8>) -> Self{
+
+        let mut ret = Self{
+            id: 0,
+            sequence_number: 0,
+            frames: vec![],
+        };
+
+        let size = buf.len();
+
+        let mut reader = RaknetReader::new(buf);
+
+        ret.id = reader.read_u8().await.unwrap();
+        ret.sequence_number = reader.read_u24(Endian::Little).await.unwrap();
+
+        while reader.pos() < size.try_into().unwrap(){
+            let mut frame = FrameSetPacket{
+                id : 0,
+                sequence_number: 0,
+                flags: 0,
+                length_in_bytes: 0,
+                reliable_frame_index: 0,
+                sequenced_frame_index: 0,
+                ordered_frame_index: 0,
+                order_channel: 0,
+                compound_size: 0,
+                compound_id: 0,
+                fragment_index: 0,
+                data: vec![]
+            };
+    
+            frame.flags = reader.read_u8().await.unwrap();
+    
+            //Top 3 bits are reliability type
+            //224 = 1110 0000(b)
+            let real_flag = (frame.flags & 224) >> 5;
+            frame.length_in_bytes = reader.read_u16(Endian::Big).await.unwrap()/8;
+        
+            if is_reliable(real_flag){
+                frame.reliable_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+            }
+            
+            if is_sequenced(real_flag) {
+                frame.sequenced_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+            }
+            if is_sequenced_or_ordered(real_flag){
+                frame.ordered_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+                frame.order_channel = reader.read_u8().await.unwrap();
+            }
+        
+            //fourth bit is 1 when the frame is fragmented and part of a compound.
+            //flags and 8 [0000 1000(b)] == if fragmented
+            if (frame.flags & 8) != 0 {
+                frame.compound_size = reader.read_u32(Endian::Big).await.unwrap();
+                frame.compound_id = reader.read_u16(Endian::Big).await.unwrap();
+                frame.fragment_index = reader.read_u32(Endian::Big).await.unwrap();
+            }
+        
+            let mut buf = vec![0u8 ; frame.length_in_bytes as usize].into_boxed_slice();
+            reader.read(&mut buf).await.unwrap();
+            frame.data.append(&mut buf.to_vec());
+            ret.frames.push(frame);
+        }
+
+        ret
+    }
+
+    pub async fn serialize(&self) -> Vec<u8>{
+        let mut writer = RaknetWriter::new();
+
+        writer.write_u8(self.id).await.unwrap();
+        writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
+        
+        for frame in &self.frames{
+            writer.write_u8(frame.flags).await.unwrap();
+            writer.write_u16(frame.length_in_bytes*8 ,Endian::Big).await.unwrap();
+        
+            //Top 3 bits are reliability type
+            //224 = 1110 0000(b)
+            let real_flag = (frame.flags & 224) >> 5;
+    
+            if is_reliable(real_flag){
+                writer.write_u24(frame.reliable_frame_index, Endian::Little).await.unwrap();
+            }
+            
+            if is_sequenced(real_flag) {
+                writer.write_u24(frame.sequenced_frame_index ,Endian::Little).await.unwrap();
+            }
+            if is_sequenced_or_ordered(real_flag){
+                writer.write_u24(frame.ordered_frame_index , Endian::Little).await.unwrap();
+                writer.write_u8(frame.order_channel).await.unwrap();
+            }
+        
+            //fourth bit is 1 when the frame is fragmented and part of a compound.
+            //flags and 8 [0000 1000(b)] == if fragmented
+            if (frame.flags & 0x08) != 0 {
+                writer.write_u32(frame.compound_size , Endian::Big).await.unwrap();
+                writer.write_u16(frame.compound_id , Endian::Big).await.unwrap();
+                writer.write_u32(frame.fragment_index , Endian::Big).await.unwrap();
+            }
+            writer.write(&frame.data.as_slice()).await.unwrap();
+        }
+
+
+        writer.get_raw_payload()
     }
 }
 
@@ -590,7 +705,7 @@ async fn test_frame_serialize_deserialize(){
     ].to_vec();
 
     let a = FrameSetPacket::deserialize(p.clone()).await;
-    assert!(a.serialize().await == p);
+    assert!(a.0.serialize().await == p);
 
 }
 

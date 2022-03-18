@@ -156,121 +156,130 @@ impl RaknetSocket {
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
-                match receiver.recv().await{
+                let buf = match receiver.recv().await{
                     Some(buf) => {
-                        match transaction_packet_id(buf[0]){
-                            PacketID::Disconnect => {
-                                connected.fetch_and(false, Ordering::Relaxed);
-                                break;
-                            },
-                            _ => {
-                                // handle packet in here
-                                if buf[0] >= transaction_packet_id_to_u8(PacketID::FrameSetPacketBegin) && 
-                                   buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
-
-                                    let mut ackset = ackset.lock().await;
-                                    let frame = FrameSetPacket::deserialize(buf).await;
-
-                                    ackset.insert(frame.sequence_number).await;
-                                    for i in ackset.get_nack().await{
-                                        let nack = NACK{
-                                            record_count: 1,
-                                            single_sequence_number: true,
-                                            sequences: (i , i),
-                                        };
-
-                                        let buf = write_packet_nack(&nack).await.unwrap(); 
-                                        s.send_to(&buf, peer_addr).await.unwrap();
-                                    }
-
-                                    if !is_sequenced_or_ordered((frame.flags & 254) >> 5){
-
-                                        match transaction_packet_id(frame.data[0]) {
-                                            PacketID::ConnectionRequest => {
-                                                let packet = read_packet_connection_request(&frame.data.as_slice()).await.unwrap();
-                                                
-                                                let packet_reply = ConnectionRequestAccepted{
-                                                    client_address: peer_addr,
-                                                    system_index: 0,
-                                                    request_timestamp: packet.time,
-                                                    accepted_timestamp: cur_timestamp(),
-                                                };
-
-                                                let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
-                                                
-                                                
-                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
-                                                continue;
-                                            },
-                                            PacketID::ConnectionRequestAccepted => {
-                                                let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
-                                                
-                                                let packet_reply = NewIncomingConnection{
-                                                    server_address: local_addr,
-                                                    request_timestamp: packet.request_timestamp,
-                                                    accepted_timestamp: cur_timestamp(),
-                                                };
-
-                                                let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
-                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
-                                                
-                                                
-                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
-                                                continue;
-                                            }
-                                            PacketID::NewIncomingConnection => {}
-                                            PacketID::ConnectedPing => {
-                                                let packet = read_packet_connected_ping(&frame.data.as_slice()).await.unwrap();
-                                                
-                                                let packet_reply = ConnectedPong{
-                                                    client_timestamp: packet.client_timestamp,
-                                                    server_timestamp: cur_timestamp(),
-                                                };
-
-                                                let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
-                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
-                                                
-                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
-                                                continue;
-                                            }
-                                            PacketID::ConnectedPong => {}
-                                            PacketID::Disconnect => {
-                                                connected.fetch_and(false, Ordering::Relaxed);
-                                                break;
-                                            },
-                                            _ => {
-                                                match user_data_sender.lock().await.send(frame.data).await{
-                                                    Ok(_) => {},
-                                                    Err(_) => {
-                                                        connected.fetch_and(false, Ordering::Relaxed);
-                                                        break;
-                                                    },
-                                                };
-                                            },
-                                        }
-                                    } else { 
-                                        let mut recvq = recvq.lock().await;
-                                        recvq.insert(frame);
-                                        for f in recvq.flush(){
-                                            match user_data_sender.lock().await.send(f.data).await{
-                                                Ok(_) => {},
-                                                Err(_) => {
-                                                    connected.fetch_and(false, Ordering::Relaxed);
-                                                    break;
-                                                },
-                                            };
-                                        }
-                                    }
-                                }
-                            },
-                        }
+                        buf
                     },
                     None => {
                         connected.fetch_and(false, Ordering::Relaxed);
                         break;
                     },
-                };  
+                };
+
+                if transaction_packet_id(buf[0]) == PacketID::Disconnect{
+                    connected.fetch_and(false, Ordering::Relaxed);
+                    break;
+                }
+
+                if buf[0] == transaction_packet_id_to_u8(PacketID::ACK){
+                    //handle ack
+                }
+
+                if buf[0] == transaction_packet_id_to_u8(PacketID::NACK){
+                    //handle nack
+                }
+
+                // handle packet in here
+                if buf[0] >= transaction_packet_id_to_u8(PacketID::FrameSetPacketBegin) && 
+                   buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
+
+                    let mut ackset = ackset.lock().await;
+                    let frames = FrameVec::new(buf.clone()).await;
+
+                    for frame in frames.frames{
+                        ackset.insert(frame.sequence_number).await;
+                        for i in ackset.get_nack().await{
+                            let nack = NACK{
+                                record_count: 1,
+                                single_sequence_number: true,
+                                sequences: (i , i),
+                            };
+
+                            let buf = write_packet_nack(&nack).await.unwrap(); 
+                            s.send_to(&buf, peer_addr).await.unwrap();
+                        }
+
+                        if !is_sequenced_or_ordered((frame.flags & 254) >> 5){
+
+                            match transaction_packet_id(frame.data[0]) {
+                                PacketID::ConnectionRequest => {
+                                    let packet = read_packet_connection_request(&frame.data.as_slice()).await.unwrap();
+                                    
+                                    let packet_reply = ConnectionRequestAccepted{
+                                        client_address: peer_addr,
+                                        system_index: 0,
+                                        request_timestamp: packet.time,
+                                        accepted_timestamp: cur_timestamp(),
+                                    };
+
+                                    let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
+                                    let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                    
+                                    
+                                    sendq.lock().await.insert(reply, cur_timestamp_millis());
+                                    continue;
+                                },
+                                PacketID::ConnectionRequestAccepted => {
+                                    let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
+                                    
+                                    let packet_reply = NewIncomingConnection{
+                                        server_address: local_addr,
+                                        request_timestamp: packet.request_timestamp,
+                                        accepted_timestamp: cur_timestamp(),
+                                    };
+
+                                    let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
+                                    let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                    
+                                    
+                                    sendq.lock().await.insert(reply, cur_timestamp_millis());
+                                    continue;
+                                }
+                                PacketID::NewIncomingConnection => {}
+                                PacketID::ConnectedPing => {
+                                    let packet = read_packet_connected_ping(&frame.data.as_slice()).await.unwrap();
+                                    
+                                    let packet_reply = ConnectedPong{
+                                        client_timestamp: packet.client_timestamp,
+                                        server_timestamp: cur_timestamp(),
+                                    };
+
+                                    let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
+                                    let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                    
+                                    sendq.lock().await.insert(reply, cur_timestamp_millis());
+                                    continue;
+                                }
+                                PacketID::ConnectedPong => {}
+                                PacketID::Disconnect => {
+                                    connected.fetch_and(false, Ordering::Relaxed);
+                                    break;
+                                },
+                                _ => {
+                                    match user_data_sender.lock().await.send(frame.data).await{
+                                        Ok(_) => {},
+                                        Err(_) => {
+                                            connected.fetch_and(false, Ordering::Relaxed);
+                                            break;
+                                        },
+                                    };
+                                },
+                            }
+                        } else { 
+                            let mut recvq = recvq.lock().await;
+                            recvq.insert(frame);
+                            for f in recvq.flush(){
+                                match user_data_sender.lock().await.send(f.data).await{
+                                    Ok(_) => {},
+                                    Err(_) => {
+                                        connected.fetch_and(false, Ordering::Relaxed);
+                                        break;
+                                    },
+                                };
+                            }
+                        }
+                    }
+                }
             }
         });
     }
@@ -382,7 +391,8 @@ impl RaknetSocket {
 
             for i in 0..compound_size {
                 let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, buf[(max*i) as usize..(max*i+compound_size) as usize].to_vec());
-                frame.flags |= 8; // set fragment
+                // set fragment
+                frame.flags |= 8;
                 frame.sequence_number = self.sequence_number;
                 frame.ordered_frame_index = self.ordered_frame_index;
                 frame.compound_size = compound_size as u32;
