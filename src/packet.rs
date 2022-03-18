@@ -5,8 +5,10 @@ use crate::utils::Endian;
 #[warn(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PacketID {
+    ConnectedPing = 0x00,
     UnconnectedPing1 = 0x01,
     UnconnectedPing2 = 0x02,
+    ConnectedPong = 0x03,
     UnconnectedPong = 0x1c,
     OpenConnectionRequest1 = 0x05,
     OpenConnectionReply1 = 0x06,
@@ -15,6 +17,7 @@ pub enum PacketID {
     ConnectionRequest = 0x09,
     ConnectionRequestAccepted = 0x10,
     AlreadyConnected = 0x12,
+    NewIncomingConnection = 0x13,
     Disconnect = 0x15,
     IncompatibleProtocolVersion = 0x19,
     FrameSetPacketBegin = 0x80,
@@ -26,8 +29,10 @@ pub enum PacketID {
 
 pub fn transaction_packet_id(id : u8) -> PacketID {
     match id{
+        0x00 => PacketID::ConnectedPing,
         0x01 => PacketID::UnconnectedPing1,
         0x02 => PacketID::UnconnectedPing2,
+        0x03 => PacketID::ConnectedPong,
         0x1c => PacketID::UnconnectedPong,
         0x05 => PacketID::OpenConnectionRequest1,
         0x06 => PacketID::OpenConnectionReply1,
@@ -36,6 +41,7 @@ pub fn transaction_packet_id(id : u8) -> PacketID {
         0x09 => PacketID::ConnectionRequest,
         0x10 => PacketID::ConnectionRequestAccepted,
         0x12 => PacketID::AlreadyConnected,
+        0x13 => PacketID::NewIncomingConnection,
         0x15 => PacketID::Disconnect,
         0x19 => PacketID::IncompatibleProtocolVersion,
         0x80 => PacketID::FrameSetPacketBegin,
@@ -48,8 +54,10 @@ pub fn transaction_packet_id(id : u8) -> PacketID {
 
 pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
     match packetid{
+        PacketID::ConnectedPing => 0x00,
         PacketID::UnconnectedPing1 => 0x01,
         PacketID::UnconnectedPing2 => 0x02,
+        PacketID::ConnectedPong => 0x03,
         PacketID::UnconnectedPong => 0x1c,
         PacketID::OpenConnectionRequest1 => 0x05,
         PacketID::OpenConnectionReply1 => 0x06,
@@ -58,6 +66,7 @@ pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
         PacketID::ConnectionRequest => 0x09,
         PacketID::ConnectionRequestAccepted => 0x10,
         PacketID::AlreadyConnected => 0x12,
+        PacketID::NewIncomingConnection => 0x13,
         PacketID::Disconnect => 0x15,
         PacketID::IncompatibleProtocolVersion => 0x19,
         PacketID::Unknown => 0xff,
@@ -80,6 +89,11 @@ macro_rules! unwrap_or_return {
 }
 
 #[derive(Clone)]
+pub struct ConnectedPing {
+    pub client_timestamp: i64,
+}
+
+#[derive(Clone)]
 pub struct PacketUnconnectedPing {
     pub time: i64,
     pub magic: bool,
@@ -92,6 +106,12 @@ pub struct PacketUnconnectedPong {
     pub guid: u64,
     pub magic: bool,
     pub motd: String,
+}
+
+#[derive(Clone)]
+pub struct ConnectedPong {
+    pub client_timestamp: i64,
+    pub server_timestamp: i64,
 }
 
 #[derive(Clone)]
@@ -137,6 +157,13 @@ pub struct ConnectionRequest {
 pub struct ConnectionRequestAccepted {
     pub client_address: std::net::SocketAddr,
     pub system_index: u16,
+    pub request_timestamp: i64,
+    pub accepted_timestamp: i64,
+}
+
+#[derive(Clone)]
+pub struct NewIncomingConnection {
+    pub server_address: std::net::SocketAddr,
     pub request_timestamp: i64,
     pub accepted_timestamp: i64,
 }
@@ -448,5 +475,64 @@ pub async fn write_packet_connection_request_accepted(packet : &ConnectionReques
     unwrap_or_return!(cursor.write_i64(packet.request_timestamp, Endian::Big));
     unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
 
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_new_incomming_connection(buf : &[u8]) -> Result<NewIncomingConnection>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(NewIncomingConnection {
+        server_address: unwrap_or_return!(cursor.read_address()),
+        request_timestamp: {
+            cursor.next(((buf.len() - 16) - cursor.pos() as usize) as u64);
+            unwrap_or_return!(cursor.read_i64(Endian::Big))
+        },
+        accepted_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+    })
+}
+
+pub async fn write_packet_new_incomming_connection(packet : &NewIncomingConnection) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::NewIncomingConnection)));
+    unwrap_or_return!(cursor.write_address(packet.server_address));
+    for _ in 0..10 {
+        unwrap_or_return!(cursor.write_u8(0x06));
+    }
+    unwrap_or_return!(cursor.write_i64(packet.request_timestamp, Endian::Big));
+    unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
+
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_connected_ping(buf : &[u8]) -> Result<ConnectedPing>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(ConnectedPing {
+        client_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+    })
+}
+
+pub async fn write_packet_connected_ping(packet : &ConnectedPing) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectedPing)));
+    unwrap_or_return!(cursor.write_i64(packet.client_timestamp, Endian::Big));
+
+    Ok(cursor.get_raw_payload())
+}
+
+pub async fn read_packet_connected_pong(buf : &[u8]) -> Result<ConnectedPong>{
+    let mut cursor = RaknetReader::new(buf.to_vec());
+    unwrap_or_return!(cursor.read_u8());
+    Ok(ConnectedPong {
+        client_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+        server_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+    })
+}
+
+pub async fn write_packet_connected_pong(packet : &ConnectedPong) -> Result<Vec<u8>>{
+    let mut cursor = RaknetWriter::new();
+    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectedPong)));
+    unwrap_or_return!(cursor.write_i64(packet.client_timestamp, Endian::Big));
+    unwrap_or_return!(cursor.write_i64(packet.server_timestamp, Endian::Big));
     Ok(cursor.get_raw_payload())
 }

@@ -1,32 +1,49 @@
 use std::{io::{Result} , net::{SocketAddr}, sync::{Arc}};
-use tokio::{net::UdpSocket, sync::Mutex, time::sleep};
+use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::sleep};
 use rand;
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{packet::*, utils::*, arq::{ACKSet, is_sequenced_or_ordered, Reliability, FrameSetPacket}};
+use crate::{packet::*, utils::*, arq::*};
 
 pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
     s : Arc<UdpSocket>,
+    user_data_sender : Arc<Mutex<Sender<Vec<u8>>>>,
+    user_data_receiver : Receiver<Vec<u8>>,
+    sequence_number : u32,
+    ordered_frame_index : u32,
+    compound_id : u16,
+    recvq : Arc<Mutex<RecvQ>>,
+    sendq : Arc<Mutex<SendQ>>,
     sender : Option<Sender<Vec<u8>>>,
     connected : Arc<AtomicBool>,
     ackset : Arc<Mutex<ACKSet>>,
-    _mtu : u16,
-    _guid : u64
+    mtu : u16,
+    _guid : u64,
 }
 
 impl RaknetSocket {
     pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16) -> Self {
+
+        let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
+
         let ret = RaknetSocket{
             peer_addr : addr.clone(),
             local_addr : s.local_addr().unwrap(),
             s: s.clone(),
+            user_data_sender : Arc::new(Mutex::new(user_data_sender)),
+            user_data_receiver : user_data_receiver,
+            sequence_number : 0,
+            ordered_frame_index : 0,
+            compound_id : 0,
+            recvq : Arc::new(Mutex::new(RecvQ::new())),
+            sendq : Arc::new(Mutex::new(SendQ::new())),
             sender : None,
             connected : Arc::new(AtomicBool::new(true)),
             ackset : Arc::new(Mutex::new(ACKSet::new())),
-            _mtu : mtu,
+            mtu,
             _guid : rand::random()
         };
         ret.start_receiver(receiver);
@@ -107,14 +124,23 @@ impl RaknetSocket {
             Err(e) => return Err(e),
         };
 
+        let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
+
         Ok(RaknetSocket{
             peer_addr : addr.clone(),
             local_addr : s.local_addr().unwrap(),
             s: Arc::new(s),
+            user_data_sender : Arc::new(Mutex::new(user_data_sender)),
+            user_data_receiver : user_data_receiver,
+            sequence_number : 0,
+            ordered_frame_index : 0,
+            compound_id : 0,
+            recvq : Arc::new(Mutex::new(RecvQ::new())),
+            sendq : Arc::new(Mutex::new(SendQ::new())),
             sender : None,
             connected : Arc::new(AtomicBool::new(true)),
             ackset : Arc::new(Mutex::new(ACKSet::new())),
-            _mtu : RAKNET_CLIENT_MTU,
+            mtu : RAKNET_CLIENT_MTU,
             _guid : guid
         })
     }
@@ -124,6 +150,10 @@ impl RaknetSocket {
         let ackset = self.ackset.clone();
         let s = self.s.clone();
         let peer_addr = self.peer_addr.clone();
+        let local_addr = self.local_addr.clone();
+        let sendq = self.sendq.clone();
+        let user_data_sender = self.user_data_sender.clone();
+        let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
                 match receiver.recv().await{
@@ -167,30 +197,74 @@ impl RaknetSocket {
                                                 };
 
                                                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                                                let _reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
                                                 
                                                 
-                                                //s.send_to(&buf, peer_addr).await.unwrap();
+                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
                                                 continue;
                                             },
+                                            PacketID::ConnectionRequestAccepted => {
+                                                let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
+                                                
+                                                let packet_reply = NewIncomingConnection{
+                                                    server_address: local_addr,
+                                                    request_timestamp: packet.request_timestamp,
+                                                    accepted_timestamp: cur_timestamp(),
+                                                };
+
+                                                let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
+                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                                
+                                                
+                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
+                                                continue;
+                                            }
+                                            PacketID::NewIncomingConnection => {}
+                                            PacketID::ConnectedPing => {
+                                                let packet = read_packet_connected_ping(&frame.data.as_slice()).await.unwrap();
+                                                
+                                                let packet_reply = ConnectedPong{
+                                                    client_timestamp: packet.client_timestamp,
+                                                    server_timestamp: cur_timestamp(),
+                                                };
+
+                                                let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
+                                                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                                                
+                                                sendq.lock().await.insert(reply, cur_timestamp_millis());
+                                                continue;
+                                            }
+                                            PacketID::ConnectedPong => {}
                                             PacketID::Disconnect => {
                                                 connected.fetch_and(false, Ordering::Relaxed);
                                                 break;
                                             },
                                             _ => {
-                                                dbg!(frame.data);
+                                                match user_data_sender.lock().await.send(frame.data).await{
+                                                    Ok(_) => {},
+                                                    Err(_) => {
+                                                        connected.fetch_and(false, Ordering::Relaxed);
+                                                        break;
+                                                    },
+                                                };
                                             },
                                         }
-                                        
-                                    } else { // handle slicing
-
+                                    } else { 
+                                        let mut recvq = recvq.lock().await;
+                                        recvq.insert(frame);
+                                        for f in recvq.flush(){
+                                            match user_data_sender.lock().await.send(f.data).await{
+                                                Ok(_) => {},
+                                                Err(_) => {
+                                                    connected.fetch_and(false, Ordering::Relaxed);
+                                                    break;
+                                                },
+                                            };
+                                        }
                                     }
-                                    
-
                                 }
                             },
                         }
-                        
                     },
                     None => {
                         connected.fetch_and(false, Ordering::Relaxed);
@@ -206,9 +280,14 @@ impl RaknetSocket {
         let ackset = self.ackset.clone();
         let s = self.s.clone();
         let peer_addr = self.peer_addr.clone();
+        let sendq = self.sendq.clone();
         tokio::spawn(async move {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
+
+                if !connected.fetch_and(true, Ordering::Relaxed){
+                    break;
+                }
 
                 // flush ack
                 if connected.fetch_and(true, Ordering::Relaxed){
@@ -230,6 +309,12 @@ impl RaknetSocket {
                     }
                 }else{
                     break;
+                }
+                
+                let mut sendq = sendq.lock().await;
+                //flush sendq
+                for f in sendq.flush(){
+                    s.send_to(f.serialize().await.as_slice(), peer_addr).await.unwrap();
                 }
             }
         });
@@ -274,6 +359,50 @@ impl RaknetSocket {
             Err(_) => {
                 self.connected.fetch_and(false, Ordering::Relaxed);
                 Err(std::io::Error::new(std::io::ErrorKind::Other , "send disconnect message faild , but connection still closed"))
+            },
+        }
+    }
+
+    pub async fn send(&mut self , buf : &[u8]) ->Result<()> {
+
+        // 55 = max framesetpacket length(27) + udp overhead(28)
+        if buf.len() < (self.mtu - 55).into() {
+            let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, buf.to_vec());
+            frame.sequence_number = self.sequence_number;
+            frame.ordered_frame_index = self.ordered_frame_index;
+            self.sequence_number += 1;
+            self.ordered_frame_index += 1;
+            self.sendq.lock().await.insert(frame, cur_timestamp_millis());
+        } else {
+            let max = self.mtu - 55;
+            let mut compound_size = buf.len() as u16 / max;
+            if buf.len() as u16 % max != 0 {
+                compound_size += 1;
+            }
+
+            for i in 0..compound_size {
+                let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, buf[(max*i) as usize..(max*i+compound_size) as usize].to_vec());
+                frame.flags |= 8; // set fragment
+                frame.sequence_number = self.sequence_number;
+                frame.ordered_frame_index = self.ordered_frame_index;
+                frame.compound_size = compound_size as u32;
+                frame.compound_id = self.compound_id;
+                frame.fragment_index = i as u32;
+                self.sendq.lock().await.insert(frame, cur_timestamp_millis());
+                self.sequence_number += 1;
+            }
+            self.compound_id += 1;
+            self.ordered_frame_index += 1;
+        }
+
+        Ok(())
+    }
+
+    pub async fn recv(&mut self) -> Result<Vec<u8>> {
+        match self.user_data_receiver.recv().await{
+            Some(p) => Ok(p),
+            None => {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "recv packet faild , maybe is conntection closed"))
             },
         }
     }

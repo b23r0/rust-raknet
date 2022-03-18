@@ -343,7 +343,7 @@ impl ACKSet {
     }
 }
 
-struct RecvQ{
+pub struct RecvQ{
     max_order_index : u32,
     old_order_index : u32,
     packets : HashMap<u32 , FrameSetPacket>,
@@ -366,7 +366,7 @@ impl RecvQ {
             if frame.ordered_frame_index >= self.max_order_index {
                 self.max_order_index = frame.ordered_frame_index + 1;
             }
-            
+
             self.fragment_queue.insert(frame);
 
             for i in self.fragment_queue.flush(){
@@ -408,7 +408,7 @@ impl RecvQ {
     }
 }
 
-struct SendQ{
+pub struct SendQ{
     pub current_sequence_number : u32,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
     pub packets : HashMap<u32, (FrameSetPacket , bool , i64)>,
