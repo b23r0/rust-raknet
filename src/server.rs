@@ -17,8 +17,8 @@ pub struct RaknetListener {
     socket : Arc<UdpSocket>,
     guid : u64,
     listened : bool, 
-    connection_receiver : Receiver<Arc<RaknetSocket>>,
-    connection_sender : Sender<Arc<RaknetSocket>>,
+    connection_receiver : Receiver<RaknetSocket>,
+    connection_sender : Sender<RaknetSocket>,
     connected : Arc<Mutex<HashMap<SocketAddr , Sender<Vec<u8>>>>>
 }
 
@@ -33,7 +33,7 @@ impl RaknetListener {
             },
         };
 
-        let (connection_sender ,connection_receiver) = channel::<Arc<RaknetSocket>>(10);
+        let (connection_sender ,connection_receiver) = channel::<RaknetSocket>(10);
 
         Ok(Self {
             motd : String::new(),
@@ -57,7 +57,7 @@ impl RaknetListener {
             },
         };
 
-        let (connection_sender ,connection_receiver) = channel::<Arc<RaknetSocket>>(10);
+        let (connection_sender ,connection_receiver) = channel::<RaknetSocket>(10);
         
         Ok(Self {
             motd : String::new(),
@@ -209,7 +209,7 @@ impl RaknetListener {
 
                         let (sender , receiver) = channel::<Vec<u8>>(10);
 
-                        let s = Arc::new(RaknetSocket::from(&addr, &socket, receiver , req.mtu));
+                        let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
 
                         connected.insert(addr, sender);
                         let _ = connection_sender.send(s).await;
@@ -233,7 +233,7 @@ impl RaknetListener {
         });
     }
 
-    pub async fn accept(&mut self) -> Result<Arc<RaknetSocket>> {
+    pub async fn accept(&mut self) -> Result<RaknetSocket> {
         if !self.listened{
             Err(std::io::Error::new(std::io::ErrorKind::Other , "not listen"))
         }else {

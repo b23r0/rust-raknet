@@ -43,12 +43,14 @@ async fn test_connect(){
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
-        let client1 = server.accept().await.unwrap();
+        let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
+        client1.send(&[1,2,3]).await.unwrap();
     });
-    let client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
-
+    let buf = client2.recv().await.unwrap();
+    assert!(buf == vec![1,2,3]);
 }
 
 /*

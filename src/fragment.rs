@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::arq::{FrameSetPacket, Reliability, transaction_reliability_id};
+use crate::arq::{FrameSetPacket, transaction_reliability_id};
 
 struct Fragment{
     pub flags : u8,

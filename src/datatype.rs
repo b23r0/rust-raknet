@@ -135,7 +135,7 @@ impl RaknetWriter {
         self.buf
     }
 
-    pub fn pos(&self) -> u64 {
+    pub fn _pos(&self) -> u64 {
         self.buf.len() as u64
     }
 }

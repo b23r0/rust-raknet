@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{datatype::*, utils::*, fragment::FragmentQ, packet::ACK};
+use crate::{datatype::*, utils::*, fragment::FragmentQ};
 
 
 // if client send 1,2,3,4,5,6 to server ,then server maybe received
@@ -122,7 +122,7 @@ impl FrameSetPacket {
             id : 0,
             sequence_number: 0,
             flags: flag,
-            length_in_bytes: 0,
+            length_in_bytes: data.len() as u16,
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
             ordered_frame_index: 0,
@@ -134,7 +134,7 @@ impl FrameSetPacket {
         }
     }
 
-    pub async fn deserialize(buf : Vec<u8>) -> (Self , bool){
+    pub async fn _deserialize(buf : Vec<u8>) -> (Self , bool){
 
         let mut reader = RaknetReader::new(buf);
 
@@ -193,7 +193,9 @@ impl FrameSetPacket {
     pub async fn serialize(&self) -> Vec<u8>{
         let mut writer = RaknetWriter::new();
 
-        writer.write_u8(self.id).await.unwrap();
+        let id = 0x80 | 4;
+
+        writer.write_u8(id).await.unwrap();
         writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
         
         writer.write_u8(self.flags).await.unwrap();
@@ -231,11 +233,11 @@ impl FrameSetPacket {
         (self.flags & 0x08) != 0
     }
 
-    pub fn reliable(&self) -> Reliability{
+    pub fn _reliable(&self) -> Reliability{
         transaction_reliability_id((self.flags & 224) >> 5)
     }
 
-    pub fn size(&self) -> usize{
+    pub fn _size(&self) -> usize{
         let mut ret = 0;
         // id
         ret += 1;
@@ -344,10 +346,12 @@ impl FrameVec {
         ret
     }
 
-    pub async fn serialize(&self) -> Vec<u8>{
+    pub async fn _serialize(&self) -> Vec<u8>{
         let mut writer = RaknetWriter::new();
 
-        writer.write_u8(self.id).await.unwrap();
+        let id = 0x80 | 4 | 8;
+
+        writer.write_u8(id).await.unwrap();
         writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
         
         for frame in &self.frames{
@@ -386,35 +390,35 @@ impl FrameVec {
 }
 
 pub struct ACKSet{
-    max : u32,
-    min : u32,
+    max_sequence_number : u32,
+    min_sequence_number : u32,
     nack : Vec<u32>
 }
 
 impl ACKSet {
     pub fn new() -> Self{
         ACKSet{
-            max : 0,
-            min : 0,
+            max_sequence_number : 0,
+            min_sequence_number : 0,
             nack : vec![]
         }
     }
     pub async fn insert(&mut self, s : u32) {
         self.nack.retain(|x| s != *x);
 
-        if s == self.max + 1 {
-            self.max = s;
+        if s == self.max_sequence_number + 1 {
+            self.max_sequence_number = s;
         } else {
             // old packet
-            if s <= self.max {
+            if s <= self.max_sequence_number {
                 return;
             }
 
             // nack
-            for i in self.max + 1..s{
+            for i in self.max_sequence_number + 1..s{
                 self.nack.push(i);
             }
-            self.max = s;
+            self.max_sequence_number = s;
         }
     }
 
@@ -424,7 +428,7 @@ impl ACKSet {
 
     pub async fn get_ack(&mut self) -> Vec<(u32 , u32)> {
 
-        let mut ret = vec![(self.min , self.max)];
+        let mut ret = vec![(self.min_sequence_number , self.max_sequence_number)];
 
         self.nack.sort();
 
@@ -451,9 +455,9 @@ impl ACKSet {
         ret
     }
 
-    pub async fn reset(&mut self) {
-        self.max = 0;
-        self.min = 0;
+    pub async fn _reset(&mut self) {
+        self.max_sequence_number = 0;
+        self.min_sequence_number = 0;
         self.nack.clear();
     }
 }
@@ -547,6 +551,14 @@ impl SendQ{
         }
     }
 
+    pub fn nack(&mut self , sequence_number : u32 , tick : i64){
+        if self.packets.contains_key(&sequence_number){
+            let p = self.packets.get(&sequence_number).unwrap();
+            self.repeat_request.insert(p.0.sequence_number, (p.0.clone() ,tick));
+            self.packets.remove(&sequence_number);
+        }
+    }
+
     pub fn ack(&mut self , sequence_number : u32){
         if self.packets.contains_key(&sequence_number) {
             self.packets.remove(&sequence_number);
@@ -563,6 +575,7 @@ impl SendQ{
         for i in keys{
             let p = self.packets.get_mut(&i).unwrap();
             
+            // RTO = 1000ms
             if tick - p.2 >= 1000 && !self.repeat_request.contains_key(&i){
                 self.repeat_request.insert(i, (p.0.clone() ,tick));
             }
@@ -613,7 +626,7 @@ async fn test_get_acks(){
 
     assert!(ackset.get_nack().await == vec![]);
 
-    ackset.reset().await;
+    ackset._reset().await;
 
     let mut ackset = ACKSet::new();
     ackset.insert(0).await;
@@ -625,7 +638,7 @@ async fn test_get_acks(){
 
     assert!(acks == vec![(0,2), (4,4)]);
 
-    ackset.reset().await;
+    ackset._reset().await;
 
     ackset.insert(0).await;
     ackset.insert(1).await;
@@ -636,7 +649,7 @@ async fn test_get_acks(){
 
     assert!(acks == vec![(0,2), (6,6)]);
 
-    ackset.reset().await;
+    ackset._reset().await;
 
     ackset.insert(0).await;
     ackset.insert(1).await;
@@ -650,7 +663,7 @@ async fn test_get_acks(){
 
     assert!(acks == vec![(0,2), (5,5) , (8,8)]);
 
-    ackset.reset().await;
+    ackset._reset().await;
 
     ackset.insert(0).await;
     ackset.insert(1).await;
@@ -704,7 +717,7 @@ async fn test_frame_serialize_deserialize(){
         0,
     ].to_vec();
 
-    let a = FrameSetPacket::deserialize(p.clone()).await;
+    let a = FrameSetPacket::_deserialize(p.clone()).await;
     assert!(a.0.serialize().await == p);
 
 }
