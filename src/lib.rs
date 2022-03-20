@@ -53,15 +53,15 @@ async fn test_connect(){
     assert!(buf == vec![1,2,3]);
 }
 
-/*
+/* 
 #[tokio::test]
-async fn chore_test(){
+async fn chore(){
     let mut server = RaknetListener::bind("0.0.0.0:19132".parse().unwrap()).await.unwrap();
     server.listen().await;
-    let local_addr = server.local_addr().unwrap();
     loop{
-        let client1 = server.accept().await.unwrap();
-        assert!(client1.local_addr().unwrap() == local_addr);
+        let mut client1 = server.accept().await.unwrap();
+        let ret = client1.recv().await.unwrap();
+        dbg!(ret);
     }
 }
 */

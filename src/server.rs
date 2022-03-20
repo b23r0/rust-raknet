@@ -160,8 +160,10 @@ impl RaknetListener {
                         let packet = crate::packet::OpenConnectionReply1 {
                             magic: true,
                             guid: guid,
-                            use_encryption: 0x00, // Make sure this is false, it is vital for the login sequence to continue
-                            mtu_size: req.mtu_size, // see Open Connection Request 1
+                            // Make sure this is false, it is vital for the login sequence to continue
+                            use_encryption: 0x00, 
+                            // see Open Connection Request 1
+                            mtu_size: req.mtu_size, 
                         };
                         
                         let reply = match write_packet_connection_open_reply_1(&packet).await{
