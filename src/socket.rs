@@ -310,6 +310,8 @@ impl RaknetSocket {
                     let mut ackset = ackset.lock().await;
                     let frames = FrameVec::new(buf.clone()).await;
 
+                    println!("{:?}" , buf);
+
                     for frame in frames.frames{
                         ackset.insert(frame.sequence_number).await;
                         for i in ackset.get_nack().await{
