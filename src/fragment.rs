@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::arq::{FrameSetPacket, transaction_reliability_id};
+use crate::arq::{FrameSetPacket, Reliability};
 
 struct Fragment{
     pub flags : u8,
@@ -46,16 +46,19 @@ impl Fragment {
 
         keys.sort();
 
+        let sequence_number = self.frames[keys.last().unwrap()].sequence_number;
+
         for i in keys{
             buf.append(&mut self.frames[&i].data.clone());
         }
 
         let mut ret = FrameSetPacket::new(
-            transaction_reliability_id((self.flags & 224) >> 5) , 
+            Reliability::from((self.flags & 224) >> 5) , 
             buf
         );
 
         ret.ordered_frame_index = self.ordered_frame_index;
+        ret.sequence_number = sequence_number;
         ret
     }
 }

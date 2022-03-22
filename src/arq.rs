@@ -2,18 +2,6 @@ use std::collections::HashMap;
 
 use crate::{datatype::*, utils::*, fragment::FragmentQ};
 
-
-// if client send 1,2,3,4,5,6 to server ,then server maybe received
-// UNRELIABLE - 5, 1, 6
-// UNRELIABLE_SEQUENCED - 5 (6 was lost in transit, 1,2,3,4 arrived later than 5)
-// RELIABLE - 5, 1, 4, 6, 2, 3
-// RELIABLE_ORDERED - 1, 2, 3, 4, 5, 6
-// RELIABLE_SEQUENCED - 5, 6 (1,2,3,4 arrived later than 5)
-
-//With the UNRELIABLE_SEQUENCED transmission method, the game data does not need to arrive in every packet to avoid packet loss and retransmission, 
-//because the new packet represents the new state, and the new state can be used directly, without waiting for the old packet to arrive. 
-// TCP retransmission of lost packets will take a long time (1.5 times the ping value), causing network delay
-
 #[derive(Clone)]
 pub enum Reliability {
     // Unreliable packets are sent by straight UDP. They may arrive out of order, or not at all. This is best for data that is unimportant, or data that you send very frequently so even if some packets are missed newer packets will compensate.
@@ -40,62 +28,35 @@ pub enum Reliability {
     Unknown = 0xff,
 }
 
-pub fn is_reliable(flags : u8) -> bool {
-    match transaction_reliability_id(flags){
-        Reliability::Reliable => true,
-        Reliability::ReliableOrdered => true, 
-        Reliability::ReliableSequenced => true,
-        _ => false
+impl Reliability {
+    pub fn to_u8(&self) -> u8{
+        match self{
+            Reliability::Unreliable => 0x00,
+            Reliability::UnreliableSequenced => 0x01,
+            Reliability::Reliable => 0x02,
+            Reliability::ReliableOrdered => 0x03,
+            Reliability::ReliableSequenced => 0x04,
+            Reliability::UnreliableAckReceipt => 0x05,
+            Reliability::ReliableAckReceipt => 0x06,
+            Reliability::ReliableOrderedAckReceipt => 0x07,
+            Reliability::Unknown => 0xff,
+        }
+    }
+
+    pub fn from(flags : u8) -> Self{
+        match flags{
+            0x00 => Reliability::Unreliable,
+            0x01 => Reliability::UnreliableSequenced,
+            0x02 => Reliability::Reliable,
+            0x03 => Reliability::ReliableOrdered,
+            0x04 => Reliability::ReliableSequenced,
+            0x05 => Reliability::UnreliableAckReceipt,
+            0x06 => Reliability::ReliableAckReceipt,
+            0x07 => Reliability::ReliableOrderedAckReceipt,
+            _ => Reliability::Unknown
+        }
     }
 }
-
-pub fn is_sequenced_or_ordered(flags : u8) -> bool {
-
-    match transaction_reliability_id(flags){
-        Reliability::UnreliableSequenced => true,
-        Reliability::ReliableOrdered => true, 
-        Reliability::ReliableSequenced => true,
-        _ => false
-    }
-}
-
-pub fn is_sequenced(flags : u8) -> bool {
-
-    match transaction_reliability_id(flags){
-        Reliability::UnreliableSequenced => true,
-        Reliability::ReliableSequenced => true, 
-        _ => false
-    }
-}
-
-pub fn transaction_reliability_id(id : u8) -> Reliability {
-    match id{
-        0x00 => Reliability::Unreliable,
-        0x01 => Reliability::UnreliableSequenced,
-        0x02 => Reliability::Reliable,
-        0x03 => Reliability::ReliableOrdered,
-        0x04 => Reliability::ReliableSequenced,
-        0x05 => Reliability::UnreliableAckReceipt,
-        0x06 => Reliability::ReliableAckReceipt,
-        0x07 => Reliability::ReliableOrderedAckReceipt,
-        _ => Reliability::Unknown
-    }
-}
-
-pub fn transaction_reliability_id_to_u8(packetid : Reliability) -> u8 {
-    match packetid{
-        Reliability::Unreliable => 0x00,
-        Reliability::UnreliableSequenced => 0x01,
-        Reliability::Reliable => 0x02,
-        Reliability::ReliableOrdered => 0x03,
-        Reliability::ReliableSequenced => 0x04,
-        Reliability::UnreliableAckReceipt => 0x05,
-        Reliability::ReliableAckReceipt => 0x06,
-        Reliability::ReliableOrderedAckReceipt => 0x07,
-        Reliability::Unknown => 0xff,
-    }
-}
-
 
 #[derive(Clone)]
 pub struct FrameSetPacket {
@@ -116,7 +77,7 @@ pub struct FrameSetPacket {
 impl FrameSetPacket {
 
     pub fn new(r: Reliability , data : Vec<u8>) -> FrameSetPacket{
-        let flag = transaction_reliability_id_to_u8(r) << 5;
+        let flag = r.to_u8() << 5;
 
         FrameSetPacket{
             id : 0,
@@ -156,21 +117,20 @@ impl FrameSetPacket {
         ret.id = reader.read_u8().await.unwrap();
         ret.sequence_number = reader.read_u24(Endian::Little).await.unwrap();
 
-        ret.flags = reader.read_u8().await.unwrap();
-
         //Top 3 bits are reliability type
         //224 = 1110 0000(b)
-        let real_flag = (ret.flags & 224) >> 5;
+        ret.flags = reader.read_u8().await.unwrap();
+
         ret.length_in_bytes = reader.read_u16(Endian::Big).await.unwrap()/8;
     
-        if is_reliable(real_flag){
+        if ret.is_reliable(){
             ret.reliable_frame_index = reader.read_u24(Endian::Little).await.unwrap();
         }
         
-        if is_sequenced(real_flag) {
+        if ret.is_sequenced() {
             ret.sequenced_frame_index = reader.read_u24(Endian::Little).await.unwrap();
         }
-        if is_sequenced_or_ordered(real_flag){
+        if ret.is_ordered(){
             ret.ordered_frame_index = reader.read_u24(Endian::Little).await.unwrap();
             ret.order_channel = reader.read_u8().await.unwrap();
         }
@@ -198,21 +158,19 @@ impl FrameSetPacket {
         writer.write_u8(id).await.unwrap();
         writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
         
+        //Top 3 bits are reliability type
+        //224 = 1110 0000(b)
         writer.write_u8(self.flags).await.unwrap();
         writer.write_u16(self.length_in_bytes*8 ,Endian::Big).await.unwrap();
     
-        //Top 3 bits are reliability type
-        //224 = 1110 0000(b)
-        let real_flag = (self.flags & 224) >> 5;
-
-        if is_reliable(real_flag){
+        if self.is_reliable(){
             writer.write_u24(self.reliable_frame_index, Endian::Little).await.unwrap();
         }
         
-        if is_sequenced(real_flag) {
+        if self.is_sequenced() {
             writer.write_u24(self.sequenced_frame_index ,Endian::Little).await.unwrap();
         }
-        if is_sequenced_or_ordered(real_flag){
+        if self.is_ordered(){
             writer.write_u24(self.ordered_frame_index , Endian::Little).await.unwrap();
             writer.write_u8(self.order_channel).await.unwrap();
         }
@@ -233,8 +191,38 @@ impl FrameSetPacket {
         (self.flags & 16) != 0
     }
 
-    pub fn _reliable(&self) -> Reliability{
-        transaction_reliability_id((self.flags & 224) >> 5)
+    pub fn is_reliable(&self) -> bool {
+        match Reliability::from((self.flags & 224) >> 5){
+            Reliability::Reliable => true,
+            Reliability::ReliableOrdered => true, 
+            Reliability::ReliableSequenced => true,
+            Reliability::ReliableAckReceipt => true,
+            Reliability::ReliableOrderedAckReceipt => true,
+            _ => false
+        }
+    }
+
+    pub fn is_ordered(&self) -> bool {
+
+        match Reliability::from((self.flags & 224) >> 5){
+            Reliability::UnreliableSequenced => true,
+            Reliability::ReliableOrdered => true, 
+            Reliability::ReliableSequenced => true,
+            Reliability::ReliableOrderedAckReceipt => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_sequenced(&self) -> bool {
+    
+        match Reliability::from((self.flags & 224) >> 5){
+            Reliability::UnreliableSequenced => true,
+            Reliability::ReliableSequenced => true, 
+            _ => false
+        }
+    }
+    pub fn reliability(&self) -> Reliability{
+        Reliability::from((self.flags & 224) >> 5)
     }
 
     pub fn _size(&self) -> usize{
@@ -248,17 +236,15 @@ impl FrameSetPacket {
         // length_in_bits
         ret += 2;
 
-        let real_flag = (self.flags & 224) >> 5;
-
-        if is_reliable(real_flag) {
+        if self.is_reliable() {
             // reliable frame index
             ret += 3;
         }
-        if is_sequenced(real_flag) {
+        if self.is_sequenced() {
             // sequenced frame index
             ret += 3;
         }
-        if is_sequenced_or_ordered(real_flag) {
+        if self.is_ordered() {
             //ordered frame index + order channel
             ret += 4;
         }
@@ -310,21 +296,20 @@ impl FrameVec {
                 data: vec![]
             };
     
-            frame.flags = reader.read_u8().await.unwrap();
-    
             //Top 3 bits are reliability type
             //224 = 1110 0000(b)
-            let real_flag = (frame.flags & 224) >> 5;
+            frame.flags = reader.read_u8().await.unwrap();
+
             frame.length_in_bytes = reader.read_u16(Endian::Big).await.unwrap()/8;
         
-            if is_reliable(real_flag){
+            if frame.is_reliable(){
                 frame.reliable_frame_index = reader.read_u24(Endian::Little).await.unwrap();
             }
             
-            if is_sequenced(real_flag) {
+            if frame.is_sequenced() {
                 frame.sequenced_frame_index = reader.read_u24(Endian::Little).await.unwrap();
             }
-            if is_sequenced_or_ordered(real_flag){
+            if frame.is_ordered(){
                 frame.ordered_frame_index = reader.read_u24(Endian::Little).await.unwrap();
                 frame.order_channel = reader.read_u8().await.unwrap();
             }
@@ -355,21 +340,20 @@ impl FrameVec {
         writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
         
         for frame in &self.frames{
+
+            //Top 3 bits are reliability type
+            //224 = 1110 0000(b)
             writer.write_u8(frame.flags).await.unwrap();
             writer.write_u16(frame.length_in_bytes*8 ,Endian::Big).await.unwrap();
         
-            //Top 3 bits are reliability type
-            //224 = 1110 0000(b)
-            let real_flag = (frame.flags & 224) >> 5;
-    
-            if is_reliable(real_flag){
+            if frame.is_reliable(){
                 writer.write_u24(frame.reliable_frame_index, Endian::Little).await.unwrap();
             }
             
-            if is_sequenced(real_flag) {
+            if frame.is_sequenced() {
                 writer.write_u24(frame.sequenced_frame_index ,Endian::Little).await.unwrap();
             }
-            if is_sequenced_or_ordered(real_flag){
+            if frame.is_ordered(){
                 writer.write_u24(frame.ordered_frame_index , Endian::Little).await.unwrap();
                 writer.write_u8(frame.order_channel).await.unwrap();
             }
@@ -403,7 +387,7 @@ impl ACKSet {
             nack : vec![]
         }
     }
-    pub async fn insert(&mut self, s : u32) {
+    pub fn insert(&mut self, s : u32) {
         self.nack.retain(|x| s != *x);
 
         if s == self.max_sequence_number + 1 {
@@ -422,11 +406,11 @@ impl ACKSet {
         }
     }
 
-    pub async fn get_nack(&self) -> Vec<u32>{
+    pub fn get_nack(&self) -> Vec<u32>{
         self.nack.clone()
     }
 
-    pub async fn get_ack(&mut self) -> Vec<(u32 , u32)> {
+    pub fn get_ack(&mut self) -> Vec<(u32 , u32)> {
 
         let mut ret = vec![(self.min_sequence_number , self.max_sequence_number)];
 
@@ -452,10 +436,17 @@ impl ACKSet {
             }
         }
 
+        //not really recvd any packet
+        if ret.len() == 1{
+            if ret[0].0 == 0 && ret[0].1 == 0{
+                return vec![];
+            }
+        }
+
         ret
     }
 
-    pub async fn _reset(&mut self) {
+    pub fn _reset(&mut self) {
         self.max_sequence_number = 0;
         self.min_sequence_number = 0;
         self.nack.clear();
@@ -463,67 +454,162 @@ impl ACKSet {
 }
 
 pub struct RecvQ{
-    max_order_index : u32,
-    old_order_index : u32,
+    sequenced_frame_index : u32,
+    last_ordered_index : u32,
+    ackset : ACKSet,
+    reliable_ackset : ACKSet,
     packets : HashMap<u32 , FrameSetPacket>,
+    ordered_packets : HashMap<u32 , FrameSetPacket>,
     fragment_queue : FragmentQ
 }
 
 impl RecvQ {
     pub fn new() -> Self{
         Self{
+            ackset : ACKSet::new(),
+            reliable_ackset : ACKSet::new(),
             packets: HashMap::new(),
             fragment_queue: FragmentQ::new(),
-            max_order_index: 0,
-            old_order_index: 0,
+            ordered_packets : HashMap::new(),
+            sequenced_frame_index : 0,
+            last_ordered_index : 0
         }
     }
 
+    pub fn is_reliable_ack(&mut self , reliable_frame_index : u32) -> bool{
+
+        for i in self.reliable_ackset.get_ack(){
+
+            if reliable_frame_index >= i.0 && reliable_frame_index <= i.1 {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn insert(&mut self , frame : FrameSetPacket) {
-        if frame.is_fragment() {
 
-            if frame.ordered_frame_index >= self.max_order_index {
-                self.max_order_index = frame.ordered_frame_index + 1;
-            }
-
-            self.fragment_queue.insert(frame);
-
-            for i in self.fragment_queue.flush(){
-                self.packets.insert(i.ordered_frame_index , i);
-            }
+        if self.packets.contains_key(&frame.sequence_number) {
             return;
         }
 
-        if self.packets.contains_key(&frame.ordered_frame_index) {
-            return;
+        self.ackset.insert(frame.sequence_number);
+
+        //The fourth parameter takes one of five major values. Lets say you send data 1,2,3,4,5,6. Here's the order and substance of what you might get back:
+        match frame.reliability(){
+            // UNRELIABLE - 5, 1, 6
+            Reliability::Unreliable => {
+                if !self.packets.contains_key(&frame.sequence_number){
+                    self.packets.insert(frame.sequence_number, frame);
+                }
+            },
+            // UNRELIABLE_SEQUENCED - 5 (6 was lost in transit, 1,2,3,4 arrived later than 5)
+            // With the UNRELIABLE_SEQUENCED transmission method, the game data does not need to arrive in every packet to avoid packet loss and retransmission, 
+            // because the new packet represents the new state, and the new state can be used directly, without waiting for the old packet to arrive. 
+            Reliability::UnreliableSequenced => {
+                let sequenced_frame_index = frame.sequenced_frame_index;
+                if sequenced_frame_index >= self.sequenced_frame_index {
+                    if !self.packets.contains_key(&frame.sequence_number){
+                        self.packets.insert(frame.sequence_number, frame);
+                        self.sequenced_frame_index = sequenced_frame_index;
+                    }
+                }
+            },
+            // RELIABLE - 5, 1, 4, 6, 2, 3
+            Reliability::Reliable => {
+
+                //filter repeat packet
+                if self.is_reliable_ack(frame.reliable_frame_index){
+                    return;
+                }
+
+                self.reliable_ackset.insert(frame.reliable_frame_index);
+
+                self.packets.insert(frame.sequence_number, frame);
+            },
+            // RELIABLE_ORDERED - 1, 2, 3, 4, 5, 6
+            Reliability::ReliableOrdered => {
+
+                //filter repeat packet
+                if self.is_reliable_ack(frame.reliable_frame_index){
+                    return;
+                }
+
+                self.reliable_ackset.insert(frame.reliable_frame_index);
+
+                if frame.is_fragment() {
+                    self.fragment_queue.insert(frame);
+        
+                    for i in self.fragment_queue.flush(){
+                        if !self.ordered_packets.contains_key(&i.ordered_frame_index){
+                            self.ordered_packets.insert(i.ordered_frame_index , i);
+                        }
+                    }
+                } else {
+                    if !self.ordered_packets.contains_key(&frame.ordered_frame_index){
+                        self.ordered_packets.insert(frame.ordered_frame_index , frame);
+                    }
+                }
+            },
+            // RELIABLE_SEQUENCED - 5, 6 (1,2,3,4 arrived later than 5)
+            Reliability::ReliableSequenced => {
+
+                //filter repeat packet
+                if self.is_reliable_ack(frame.reliable_frame_index){
+                    return;
+                }
+
+                self.reliable_ackset.insert(frame.reliable_frame_index);
+
+                let sequenced_frame_index = frame.sequenced_frame_index;
+                if sequenced_frame_index >= self.sequenced_frame_index {
+                    if !self.packets.contains_key(&frame.sequence_number){
+                        self.packets.insert(frame.sequence_number, frame);
+                        self.sequenced_frame_index = sequenced_frame_index;
+                    }
+                }
+            },
+            Reliability::UnreliableAckReceipt => {},
+            Reliability::ReliableAckReceipt => {},
+            Reliability::ReliableOrderedAckReceipt => {},
+            Reliability::Unknown => {},
         }
 
-        if self.old_order_index > frame.ordered_frame_index {
-            return;
-        }
+    }
 
-        if frame.ordered_frame_index >= self.max_order_index {
-            self.max_order_index = frame.ordered_frame_index + 1;
-        }
-        self.packets.insert(frame.ordered_frame_index, frame);
+    pub fn get_nack(&self) -> Vec<u32>{
+        self.ackset.get_nack()
+    }
 
+    pub fn get_ack(&mut self) -> Vec<(u32 , u32)> {
+        self.ackset.get_ack()
     }
 
     pub fn flush(&mut self ) -> Vec<FrameSetPacket>{
         let mut ret = vec![];
-        let mut index = self.old_order_index;
-        for i in self.old_order_index..self.max_order_index {
-            if self.packets.contains_key(&i) {
-                ret.push(self.packets.get(&i).unwrap().clone());
-            } else {
-                break;
+        let mut ordered_keys : Vec<u32> = self.ordered_packets.keys().cloned().collect();
+
+        ordered_keys.sort();
+
+        for i in ordered_keys{
+            if i == self.last_ordered_index{
+                let frame = self.ordered_packets[&i].clone();
+                self.packets.insert(frame.sequence_number, frame);
+                self.ordered_packets.remove(&i);
+                self.last_ordered_index = i + 1;
             }
-            index += 1;
         }
-        self.old_order_index = index;
+
+        let mut packets_keys : Vec<u32> = self.packets.keys().cloned().collect();
+        packets_keys.sort();
+
+        for i in packets_keys{
+            let v = self.packets.get(&i).unwrap();
+            ret.push(v.clone());
+        }
+
         self.packets.clear();
         ret
-
     }
 }
 
@@ -614,69 +700,69 @@ impl SendQ{
 async fn test_get_acks(){
 
     let mut ackset = ACKSet::new();
-    ackset.insert(0).await;
-    ackset.insert(1).await;
-    ackset.insert(2).await;
-    ackset.insert(4).await;
-    ackset.insert(2).await;
+    ackset.insert(0);
+    ackset.insert(1);
+    ackset.insert(2);
+    ackset.insert(4);
+    ackset.insert(2);
 
-    assert!(ackset.get_nack().await == vec![3]);
+    assert!(ackset.get_nack() == vec![3]);
 
-    ackset.insert(3).await;
+    ackset.insert(3);
 
-    assert!(ackset.get_nack().await == vec![]);
+    assert!(ackset.get_nack() == vec![]);
 
-    ackset._reset().await;
+    ackset._reset();
 
     let mut ackset = ACKSet::new();
-    ackset.insert(0).await;
-    ackset.insert(1).await;
-    ackset.insert(2).await;
-    ackset.insert(4).await;
+    ackset.insert(0);
+    ackset.insert(1);
+    ackset.insert(2);
+    ackset.insert(4);
 
-    let acks = ackset.get_ack().await;
+    let acks = ackset.get_ack();
 
     assert!(acks == vec![(0,2), (4,4)]);
 
-    ackset._reset().await;
+    ackset._reset();
 
-    ackset.insert(0).await;
-    ackset.insert(1).await;
-    ackset.insert(2).await;
-    ackset.insert(6).await;
+    ackset.insert(0);
+    ackset.insert(1);
+    ackset.insert(2);
+    ackset.insert(6);
 
-    let acks = ackset.get_ack().await;
+    let acks = ackset.get_ack();
 
     assert!(acks == vec![(0,2), (6,6)]);
 
-    ackset._reset().await;
+    ackset._reset();
 
-    ackset.insert(0).await;
-    ackset.insert(1).await;
-    ackset.insert(2).await;
-    ackset.insert(5).await;
-    ackset.insert(8).await;
+    ackset.insert(0);
+    ackset.insert(1);
+    ackset.insert(2);
+    ackset.insert(5);
+    ackset.insert(8);
 
-    assert!(ackset.get_nack().await == vec![3, 4, 6, 7]);
+    assert!(ackset.get_nack() == vec![3, 4, 6, 7]);
 
-    let acks = ackset.get_ack().await;
+    let acks = ackset.get_ack();
 
     assert!(acks == vec![(0,2), (5,5) , (8,8)]);
 
-    ackset._reset().await;
+    ackset._reset();
 
-    ackset.insert(0).await;
-    ackset.insert(1).await;
-    ackset.insert(2).await;
-    ackset.insert(4).await;
-    ackset.insert(8).await;
-    ackset.insert(9).await;
-    ackset.insert(11).await;
-    ackset.insert(6).await;
+    ackset.insert(0);
+    ackset.insert(1);
+    ackset.insert(2);
+    ackset.insert(4);
+    ackset.insert(8);
+    ackset.insert(9);
+    ackset.insert(11);
+    ackset.insert(6);
 
-    assert!(ackset.get_nack().await == vec![3, 5, 7, 10]);
+    assert!(ackset.get_nack() == vec![3, 5, 7, 10]);
 
-    let acks = ackset.get_ack().await;
+    let acks = ackset.get_ack();
 
     assert!(acks == vec![(0,2) , (4, 4) , (6,6) , (8,9) , (11,11)]);
 
@@ -742,7 +828,7 @@ async fn test_recvq(){
 #[tokio::test]
 async fn test_recvq_fragment(){
     let mut r = RecvQ::new();
-    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![1]);
+    let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![1]);
     p.flags |= 16;
     p.sequence_number = 0;
     p.ordered_frame_index = 0;
@@ -751,7 +837,7 @@ async fn test_recvq_fragment(){
     p.fragment_index = 1;
     r.insert(p);
 
-    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![2]);
+    let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![2]);
     p.flags |= 16;
     p.sequence_number = 1;
     p.ordered_frame_index = 1;
@@ -760,7 +846,7 @@ async fn test_recvq_fragment(){
     p.fragment_index = 2;
     r.insert(p);
 
-    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![3]);
+    let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![3]);
     p.flags |= 16;
     p.sequence_number = 2;
     p.ordered_frame_index = 2;
@@ -843,14 +929,19 @@ async fn test_client_packet2(){
     ps.push(p5.to_vec());
     ps.push(p6.to_vec());
 
+
+    let mut n = 0;
+
     let mut rq = RecvQ::new();
     for i in ps{
         let v = FrameVec::new(i.clone()).await;
         for i in v.frames{
             rq.insert(i);
             if rq.flush().len() != 0{
-                println!("found 1");
+                n += 1;
             }
         }
     }
+
+    assert!(n == 5);
 }

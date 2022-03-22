@@ -18,7 +18,6 @@ pub struct RaknetSocket{
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
     connected : Arc<AtomicBool>,
-    ackset : Arc<Mutex<ACKSet>>,
     mtu : u16,
     _guid : u64,
 }
@@ -40,7 +39,6 @@ impl RaknetSocket {
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new())),
             connected : Arc::new(AtomicBool::new(true)),
-            ackset : Arc::new(Mutex::new(ACKSet::new())),
             mtu,
             _guid : rand::random()
         };
@@ -236,7 +234,6 @@ impl RaknetSocket {
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new())),
             connected : connected,
-            ackset : Arc::new(Mutex::new(ACKSet::new())),
             mtu : RAKNET_CLIENT_MTU,
             _guid : guid
         };
@@ -248,7 +245,6 @@ impl RaknetSocket {
 
     fn start_receiver(&self , mut receiver : Receiver<Vec<u8>>) {
         let connected = self.connected.clone();
-        let ackset = self.ackset.clone();
         let s = self.s.clone();
         let peer_addr = self.peer_addr.clone();
         let local_addr = self.local_addr.clone();
@@ -274,18 +270,15 @@ impl RaknetSocket {
 
                 if buf[0] == transaction_packet_id_to_u8(PacketID::ACK){
                     //handle ack
-                    let ack  = read_packet_ack(&buf).await.unwrap();
-
-                    if ack.single_sequence_number {
-                        ackset.lock().await.insert(ack.sequences.0).await;
-                        sendq.lock().await.ack(ack.sequences.0);
-                    } else {
-                        let mut ackset = ackset.lock().await;
-                        let mut sendq = sendq.lock().await;
+                    let mut sendq = sendq.lock().await;
+                    let ack = read_packet_ack(&buf).await.unwrap();
+                    if ack.single_sequence_number{
+                        sendq.ack(ack.sequences.0);
+                    } else{
                         for i in ack.sequences.0..ack.sequences.1+1{
-                            ackset.insert(i).await;
                             sendq.ack(i);
                         }
+                        
                     }
                 }
 
@@ -307,14 +300,16 @@ impl RaknetSocket {
                 if buf[0] >= transaction_packet_id_to_u8(PacketID::FrameSetPacketBegin) && 
                    buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
 
-                    let mut ackset = ackset.lock().await;
                     let frames = FrameVec::new(buf.clone()).await;
 
                     println!("{:?}" , buf);
 
                     for frame in frames.frames{
-                        ackset.insert(frame.sequence_number).await;
-                        for i in ackset.get_nack().await{
+                        
+                        let mut recvq = recvq.lock().await;
+                        recvq.insert(frame);
+
+                        for i in recvq.get_nack(){
                             let nack = NACK{
                                 record_count: 1,
                                 single_sequence_number: true,
@@ -324,21 +319,12 @@ impl RaknetSocket {
                             let buf = write_packet_nack(&nack).await.unwrap(); 
                             s.send_to(&buf, peer_addr).await.unwrap();
                         }
-                        
-                        if !is_sequenced_or_ordered((frame.flags & 254) >> 5){
-                            if !RaknetSocket::handle(&frame , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
+
+                        for f in recvq.flush(){
+                            if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
                                 connected.fetch_and(false, Ordering::Relaxed);
                                 return;
-                            }
-                        } else { 
-                            let mut recvq = recvq.lock().await;
-                            recvq.insert(frame);
-                            for f in recvq.flush(){
-                                if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
-                                    connected.fetch_and(false, Ordering::Relaxed);
-                                    return;
-                                };
-                            }
+                            };
                         }
                     }
                 }
@@ -348,10 +334,10 @@ impl RaknetSocket {
 
     fn start_tick(&self) {
         let connected = self.connected.clone();
-        let ackset = self.ackset.clone();
         let s = self.s.clone();
         let peer_addr = self.peer_addr.clone();
         let sendq = self.sendq.clone();
+        let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
@@ -362,8 +348,8 @@ impl RaknetSocket {
 
                 // flush ack
                 if connected.fetch_and(true, Ordering::Relaxed){
-                    let mut ackset = ackset.lock().await;
-                    let acks = ackset.get_ack().await;
+                    let mut recvq = recvq.lock().await;
+                    let acks = recvq.get_ack();
                     for ack in acks {
 
                         let record_count = 1;
