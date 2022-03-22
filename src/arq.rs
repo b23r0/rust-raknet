@@ -649,6 +649,8 @@ impl SendQ{
             Reliability::UnreliableSequenced => {
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                 frame.sequence_number = self.sequence_number;
+                // I dont know why Sequenced packet need Ordered 
+                // https://wiki.vg/Raknet_Protocol
                 frame.ordered_frame_index = self.ordered_frame_index;
                 self.unreliable_packets.insert(frame.sequence_number, frame);
                 self.sequence_number += 1;
@@ -707,6 +709,8 @@ impl SendQ{
                 frame.sequence_number = self.sequence_number;
                 frame.reliable_frame_index = self.reliable_frame_index;
                 frame.sequenced_frame_index = self.sequenced_frame_index;
+                // I dont know why Sequenced packet need Ordered 
+                // https://wiki.vg/Raknet_Protocol
                 frame.ordered_frame_index = self.ordered_frame_index;
                 self.reliable_packets.insert(frame.sequence_number, (frame , false , tick));
                 self.sequence_number += 1;
@@ -720,34 +724,40 @@ impl SendQ{
         }
     }
 
-    pub fn nack(&mut self , sequence_number : u32 , tick : i64){
-        if self.reliable_packets.contains_key(&sequence_number){
-            let p = self.reliable_packets.get(&sequence_number).unwrap();
-            self.repeat_request.insert(p.0.sequence_number, (p.0.clone() ,tick));
-            self.reliable_packets.remove(&sequence_number);
+    pub fn nack(&mut self , sequence : u32 , tick : i64){
+        if self.reliable_packets.contains_key(&sequence){
+            let p = self.reliable_packets.get(&sequence).unwrap();
+            self.repeat_request.insert(sequence, (p.0.clone() ,tick));
+            self.reliable_packets.remove(&sequence);
         }
     }
 
-    pub fn ack(&mut self , sequence_number : u32){
-        if self.reliable_packets.contains_key(&sequence_number) {
-            self.reliable_packets.remove(&sequence_number);
+    pub fn ack(&mut self , sequence : u32){
+        if self.reliable_packets.contains_key(&sequence) {
+            self.reliable_packets.remove(&sequence);
         }
 
-        if self.repeat_request.contains_key(&sequence_number) {
-            self.repeat_request.remove(&sequence_number);
+        if self.repeat_request.contains_key(&sequence) {
+            self.repeat_request.remove(&sequence);
         }
     }
 
     pub fn tick(&mut self , tick : i64){
         let keys : Vec<u32> = self.reliable_packets.keys().cloned().collect();
 
+        let mut wait_remove = vec![];
         for i in keys{
             let p = self.reliable_packets.get_mut(&i).unwrap();
             
             // RTO = 1000ms
-            if tick - p.2 >= 1000 && !self.repeat_request.contains_key(&i){
+            if p.1 && tick - p.2 >= 1000 && !self.repeat_request.contains_key(&i){
                 self.repeat_request.insert(i, (p.0.clone() ,tick));
+                wait_remove.push(i);
             }
+        }
+
+        for i in wait_remove{
+            self.reliable_packets.remove(&i);
         }
     }
 
@@ -770,7 +780,10 @@ impl SendQ{
 
         if !self.repeat_request.is_empty(){
             for i in self.repeat_request.keys(){
-                ret.push(self.repeat_request.get(i).unwrap().0.clone());
+                let mut frame = self.repeat_request.get(i).unwrap().0.clone();
+                frame.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
+                ret.push(frame);
             }
             return ret;
         }
@@ -984,14 +997,10 @@ async fn test_recvq_fragment(){
 #[tokio::test]
 async fn test_sendq(){
     let mut s = SendQ::new(1500);
-    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
-    p.sequence_number = 0;
-    p.reliable_frame_index = 0;
+    let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
     s.insert(Reliability::Reliable, &p.serialize().await, 0);
 
-    let mut p = FrameSetPacket::new(Reliability::Reliable, vec![]);
-    p.sequence_number = 1;
-    p.reliable_frame_index = 1;
+    let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
     s.insert(Reliability::Reliable, &p.serialize().await, 50);
 
     let ret = s.flush();
@@ -1001,16 +1010,20 @@ async fn test_sendq(){
 
     let ret = s.flush();
     assert!(ret.len() == 1);
+    assert!(ret[0].sequence_number == 2);
 
     s.tick(1050);
 
     let ret = s.flush();
     assert!(ret.len() == 2);
+    assert!(ret[0].sequence_number == 3);
+    assert!(ret[1].sequence_number == 4);
 
     s.ack(0);
 
     let ret = s.flush();
     assert!(ret.len() == 1);
+    assert!(ret[0].sequence_number == 5);
 
     s.ack(1);
 
