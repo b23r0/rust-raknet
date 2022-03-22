@@ -12,13 +12,9 @@ pub struct RaknetSocket{
     s : Arc<UdpSocket>,
     user_data_sender : Arc<Mutex<Sender<Vec<u8>>>>,
     user_data_receiver : Receiver<Vec<u8>>,
-    sequence_number : u32,
-    ordered_frame_index : u32,
-    compound_id : u16,
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
     connected : Arc<AtomicBool>,
-    mtu : u16,
     _guid : u64,
 }
 
@@ -33,13 +29,9 @@ impl RaknetSocket {
             s: s.clone(),
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
-            sequence_number : 0,
-            ordered_frame_index : 0,
-            compound_id : 0,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new())),
+            sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             connected : Arc::new(AtomicBool::new(true)),
-            mtu,
             _guid : rand::random()
         };
         ret.start_receiver(receiver);
@@ -48,7 +40,7 @@ impl RaknetSocket {
     }
 
     async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Mutex<Sender<Vec<u8>>>) -> bool {
-        match transaction_packet_id(frame.data[0]) {
+        match PacketID::from(frame.data[0]) {
             PacketID::ConnectionRequest => {
                 let packet = read_packet_connection_request(&frame.data.as_slice()).await.unwrap();
                 
@@ -60,10 +52,10 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                let reply = FrameSetPacket::new(Reliability::Reliable, buf);
                 
                 
-                sendq.lock().await.insert(reply, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Reliable,&reply.serialize().await, cur_timestamp_millis());
             },
             PacketID::ConnectionRequestAccepted => {
                 let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
@@ -75,10 +67,10 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
-                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
+                let reply = FrameSetPacket::new(Reliability::Reliable, buf);
                 
                 
-                sendq.lock().await.insert(reply, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Reliable ,&reply.serialize().await, cur_timestamp_millis());
             }
             PacketID::NewIncomingConnection => {
                 let _packet = read_packet_new_incomming_connection(&frame.data.as_slice()).await.unwrap();
@@ -94,7 +86,7 @@ impl RaknetSocket {
                 let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
                 let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
                 
-                sendq.lock().await.insert(reply, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Unreliable,&reply.serialize().await, cur_timestamp_millis());
             }
             PacketID::ConnectedPong => {}
             PacketID::Disconnect => {
@@ -134,8 +126,8 @@ impl RaknetSocket {
         let mut buf = [0u8 ; 2048];
         let (size ,src ) = s.recv_from(&mut buf).await.unwrap();
 
-        if buf[0] != transaction_packet_id_to_u8(PacketID::OpenConnectionReply1){
-            if buf[0] == transaction_packet_id_to_u8(PacketID::IncompatibleProtocolVersion){
+        if buf[0] != PacketID::OpenConnectionReply1.to_u8(){
+            if buf[0] == PacketID::IncompatibleProtocolVersion.to_u8(){
                 let packet = match read_packet_incompatible_protocol_version(&buf[..size]).await{
                     Ok(p) => p,
                     Err(e) => return Err(e),
@@ -166,7 +158,7 @@ impl RaknetSocket {
         let mut buf = [0u8 ; 2048];
         let (size ,_ ) = s.recv_from(&mut buf).await.unwrap();
 
-        if buf[0] != transaction_packet_id_to_u8(PacketID::OpenConnectionReply2){
+        if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "open connection reply2 packetid incorrect"));
         }
 
@@ -228,13 +220,9 @@ impl RaknetSocket {
             s: s,
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
-            sequence_number : 0,
-            ordered_frame_index : 0,
-            compound_id : 0,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new())),
+            sendq : Arc::new(Mutex::new(SendQ::new(RAKNET_CLIENT_MTU))),
             connected : connected,
-            mtu : RAKNET_CLIENT_MTU,
             _guid : guid
         };
 
@@ -258,17 +246,17 @@ impl RaknetSocket {
                         buf
                     },
                     None => {
-                        connected.fetch_and(false, Ordering::Relaxed);
+                        connected.store(false, Ordering::Relaxed);
                         break;
                     },
                 };
 
-                if transaction_packet_id(buf[0]) == PacketID::Disconnect{
-                    connected.fetch_and(false, Ordering::Relaxed);
+                if PacketID::from(buf[0]) == PacketID::Disconnect{
+                    connected.store(false, Ordering::Relaxed);
                     break;
                 }
 
-                if buf[0] == transaction_packet_id_to_u8(PacketID::ACK){
+                if buf[0] == PacketID::ACK.to_u8(){
                     //handle ack
                     let mut sendq = sendq.lock().await;
                     let ack = read_packet_ack(&buf).await.unwrap();
@@ -282,7 +270,7 @@ impl RaknetSocket {
                     }
                 }
 
-                if buf[0] == transaction_packet_id_to_u8(PacketID::NACK){
+                if buf[0] == PacketID::NACK.to_u8(){
                     //handle nack
                     let nack  = read_packet_nack(&buf).await.unwrap();
 
@@ -297,8 +285,8 @@ impl RaknetSocket {
                 }
 
                 // handle packet in here
-                if buf[0] >= transaction_packet_id_to_u8(PacketID::FrameSetPacketBegin) && 
-                   buf[0] <= transaction_packet_id_to_u8(PacketID::FrameSetPacketEnd) {
+                if buf[0] >= PacketID::FrameSetPacketBegin.to_u8() && 
+                   buf[0] <= PacketID::FrameSetPacketEnd.to_u8() {
 
                     let frames = FrameVec::new(buf.clone()).await;
 
@@ -322,7 +310,7 @@ impl RaknetSocket {
 
                         for f in recvq.flush(){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
-                                connected.fetch_and(false, Ordering::Relaxed);
+                                connected.store(false, Ordering::Relaxed);
                                 return;
                             };
                         }
@@ -342,30 +330,26 @@ impl RaknetSocket {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
 
-                if !connected.fetch_and(true, Ordering::Relaxed){
+                if !connected.load(Ordering::Relaxed){
                     break;
                 }
 
                 // flush ack
-                if connected.fetch_and(true, Ordering::Relaxed){
-                    let mut recvq = recvq.lock().await;
-                    let acks = recvq.get_ack();
-                    for ack in acks {
+                let mut recvq = recvq.lock().await;
+                let acks = recvq.get_ack();
+                for ack in acks {
 
-                        let record_count = 1;
-                        let single_sequence_number = ack.1 == ack.0;
-                        
-                        let packet = ACK{
-                            record_count: record_count,
-                            single_sequence_number: single_sequence_number,
-                            sequences: ack,
-                        };
+                    let single_sequence_number = ack.1 == ack.0;
+                    let record_count =  if single_sequence_number { 1 } else { ack.1 - ack.0 + 1 };
 
-                        let buf = write_packet_ack(&packet).await.unwrap();
-                        s.send_to(&buf, peer_addr).await.unwrap();
-                    }
-                }else{
-                    break;
+                    let packet = ACK{
+                        record_count: record_count as u16,
+                        single_sequence_number: single_sequence_number,
+                        sequences: ack,
+                    };
+
+                    let buf = write_packet_ack(&packet).await.unwrap();
+                    s.send_to(&buf, peer_addr).await.unwrap();
                 }
                 
                 //flush sendq
@@ -421,39 +405,9 @@ impl RaknetSocket {
         }
     }
 
-    pub async fn send(&mut self , buf : &[u8]) ->Result<()> {
+    pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
 
-        // 55 = max framesetpacket length(27) + udp overhead(28)
-        if buf.len() < (self.mtu - 55).into() {
-            let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, buf.to_vec());
-            frame.sequence_number = self.sequence_number;
-            frame.ordered_frame_index = self.ordered_frame_index;
-            self.sequence_number += 1;
-            self.ordered_frame_index += 1;
-            self.sendq.lock().await.insert(frame, cur_timestamp_millis());
-        } else {
-            let max = self.mtu - 55;
-            let mut compound_size = buf.len() as u16 / max;
-            if buf.len() as u16 % max != 0 {
-                compound_size += 1;
-            }
-
-            for i in 0..compound_size {
-                let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, buf[(max*i) as usize..(max*i+compound_size) as usize].to_vec());
-                // set fragment
-                frame.flags |= 8;
-                frame.sequence_number = self.sequence_number;
-                frame.ordered_frame_index = self.ordered_frame_index;
-                frame.compound_size = compound_size as u32;
-                frame.compound_id = self.compound_id;
-                frame.fragment_index = i as u32;
-                self.sendq.lock().await.insert(frame, cur_timestamp_millis());
-                self.sequence_number += 1;
-            }
-            self.compound_id += 1;
-            self.ordered_frame_index += 1;
-        }
-
+        self.sendq.lock().await.insert(r , buf, cur_timestamp_millis());
         Ok(())
     }
 

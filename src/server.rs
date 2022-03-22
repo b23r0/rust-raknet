@@ -94,7 +94,7 @@ impl RaknetListener {
                     Err(_) => return,
                 };
 
-                let cur_status = transaction_packet_id(buf[0]);
+                let cur_status = PacketID::from(buf[0]);
                 
                 match cur_status{
                     PacketID::UnconnectedPing1 => {

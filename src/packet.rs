@@ -27,53 +27,55 @@ pub enum PacketID {
     Unknown = 0xff
 }
 
-pub fn transaction_packet_id(id : u8) -> PacketID {
-    match id{
-        0x00 => PacketID::ConnectedPing,
-        0x01 => PacketID::UnconnectedPing1,
-        0x02 => PacketID::UnconnectedPing2,
-        0x03 => PacketID::ConnectedPong,
-        0x1c => PacketID::UnconnectedPong,
-        0x05 => PacketID::OpenConnectionRequest1,
-        0x06 => PacketID::OpenConnectionReply1,
-        0x07 => PacketID::OpenConnectionRequest2,
-        0x08 => PacketID::OpenConnectionReply2,
-        0x09 => PacketID::ConnectionRequest,
-        0x10 => PacketID::ConnectionRequestAccepted,
-        0x12 => PacketID::AlreadyConnected,
-        0x13 => PacketID::NewIncomingConnection,
-        0x15 => PacketID::Disconnect,
-        0x19 => PacketID::IncompatibleProtocolVersion,
-        0x80 => PacketID::FrameSetPacketBegin,
-        0x8d => PacketID::FrameSetPacketEnd,
-        0xa0 => PacketID::NACK,
-        0xc0 => PacketID::ACK,
-        _ => PacketID::Unknown
+impl PacketID{
+    pub fn to_u8(&self) -> u8{
+        match self{
+            PacketID::ConnectedPing => 0x00,
+            PacketID::UnconnectedPing1 => 0x01,
+            PacketID::UnconnectedPing2 => 0x02,
+            PacketID::ConnectedPong => 0x03,
+            PacketID::UnconnectedPong => 0x1c,
+            PacketID::OpenConnectionRequest1 => 0x05,
+            PacketID::OpenConnectionReply1 => 0x06,
+            PacketID::OpenConnectionRequest2 => 0x07,
+            PacketID::OpenConnectionReply2 => 0x08,
+            PacketID::ConnectionRequest => 0x09,
+            PacketID::ConnectionRequestAccepted => 0x10,
+            PacketID::AlreadyConnected => 0x12,
+            PacketID::NewIncomingConnection => 0x13,
+            PacketID::Disconnect => 0x15,
+            PacketID::IncompatibleProtocolVersion => 0x19,
+            PacketID::Unknown => 0xff,
+            PacketID::FrameSetPacketBegin => 0x80,
+            PacketID::FrameSetPacketEnd => 0x8d,
+            PacketID::NACK => 0xa0,
+            PacketID::ACK => 0xc0,
+        }
     }
-}
 
-pub fn transaction_packet_id_to_u8(packetid : PacketID) -> u8 {
-    match packetid{
-        PacketID::ConnectedPing => 0x00,
-        PacketID::UnconnectedPing1 => 0x01,
-        PacketID::UnconnectedPing2 => 0x02,
-        PacketID::ConnectedPong => 0x03,
-        PacketID::UnconnectedPong => 0x1c,
-        PacketID::OpenConnectionRequest1 => 0x05,
-        PacketID::OpenConnectionReply1 => 0x06,
-        PacketID::OpenConnectionRequest2 => 0x07,
-        PacketID::OpenConnectionReply2 => 0x08,
-        PacketID::ConnectionRequest => 0x09,
-        PacketID::ConnectionRequestAccepted => 0x10,
-        PacketID::AlreadyConnected => 0x12,
-        PacketID::NewIncomingConnection => 0x13,
-        PacketID::Disconnect => 0x15,
-        PacketID::IncompatibleProtocolVersion => 0x19,
-        PacketID::Unknown => 0xff,
-        PacketID::FrameSetPacketBegin => 0x80,
-        PacketID::FrameSetPacketEnd => 0x8d,
-        PacketID::NACK => 0xa0,
-        PacketID::ACK => 0xc0,
+    pub fn from(id : u8) -> Self{
+        match id{
+            0x00 => PacketID::ConnectedPing,
+            0x01 => PacketID::UnconnectedPing1,
+            0x02 => PacketID::UnconnectedPing2,
+            0x03 => PacketID::ConnectedPong,
+            0x1c => PacketID::UnconnectedPong,
+            0x05 => PacketID::OpenConnectionRequest1,
+            0x06 => PacketID::OpenConnectionReply1,
+            0x07 => PacketID::OpenConnectionRequest2,
+            0x08 => PacketID::OpenConnectionReply2,
+            0x09 => PacketID::ConnectionRequest,
+            0x10 => PacketID::ConnectionRequestAccepted,
+            0x12 => PacketID::AlreadyConnected,
+            0x13 => PacketID::NewIncomingConnection,
+            0x15 => PacketID::Disconnect,
+            0x19 => PacketID::IncompatibleProtocolVersion,
+            0x80 => PacketID::FrameSetPacketBegin,
+            0x8d => PacketID::FrameSetPacketEnd,
+            0xa0 => PacketID::NACK,
+            0xc0 => PacketID::ACK,
+            _ => PacketID::Unknown
+        }
     }
 }
 
@@ -207,7 +209,7 @@ pub async fn read_packet_ping(buf : &[u8]) -> Result<PacketUnconnectedPing>{
 
 pub async fn write_packet_ping(packet : &PacketUnconnectedPing) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::UnconnectedPing1)));
+    unwrap_or_return!(cursor.write_u8(PacketID::UnconnectedPing1.to_u8()));
     unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
@@ -227,7 +229,7 @@ pub async fn read_packet_pong(buf : &[u8]) -> Result<PacketUnconnectedPong>{
 
 pub async fn write_packet_pong(packet : &PacketUnconnectedPong) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::UnconnectedPong)));
+    unwrap_or_return!(cursor.write_u8(PacketID::UnconnectedPong.to_u8()));
     unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
     unwrap_or_return!(cursor.write_magic());
@@ -249,7 +251,7 @@ pub async fn read_packet_connection_open_request_1(buf : &[u8]) -> Result<OpenCo
 
 pub async fn write_packet_connection_open_request_1(packet : &OpenConnectionRequest1) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionRequest1)));
+    unwrap_or_return!(cursor.write_u8(PacketID::OpenConnectionRequest1.to_u8()));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u8(packet.protocol_version));
     //The MTU sent in the response appears to be somewhere around the size of this padding + 46 (28 udp overhead, 1 packet id, 16 magic, 1 protocol version). This padding seems to be used to discover the maximum packet size the network can handle.
@@ -271,7 +273,7 @@ pub async fn read_packet_connection_open_request_2(buf : &[u8]) -> Result<OpenCo
 
 pub async fn write_packet_connection_open_request_2(packet : &OpenConnectionRequest2) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionRequest2)));
+    unwrap_or_return!(cursor.write_u8(PacketID::OpenConnectionRequest2.to_u8()));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_address(packet.address));
     unwrap_or_return!(cursor.write_u16(packet.mtu, Endian::Big));
@@ -293,7 +295,7 @@ pub async fn read_packet_connection_open_reply_1(buf : &[u8]) -> Result<OpenConn
 
 pub async fn write_packet_connection_open_reply_1(packet : &OpenConnectionReply1) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionReply1)));
+    unwrap_or_return!(cursor.write_u8(PacketID::OpenConnectionReply1.to_u8()));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
     unwrap_or_return!(cursor.write_u8(packet.use_encryption));
@@ -316,7 +318,7 @@ pub async fn read_packet_connection_open_reply_2(buf : &[u8]) -> Result<OpenConn
 
 pub async fn write_packet_connection_open_reply_2(packet : &OpenConnectionReply2) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::OpenConnectionReply2)));
+    unwrap_or_return!(cursor.write_u8(PacketID::OpenConnectionReply2.to_u8()));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
     unwrap_or_return!(cursor.write_address(packet.address));
@@ -338,7 +340,7 @@ pub async fn _read_packet_already_connected(buf : &[u8]) -> Result<AlreadyConnec
 
 pub async fn write_packet_already_connected(packet : &AlreadyConnected) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::AlreadyConnected)));
+    unwrap_or_return!(cursor.write_u8(PacketID::AlreadyConnected.to_u8()));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
     Ok(cursor.get_raw_payload())
@@ -356,7 +358,7 @@ pub async fn read_packet_incompatible_protocol_version(buf : &[u8]) -> Result<In
 
 pub async fn write_packet_incompatible_protocol_version(packet : &IncompatibleProtocolVersion) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::IncompatibleProtocolVersion)));
+    unwrap_or_return!(cursor.write_u8(PacketID::IncompatibleProtocolVersion.to_u8()));
     unwrap_or_return!(cursor.write_u8(packet.server_protocol));
     unwrap_or_return!(cursor.write_magic());
     unwrap_or_return!(cursor.write_u64(packet.server_guid, Endian::Big));
@@ -387,7 +389,7 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
 
 pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::NACK)));
+    unwrap_or_return!(cursor.write_u8(PacketID::NACK.to_u8()));
     cursor.write_u16(packet.record_count, Endian::Big).await?;
     cursor.write_u8(packet.single_sequence_number as u8).await?;
     cursor.write_u24(packet.sequences.0, Endian::Little).await?;
@@ -420,7 +422,7 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
 
 pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ACK)));
+    unwrap_or_return!(cursor.write_u8(PacketID::ACK.to_u8()));
     unwrap_or_return!(cursor.write_u16(packet.record_count, Endian::Big));
     unwrap_or_return!(cursor.write_u8(packet.single_sequence_number as u8));
     unwrap_or_return!(cursor.write_u24(packet.sequences.0, Endian::Little));
@@ -442,7 +444,7 @@ pub async fn read_packet_connection_request(buf : &[u8]) -> Result<ConnectionReq
 
 pub async fn write_packet_connection_request(packet : &ConnectionRequest) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectionRequest)));
+    unwrap_or_return!(cursor.write_u8(PacketID::ConnectionRequest.to_u8()));
     unwrap_or_return!(cursor.write_u64(packet.guid, Endian::Big));
     unwrap_or_return!(cursor.write_i64(packet.time, Endian::Big));
     unwrap_or_return!(cursor.write_u8(packet.use_encryption));
@@ -466,7 +468,7 @@ pub async fn read_packet_connection_request_accepted(buf : &[u8]) -> Result<Conn
 
 pub async fn write_packet_connection_request_accepted(packet : &ConnectionRequestAccepted) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectionRequestAccepted)));
+    unwrap_or_return!(cursor.write_u8(PacketID::ConnectionRequestAccepted.to_u8()));
     unwrap_or_return!(cursor.write_address(packet.client_address));
     unwrap_or_return!(cursor.write_u16(packet.system_index, Endian::Big));
     for _ in 0..10 {
@@ -493,7 +495,7 @@ pub async fn read_packet_new_incomming_connection(buf : &[u8]) -> Result<NewInco
 
 pub async fn write_packet_new_incomming_connection(packet : &NewIncomingConnection) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::NewIncomingConnection)));
+    unwrap_or_return!(cursor.write_u8(PacketID::NewIncomingConnection.to_u8()));
     unwrap_or_return!(cursor.write_address(packet.server_address));
     for _ in 0..10 {
         unwrap_or_return!(cursor.write_u8(0x06));
@@ -514,7 +516,7 @@ pub async fn read_packet_connected_ping(buf : &[u8]) -> Result<ConnectedPing>{
 
 pub async fn _write_packet_connected_ping(packet : &ConnectedPing) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectedPing)));
+    unwrap_or_return!(cursor.write_u8(PacketID::ConnectedPing.to_u8()));
     unwrap_or_return!(cursor.write_i64(packet.client_timestamp, Endian::Big));
 
     Ok(cursor.get_raw_payload())
@@ -531,7 +533,7 @@ pub async fn _read_packet_connected_pong(buf : &[u8]) -> Result<ConnectedPong>{
 
 pub async fn write_packet_connected_pong(packet : &ConnectedPong) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(transaction_packet_id_to_u8(PacketID::ConnectedPong)));
+    unwrap_or_return!(cursor.write_u8(PacketID::ConnectedPong.to_u8()));
     unwrap_or_return!(cursor.write_i64(packet.client_timestamp, Endian::Big));
     unwrap_or_return!(cursor.write_i64(packet.server_timestamp, Endian::Big));
     Ok(cursor.get_raw_payload())

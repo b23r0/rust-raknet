@@ -6,6 +6,7 @@ mod arq;
 mod fragment;
 pub mod server;
 
+pub use crate::arq::Reliability;
 pub use crate::server::*;
 pub use crate::socket::*;
 
@@ -45,7 +46,7 @@ async fn test_connect(){
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
-        client1.send(&[1,2,3]).await.unwrap();
+        client1.send(&[1,2,3] , Reliability::Reliable).await.unwrap();
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
