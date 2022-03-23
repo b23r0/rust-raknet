@@ -387,7 +387,7 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
     })
 }
 
-pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
+pub async fn _write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::NACK.to_u8()));
     cursor.write_u16(packet.record_count, Endian::Big).await?;

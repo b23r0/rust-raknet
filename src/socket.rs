@@ -52,10 +52,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                let reply = FrameSetPacket::new(Reliability::Reliable, buf);
-                
-                
-                sendq.lock().await.insert(Reliability::Reliable,&reply.serialize().await, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Reliable,&buf, cur_timestamp_millis());
             },
             PacketID::ConnectionRequestAccepted => {
                 let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
@@ -67,10 +64,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
-                let reply = FrameSetPacket::new(Reliability::Reliable, buf);
-                
-                
-                sendq.lock().await.insert(Reliability::Reliable ,&reply.serialize().await, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Reliable ,&buf, cur_timestamp_millis());
             }
             PacketID::NewIncomingConnection => {
                 let _packet = read_packet_new_incomming_connection(&frame.data.as_slice()).await.unwrap();
@@ -84,9 +78,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
-                let reply = FrameSetPacket::new(Reliability::ReliableOrdered, buf);
-                
-                sendq.lock().await.insert(Reliability::Unreliable,&reply.serialize().await, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
             }
             PacketID::ConnectedPong => {}
             PacketID::Disconnect => {
@@ -102,6 +94,10 @@ impl RaknetSocket {
             },
         }
         return true;
+    }
+
+    pub async fn send_to(&mut self ,buf : &[u8] , target : &SocketAddr){
+        self.s.send_to(buf, target).await.unwrap();
     }
 
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
@@ -233,7 +229,6 @@ impl RaknetSocket {
 
     fn start_receiver(&self , mut receiver : Receiver<Vec<u8>>) {
         let connected = self.connected.clone();
-        let s = self.s.clone();
         let peer_addr = self.peer_addr.clone();
         let local_addr = self.local_addr.clone();
         let sendq = self.sendq.clone();
@@ -290,23 +285,10 @@ impl RaknetSocket {
 
                     let frames = FrameVec::new(buf.clone()).await;
 
-                    println!("{:?}" , buf);
-
                     for frame in frames.frames{
                         
                         let mut recvq = recvq.lock().await;
                         recvq.insert(frame);
-
-                        for i in recvq.get_nack(){
-                            let nack = NACK{
-                                record_count: 1,
-                                single_sequence_number: true,
-                                sequences: (i , i),
-                            };
-
-                            let buf = write_packet_nack(&nack).await.unwrap(); 
-                            s.send_to(&buf, peer_addr).await.unwrap();
-                        }
 
                         for f in recvq.flush(){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
@@ -337,13 +319,14 @@ impl RaknetSocket {
                 // flush ack
                 let mut recvq = recvq.lock().await;
                 let acks = recvq.get_ack();
+
                 for ack in acks {
 
                     let single_sequence_number = ack.1 == ack.0;
-                    let record_count =  if single_sequence_number { 1 } else { ack.1 - ack.0 + 1 };
 
                     let packet = ACK{
-                        record_count: record_count as u16,
+                        // catch minecraft 1.18.2 client packet , the parameter always 1
+                        record_count: 1,
                         single_sequence_number: single_sequence_number,
                         sequences: ack,
                     };
