@@ -30,7 +30,7 @@ impl RaknetSocket {
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
+            sendq : Arc::new(Mutex::new(SendQ::new(mtu , 0))),
             connected : Arc::new(AtomicBool::new(true)),
             _guid : rand::random()
         };
@@ -215,7 +215,7 @@ impl RaknetSocket {
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(RAKNET_CLIENT_MTU))),
+            sendq : Arc::new(Mutex::new(SendQ::new(RAKNET_CLIENT_MTU , 1))),
             connected : connected,
             _guid : guid
         };

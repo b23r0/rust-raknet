@@ -540,10 +540,10 @@ pub struct SendQ{
 }
 
 impl SendQ{
-    pub fn new(mtu : u16) -> Self{
+    pub fn new(mtu : u16 , init_sequence_number : u32) -> Self{
         Self{
             mtu : mtu,
-            sequence_number : 0,
+            sequence_number : init_sequence_number,
             packets: HashMap::new(),
             unreliable_packets : vec![],
             repeat_request: HashMap::new(),
@@ -611,8 +611,10 @@ impl SendQ{
                         let end = if i == compound_size - 1 { buf.len() } else { (max*(i+1)) as usize };
 
                         let mut frame = FrameSetPacket::new(reliability.clone(), buf[begin..end].to_vec());
-                        //set fragment flag
+                        // set fragment flag
                         frame.flags |= 16;
+                        // needs B and AS
+                        frame.flags |= 8;
                         frame.compound_size = compound_size as u32;
                         // I dont know why the compound_id always 0
                         frame.compound_id = 0;
@@ -623,8 +625,8 @@ impl SendQ{
                         self.packets.insert(frame.sequence_number, (frame , false , tick));
                         self.sequence_number += 1;
                         self.reliable_frame_index += 1;
-                        self.ordered_frame_index += 1;
                     }
+                    self.ordered_frame_index += 1;
                 }
             },
             Reliability::ReliableSequenced => {
@@ -858,7 +860,7 @@ async fn test_recvq_fragment(){
 
 #[tokio::test]
 async fn test_sendq(){
-    let mut s = SendQ::new(1500);
+    let mut s = SendQ::new(1500 , 0);
     let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
     s.insert(Reliability::Reliable, &p.serialize().await, 0);
 

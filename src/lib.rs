@@ -157,15 +157,16 @@ async fn test_send_recv_more_reliability_type_packet(){
     client2.send(&[0xfe,22,23,24], Reliability::ReliableSequenced).await.unwrap();
 }
 
-/* 
+/*
 #[tokio::test]
 async fn chore(){
-    let mut server = RaknetListener::bind("0.0.0.0:19132".parse().unwrap()).await.unwrap();
-    server.listen().await;
-    loop{
-        let mut client1 = server.accept().await.unwrap();
-        let ret = client1.recv().await.unwrap();
-        dbg!(ret);
-    }
+    let mut client = RaknetSocket::connect(&"192.168.199.127:19132".parse().unwrap()).await.unwrap();
+    let mut a = vec![3u8;1000];
+    let mut b = vec![2u8;1000];
+    let mut c = vec![0xfe;1000];
+    b.append(&mut a);
+    c.append(&mut b);
+    client.send(&c, Reliability::ReliableOrdered).await.unwrap();
+    client.recv().await.unwrap();
 }
 */
