@@ -54,6 +54,32 @@ async fn test_connect(){
     assert!(buf == vec![1,2,3]);
 }
 
+#[tokio::test]
+async fn test_send_recv_fragment_data(){
+    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let local_addr = server.local_addr().unwrap();
+    server.listen().await;
+    tokio::spawn(async move {
+        let mut client1 = server.accept().await.unwrap();
+        assert!(client1.local_addr().unwrap() == local_addr);
+
+        let mut a = vec![3u8;1000];
+        let mut b = vec![2u8;1000];
+        let mut c = vec![1u8;1000];
+        b.append(&mut a);
+        c.append(&mut b);
+
+        client1.send(&c , Reliability::ReliableOrdered).await.unwrap();
+    });
+    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    assert!(client2.peer_addr().unwrap() == local_addr);
+    let buf = client2.recv().await.unwrap();
+    assert!(buf.len() == 3000);
+    assert!(buf[0..1000] == vec![1u8;1000]);
+    assert!(buf[1000..2000] == vec![2u8;1000]);
+    assert!(buf[2000..3000] == vec![3u8;1000]);
+}
+
 /* 
 #[tokio::test]
 async fn chore(){

@@ -19,7 +19,7 @@ pub struct RaknetListener {
     listened : bool, 
     connection_receiver : Receiver<RaknetSocket>,
     connection_sender : Sender<RaknetSocket>,
-    connected : Arc<Mutex<HashMap<SocketAddr , Sender<Vec<u8>>>>>
+    connected : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>
 }
 
 impl RaknetListener {
@@ -70,6 +70,29 @@ impl RaknetListener {
         })
     }
 
+    async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>) {
+        let sessions = sessions.clone();
+        let socket = socket.clone();
+        tokio::spawn(async move{
+            loop{
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let mut sessions = sessions.lock().await;
+                let keys : Vec<SocketAddr> = sessions.keys().cloned().collect();
+                for i in keys{
+                    let s = sessions.get(&i).unwrap();
+
+                    //session 30s timeout
+                    if cur_timestamp() - s.0 > 30 {
+                        s.1.send([PacketID::Disconnect.to_u8()].to_vec()).await.unwrap();
+                        sessions.remove(&i);
+
+                        socket.send_to(&[PacketID::Disconnect.to_u8()], i).await.unwrap();
+                    }
+                }
+            }
+        });
+    }
+
     pub async fn listen(&mut self) {
 
         if self.motd.is_empty(){
@@ -83,6 +106,8 @@ impl RaknetListener {
         let motd = self.get_motd().await;
 
         self.listened = true;
+
+        self.start_session_collect(&socket ,&connected).await;
 
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
@@ -213,20 +238,21 @@ impl RaknetListener {
 
                         let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
 
-                        connected.insert(addr, sender);
+                        connected.insert(addr, (cur_timestamp() ,sender));
                         let _ = connection_sender.send(s).await;
                     },
                     PacketID::Disconnect => {
                         let mut connected = connected.lock().await;
                         if connected.contains_key(&addr){
-                            connected[&addr].send(buf[..size].to_vec()).await.unwrap();
+                            connected[&addr].1.send(buf[..size].to_vec()).await.unwrap();
                             connected.remove(&addr);
                         }
                     }
                     _ => {
-                        let connected = connected.lock().await;
+                        let mut connected = connected.lock().await;
                         if connected.contains_key(&addr){
-                            connected[&addr].send(buf[..size].to_vec()).await.unwrap();
+                            connected[&addr].1.send(buf[..size].to_vec()).await.unwrap();
+                            connected.get_mut(&addr).unwrap().0 = cur_timestamp();
                         }
                     },
                 }

@@ -602,7 +602,17 @@ impl SendQ{
                     }
 
                     for i in 0..compound_size {
-                        let mut frame = FrameSetPacket::new(reliability.clone(), buf[(max*i) as usize..(max*i+compound_size) as usize].to_vec());
+
+                        let begin = (max*i) as usize;
+                        let end = if i == compound_size - 1 { buf.len() } else { (max*(i+1)) as usize };
+
+                        let mut frame = FrameSetPacket::new(reliability.clone(), buf[begin..end].to_vec());
+                        //set fragment flag
+                        frame.flags |= 16;
+                        frame.compound_size = compound_size as u32;
+                        // I dont know why the compound_id always 0
+                        frame.compound_id = 0;
+                        frame.fragment_index = i as u32;
                         frame.sequence_number = self.sequence_number;
                         frame.reliable_frame_index = self.reliable_frame_index;
                         frame.ordered_frame_index = self.ordered_frame_index;

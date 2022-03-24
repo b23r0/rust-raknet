@@ -1,5 +1,5 @@
 use std::{io::{Result} , net::{SocketAddr}, sync::{Arc}};
-use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::sleep};
+use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::{sleep, timeout}};
 use rand;
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,13 +185,15 @@ impl RaknetSocket {
         let connected = Arc::new(AtomicBool::new(true));
         let connected_s = connected.clone();
         tokio::spawn(async move {
+            let mut buf = [0u8;2048];
             loop{
                 if !connected_s.load(Ordering::Relaxed){
                     break;
                 }
-                
-                let mut buf = [0u8;2048];
-                let (size , _) = match recv_s.recv_from(&mut buf).await{
+                let (size , _) = match match timeout(std::time::Duration::from_secs(10), recv_s.recv_from(&mut buf)).await{
+                    Ok(p) => p,
+                    Err(_) => continue
+                }{
                     Ok(p) => p,
                     Err(_) => {
                         connected_s.store(false, Ordering::Relaxed);
@@ -207,7 +209,7 @@ impl RaknetSocket {
                     },
                 };
             }
-
+            println!("finished recv_from");
         });
 
         let ret = RaknetSocket{
@@ -236,10 +238,16 @@ impl RaknetSocket {
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
-                let buf = match receiver.recv().await{
-                    Some(buf) => {
-                        buf
-                    },
+                let buf = match match timeout(std::time::Duration::from_secs(10) ,receiver.recv()).await{
+                    Ok(p) => p,
+                    Err(_) => {
+                        if !connected.load(Ordering::Relaxed){
+                            break;
+                        }
+                        continue;
+                    }
+                }{
+                    Some(buf) => buf,
                     None => {
                         connected.store(false, Ordering::Relaxed);
                         break;
@@ -299,6 +307,8 @@ impl RaknetSocket {
                     }
                 }
             }
+
+            println!("finished receiver");
         });
     }
 
@@ -342,6 +352,7 @@ impl RaknetSocket {
                     s.send_to(f.serialize().await.as_slice(), peer_addr).await.unwrap();
                 }
             }
+            println!("finished tick");
         });
     }
 
@@ -376,7 +387,7 @@ impl RaknetSocket {
     }
 
     pub async fn close(&mut self) -> Result<()>{
-        match self.s.send_to(&[0x15], self.peer_addr).await{
+        match self.s.send_to(&[PacketID::Disconnect.to_u8()], self.peer_addr).await{
             Ok(_) => {
                 self.connected.store(false, Ordering::Relaxed);
                 Ok(())
