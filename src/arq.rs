@@ -534,6 +534,7 @@ pub struct SendQ{
     ordered_frame_index : u32,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
     packets : HashMap<u32, (FrameSetPacket , bool , i64)>,
+    unreliable_packets : Vec<FrameSetPacket>,
     //packet : FrameSetPacket , last_tick : i64 
     repeat_request : HashMap<u32, (FrameSetPacket , i64)>,
 }
@@ -544,6 +545,7 @@ impl SendQ{
             mtu : mtu,
             sequence_number : 0,
             packets: HashMap::new(),
+            unreliable_packets : vec![],
             repeat_request: HashMap::new(),
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
@@ -557,7 +559,7 @@ impl SendQ{
             Reliability::Unreliable => {
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                 frame.sequence_number = self.sequence_number;
-                self.packets.insert(frame.sequence_number, (frame , false , tick));
+                self.unreliable_packets.push(frame);
                 self.sequence_number += 1;
             },
             Reliability::UnreliableSequenced => {
@@ -566,8 +568,10 @@ impl SendQ{
                 // I dont know why Sequenced packet need Ordered 
                 // https://wiki.vg/Raknet_Protocol
                 frame.ordered_frame_index = self.ordered_frame_index;
-                self.packets.insert(frame.sequence_number, (frame , false , tick));
+                frame.sequenced_frame_index = self.sequenced_frame_index;
+                self.unreliable_packets.push(frame);
                 self.sequence_number += 1;
+                self.sequenced_frame_index +=1;
             },
             Reliability::Reliable => {
 
@@ -713,6 +717,11 @@ impl SendQ{
                 }
             }
         }
+
+        for i in &self.unreliable_packets{
+            ret.push(i.clone());
+        }
+        self.unreliable_packets.clear();
         return ret;
     }
 }

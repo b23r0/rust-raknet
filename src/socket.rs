@@ -95,11 +95,7 @@ impl RaknetSocket {
         }
         return true;
     }
-
-    pub async fn send_to(&mut self ,buf : &[u8] , target : &SocketAddr){
-        self.s.send_to(buf, target).await.unwrap();
-    }
-
+    
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
 
         let guid : u64 = rand::random();
@@ -406,12 +402,28 @@ impl RaknetSocket {
     }
 
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
-        match self.user_data_receiver.recv().await{
-            Some(p) => Ok(p),
-            None => {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "recv packet faild , maybe is conntection closed"))
-            },
+
+        if !self.connected.load(Ordering::Relaxed){
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "conntection closed"));
         }
+
+        loop{
+            match match timeout(std::time::Duration::from_secs(10), self.user_data_receiver.recv()).await{
+                Ok(p) => p,
+                Err(_) => {
+                    if !self.connected.load(Ordering::Relaxed){
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, "conntection closed"));
+                    }
+                    continue;
+                },
+            }{
+                Some(p) => return Ok(p),
+                None => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "recv packet faild , maybe is conntection closed"));
+                },
+            }
+        }
+
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr>{

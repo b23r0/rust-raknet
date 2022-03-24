@@ -19,7 +19,7 @@ pub struct RaknetListener {
     listened : bool, 
     connection_receiver : Receiver<RaknetSocket>,
     connection_sender : Sender<RaknetSocket>,
-    connected : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>
+    sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>
 }
 
 impl RaknetListener {
@@ -42,7 +42,7 @@ impl RaknetListener {
             listened : false,
             connection_receiver : connection_receiver,
             connection_sender : connection_sender,
-            connected : Arc::new(Mutex::new(HashMap::new())),
+            sessions : Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -66,7 +66,7 @@ impl RaknetListener {
             listened : false,
             connection_receiver : connection_receiver,
             connection_sender : connection_sender,
-            connected : Arc::new(Mutex::new(HashMap::new())),
+            sessions : Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -82,8 +82,11 @@ impl RaknetListener {
                     let s = sessions.get(&i).unwrap();
 
                     //session 30s timeout
-                    if cur_timestamp() - s.0 > 30 {
-                        s.1.send([PacketID::Disconnect.to_u8()].to_vec()).await.unwrap();
+                    if cur_timestamp() - s.0 >= 30 {
+                        match s.1.send([PacketID::Disconnect.to_u8()].to_vec()).await{
+                            Ok(_) => {},
+                            Err(_) => {},
+                        };
                         sessions.remove(&i);
 
                         socket.send_to(&[PacketID::Disconnect.to_u8()], i).await.unwrap();
@@ -101,13 +104,13 @@ impl RaknetListener {
 
         let socket = self.socket.clone();
         let guid = self.guid.clone();
-        let connected = self.connected.clone();
+        let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
         let motd = self.get_motd().await;
 
         self.listened = true;
 
-        self.start_session_collect(&socket ,&connected).await;
+        self.start_session_collect(&socket ,&sessions).await;
 
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
@@ -218,9 +221,9 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        let mut connected = connected.lock().await;
+                        let mut sessions = sessions.lock().await;
 
-                        if connected.contains_key(&addr) {
+                        if sessions.contains_key(&addr) {
 
                             let packet = write_packet_already_connected(&AlreadyConnected{
                                 magic: true,
@@ -238,21 +241,27 @@ impl RaknetListener {
 
                         let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
 
-                        connected.insert(addr, (cur_timestamp() ,sender));
+                        sessions.insert(addr, (cur_timestamp() ,sender));
                         let _ = connection_sender.send(s).await;
                     },
                     PacketID::Disconnect => {
-                        let mut connected = connected.lock().await;
-                        if connected.contains_key(&addr){
-                            connected[&addr].1.send(buf[..size].to_vec()).await.unwrap();
-                            connected.remove(&addr);
+                        let mut sessions = sessions.lock().await;
+                        if sessions.contains_key(&addr){
+                            sessions[&addr].1.send(buf[..size].to_vec()).await.unwrap();
+                            sessions.remove(&addr);
                         }
                     }
                     _ => {
-                        let mut connected = connected.lock().await;
-                        if connected.contains_key(&addr){
-                            connected[&addr].1.send(buf[..size].to_vec()).await.unwrap();
-                            connected.get_mut(&addr).unwrap().0 = cur_timestamp();
+                        let mut sessions = sessions.lock().await;
+                        if sessions.contains_key(&addr){
+                            match sessions[&addr].1.send(buf[..size].to_vec()).await{
+                                Ok(_) => {},
+                                Err(_) => {
+                                    sessions.remove(&addr);
+                                    continue;
+                                },
+                            };
+                            sessions.get_mut(&addr).unwrap().0 = cur_timestamp();
                         }
                     },
                 }
