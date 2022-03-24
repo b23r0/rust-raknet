@@ -13,7 +13,7 @@ pub use crate::socket::*;
 #[tokio::test]
 async fn test_ping_pong(){
 
-    let s = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+    let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = s.local_addr().unwrap().port();
 
     tokio::spawn(async move {
@@ -78,6 +78,83 @@ async fn test_send_recv_fragment_data(){
     assert!(buf[0..1000] == vec![1u8;1000]);
     assert!(buf[1000..2000] == vec![2u8;1000]);
     assert!(buf[2000..3000] == vec![3u8;1000]);
+}
+
+#[tokio::test]
+async fn test_send_recv_more_reliability_type_packet(){
+    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let local_addr = server.local_addr().unwrap();
+    server.listen().await;
+    tokio::spawn(async move {
+        let mut client1 = server.accept().await.unwrap();
+        assert!(client1.local_addr().unwrap() == local_addr);
+
+        client1.send(&[0xfe,1,2,3], Reliability::Unreliable).await.unwrap();
+        let data = client1.recv().await.unwrap();
+        assert!(data == [0xfe,4,5,6].to_vec());
+
+        client1.send(&[0xfe,7,8,9], Reliability::UnreliableSequenced).await.unwrap();
+        let data = client1.recv().await.unwrap();
+        assert!(data == [0xfe,10,11,12].to_vec());
+
+        client1.send(&[0xfe,13,14,15], Reliability::Reliable).await.unwrap();
+        let data = client1.recv().await.unwrap();
+        assert!(data == [0xfe,16,17,18].to_vec());
+
+        let mut a = vec![3u8;1000];
+        let mut b = vec![2u8;1000];
+        let mut c = vec![1u8;1000];
+        b.append(&mut a);
+        c.append(&mut b);
+
+        client1.send(&c , Reliability::ReliableOrdered).await.unwrap();
+
+        let buf = client1.recv().await.unwrap();
+        assert!(buf.len() == 3000);
+        assert!(buf[0..1000] == vec![1u8;1000]);
+        assert!(buf[1000..2000] == vec![2u8;1000]);
+        assert!(buf[2000..3000] == vec![3u8;1000]);
+
+        client1.send(&[0xfe,19,20,21], Reliability::ReliableSequenced).await.unwrap();
+        let data = client1.recv().await.unwrap();
+        assert!(data == [0xfe,22,23,24].to_vec());
+    });
+    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    assert!(client2.peer_addr().unwrap() == local_addr);
+    
+    let buf = client2.recv().await.unwrap();
+    assert!(buf == [0xfe,1,2,3]);
+
+    client2.send(&[0xfe,4,5,6], Reliability::Unreliable).await.unwrap();
+
+    let buf = client2.recv().await.unwrap();
+    assert!(buf == [0xfe,7,8,9]);
+
+    client2.send(&[0xfe,10,11,12], Reliability::UnreliableSequenced).await.unwrap();
+
+    let buf = client2.recv().await.unwrap();
+    assert!(buf == [0xfe,13,14,15]);
+
+    client2.send(&[0xfe,16,17,18], Reliability::Reliable).await.unwrap();
+
+    let buf = client2.recv().await.unwrap();
+    assert!(buf.len() == 3000);
+    assert!(buf[0..1000] == vec![1u8;1000]);
+    assert!(buf[1000..2000] == vec![2u8;1000]);
+    assert!(buf[2000..3000] == vec![3u8;1000]);
+
+    let mut a = vec![3u8;1000];
+    let mut b = vec![2u8;1000];
+    let mut c = vec![1u8;1000];
+    b.append(&mut a);
+    c.append(&mut b);
+
+    client2.send(&c , Reliability::ReliableOrdered).await.unwrap();
+
+    let buf = client2.recv().await.unwrap();
+    assert!(buf == [0xfe,19,20,21]);
+
+    client2.send(&[0xfe,22,23,24], Reliability::ReliableSequenced).await.unwrap();
 }
 
 /* 
