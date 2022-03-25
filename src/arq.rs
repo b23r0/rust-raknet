@@ -58,6 +58,9 @@ impl Reliability {
     }
 }
 
+const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
+const CONTINUOUS_SEND_FLAG: u8 = 0x8;
+
 #[derive(Clone)]
 pub struct FrameSetPacket {
     pub id : u8, 
@@ -153,7 +156,12 @@ impl FrameSetPacket {
     pub async fn serialize(&self) -> Vec<u8>{
         let mut writer = RaknetWriter::new();
 
-        let id = 0x80 | 4;
+        let mut id = 0x80 | NEEDS_B_AND_AS_FLAG;
+
+        //set fragment flag , first fragment frame id == 0x84
+        if (self.flags & 16) != 0 && self.fragment_index != 0{
+            id |= CONTINUOUS_SEND_FLAG;
+        }
 
         writer.write_u8(id).await.unwrap();
         writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
@@ -575,8 +583,8 @@ impl SendQ{
             },
             Reliability::Reliable => {
 
-                // 55 = max framesetpacket length(27) + udp overhead(28)
-                if buf.len() > (self.mtu - 55).into() {
+                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
+                if buf.len() > (self.mtu - 60).into() {
                     return;
                 }
 
@@ -588,8 +596,8 @@ impl SendQ{
                 self.reliable_frame_index += 1;
             },
             Reliability::ReliableOrdered => {
-                // 55 = max framesetpacket length(27) + udp overhead(28)
-                if buf.len() < (self.mtu - 55).into() {
+                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
+                if buf.len() < (self.mtu - 60).into() {
                     let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                     frame.sequence_number = self.sequence_number;
                     frame.reliable_frame_index = self.reliable_frame_index;
@@ -599,7 +607,7 @@ impl SendQ{
                     self.reliable_frame_index += 1;
                     self.ordered_frame_index += 1;
                 } else {
-                    let max = self.mtu - 55;
+                    let max = self.mtu - 60;
                     let mut compound_size = buf.len() as u16 / max;
                     if buf.len() as u16 % max != 0 {
                         compound_size += 1;
@@ -613,8 +621,6 @@ impl SendQ{
                         let mut frame = FrameSetPacket::new(reliability.clone(), buf[begin..end].to_vec());
                         // set fragment flag
                         frame.flags |= 16;
-                        // needs B and AS
-                        frame.flags |= 8;
                         frame.compound_size = compound_size as u32;
                         // I dont know why the compound_id always 0
                         frame.compound_id = 0;
@@ -630,8 +636,8 @@ impl SendQ{
                 }
             },
             Reliability::ReliableSequenced => {
-                // 55 = max framesetpacket length(27) + udp overhead(28)
-                if buf.len() > (self.mtu - 55).into() {
+                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
+                if buf.len() > (self.mtu - 60).into() {
                     return;
                 }
 

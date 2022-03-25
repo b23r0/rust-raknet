@@ -514,7 +514,7 @@ pub async fn read_packet_connected_ping(buf : &[u8]) -> Result<ConnectedPing>{
     })
 }
 
-pub async fn _write_packet_connected_ping(packet : &ConnectedPing) -> Result<Vec<u8>>{
+pub async fn write_packet_connected_ping(packet : &ConnectedPing) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::ConnectedPing.to_u8()));
     unwrap_or_return!(cursor.write_i64(packet.client_timestamp, Endian::Big));

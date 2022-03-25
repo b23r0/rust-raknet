@@ -2,7 +2,7 @@ use chrono::prelude::*;
 
 pub const RAKNET_PROTOCOL_VERSION : u8 = 10;
 //the MTU is minecraft bedrock 1.18.2 give me
-pub const RAKNET_CLIENT_MTU : u16 = 1492;
+pub const RAKNET_CLIENT_MTU : u16 = 1400;
 
 pub enum Endian {
     Big,

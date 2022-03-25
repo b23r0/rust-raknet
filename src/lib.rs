@@ -169,4 +169,28 @@ async fn chore(){
     client.send(&c, Reliability::ReliableOrdered).await.unwrap();
     client.recv().await.unwrap();
 }
+
+
+#[tokio::test]
+async fn chore2(){
+    let mut listener = RaknetListener::bind("0.0.0.0:19199".parse().unwrap()).await.unwrap();
+    listener.listen().await;
+    let mut client1 = listener.accept().await.unwrap();
+    let mut client2 = RaknetSocket::connect(&"192.168.199.127:19132".parse().unwrap()).await.unwrap();
+    loop{
+        tokio::select!{
+            a = client1.recv() => {
+                let a = a.unwrap();
+                println!("send data to upstream : {}" , a.len());
+                client2.send(&a, Reliability::ReliableOrdered).await.unwrap();
+            },
+            b = client2.recv() => {
+                let b = b.unwrap();
+                println!("send data to downstream : {}" , b.len());
+                client1.send(&b, Reliability::ReliableOrdered).await.unwrap();
+            }
+        }
+    }
+
+}
 */

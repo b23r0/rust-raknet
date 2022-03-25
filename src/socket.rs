@@ -32,7 +32,7 @@ impl RaknetSocket {
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu , 0))),
             connected : Arc::new(AtomicBool::new(true)),
-            _guid : rand::random()
+            _guid : rand::random(),
         };
         ret.start_receiver(receiver);
         ret.start_tick();
@@ -63,8 +63,18 @@ impl RaknetSocket {
                     accepted_timestamp: cur_timestamp(),
                 };
 
+                let mut sendq = sendq.lock().await;
+
                 let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
-                sendq.lock().await.insert(Reliability::Reliable ,&buf, cur_timestamp_millis());
+                sendq.insert(Reliability::ReliableOrdered ,&buf, cur_timestamp_millis());
+
+                let ping = ConnectedPing{
+                    client_timestamp: cur_timestamp(),
+                };
+
+                //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
+                let buf = write_packet_connected_ping(&ping).await.unwrap();
+                sendq.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
             }
             PacketID::NewIncomingConnection => {
                 let _packet = read_packet_new_incomming_connection(&frame.data.as_slice()).await.unwrap();
@@ -215,7 +225,7 @@ impl RaknetSocket {
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(RAKNET_CLIENT_MTU , 1))),
+            sendq : Arc::new(Mutex::new(SendQ::new(reply1.mtu_size , 1))),
             connected : connected,
             _guid : guid
         };
