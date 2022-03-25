@@ -52,7 +52,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                sendq.lock().await.insert(Reliability::Reliable,&buf, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::ReliableOrdered,&buf, cur_timestamp_millis());
             },
             PacketID::ConnectionRequestAccepted => {
                 let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();

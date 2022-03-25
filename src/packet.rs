@@ -1,4 +1,5 @@
 use std::io::Result;
+use std::net::SocketAddr;
 use crate::datatype::{RaknetWriter , RaknetReader};
 use crate::utils::Endian;
 
@@ -459,7 +460,9 @@ pub async fn read_packet_connection_request_accepted(buf : &[u8]) -> Result<Conn
         client_address: unwrap_or_return!(cursor.read_address()),
         system_index: unwrap_or_return!(cursor.read_u16(Endian::Big)),
         request_timestamp: {
-            cursor.next(((buf.len() - 16) - cursor.pos() as usize) as u64);
+            for _ in 0..10{
+                unwrap_or_return!(cursor.read_address());
+            }
             unwrap_or_return!(cursor.read_i64(Endian::Big))
         },
         accepted_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
@@ -471,8 +474,9 @@ pub async fn write_packet_connection_request_accepted(packet : &ConnectionReques
     unwrap_or_return!(cursor.write_u8(PacketID::ConnectionRequestAccepted.to_u8()));
     unwrap_or_return!(cursor.write_address(packet.client_address));
     unwrap_or_return!(cursor.write_u16(packet.system_index, Endian::Big));
+    let tmp_address : SocketAddr = "255.255.255.255:19132".parse().unwrap();
     for _ in 0..10 {
-        cursor.write_u8(0x06).await?;
+        unwrap_or_return!(cursor.write_address(tmp_address));
     }
     unwrap_or_return!(cursor.write_i64(packet.request_timestamp, Endian::Big));
     unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
@@ -486,7 +490,9 @@ pub async fn read_packet_new_incomming_connection(buf : &[u8]) -> Result<NewInco
     Ok(NewIncomingConnection {
         server_address: unwrap_or_return!(cursor.read_address()),
         request_timestamp: {
-            cursor.next(((buf.len() - 16) - cursor.pos() as usize) as u64);
+            for _ in 0..10{
+                unwrap_or_return!(cursor.read_address());
+            }
             unwrap_or_return!(cursor.read_i64(Endian::Big))
         },
         accepted_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
@@ -497,8 +503,9 @@ pub async fn write_packet_new_incomming_connection(packet : &NewIncomingConnecti
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::NewIncomingConnection.to_u8()));
     unwrap_or_return!(cursor.write_address(packet.server_address));
+    let tmp_address : SocketAddr = "0.0.0.0:0".parse().unwrap();
     for _ in 0..10 {
-        unwrap_or_return!(cursor.write_u8(0x06));
+        unwrap_or_return!(cursor.write_address(tmp_address));
     }
     unwrap_or_return!(cursor.write_i64(packet.request_timestamp, Endian::Big));
     unwrap_or_return!(cursor.write_i64(packet.accepted_timestamp, Endian::Big));
