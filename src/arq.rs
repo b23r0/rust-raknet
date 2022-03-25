@@ -607,9 +607,9 @@ impl SendQ{
                     self.reliable_frame_index += 1;
                     self.ordered_frame_index += 1;
                 } else {
-                    let max = self.mtu - 60;
-                    let mut compound_size = buf.len() as u16 / max;
-                    if buf.len() as u16 % max != 0 {
+                    let max = (self.mtu - 60) as usize;
+                    let mut compound_size = buf.len() / max;
+                    if buf.len() % max != 0 {
                         compound_size += 1;
                     }
 

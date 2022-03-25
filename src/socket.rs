@@ -370,7 +370,8 @@ impl RaknetSocket {
 
                 sendq.tick(cur_timestamp_millis());
                 for f in sendq.flush(){
-                    s.send_to(f.serialize().await.as_slice(), peer_addr).await.unwrap();
+                    let data = f.serialize().await;
+                    s.send_to(&data, peer_addr).await.unwrap();
                 }
             }
             println!("finished tick");
