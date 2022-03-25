@@ -22,7 +22,7 @@ async fn test_ping_pong(){
 
         let _pong = packet::read_packet_ping(&buf[..size]).await.unwrap();
         let packet = packet::PacketUnconnectedPong{
-            time: utils::cur_timestamp(),
+            time: utils::cur_timestamp_millis(),
             magic: true,
             guid: rand::random(),
             motd : format!("MCPE;Dedicated Server;486;1.18.11;0;10;12322747879247233720;Bedrock level;Survival;1;{};", s.local_addr().unwrap().port())
@@ -193,4 +193,5 @@ async fn chore2(){
     }
 
 }
+
 */

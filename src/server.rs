@@ -82,7 +82,7 @@ impl RaknetListener {
                     let s = sessions.get(&i).unwrap();
 
                     //session 30s timeout
-                    if cur_timestamp() - s.0 >= 30 {
+                    if cur_timestamp_millis() - s.0 >= 30000 {
                         match s.1.send([PacketID::Disconnect.to_u8()].to_vec()).await{
                             Ok(_) => {},
                             Err(_) => {},
@@ -132,7 +132,7 @@ impl RaknetListener {
                         };
 
                         let packet = crate::packet::PacketUnconnectedPong { 
-                            time: cur_timestamp(), 
+                            time: cur_timestamp_millis(), 
                             guid: guid, 
                             magic: true, 
                             motd: motd 
@@ -153,7 +153,7 @@ impl RaknetListener {
                         };
 
                         let packet = crate::packet::PacketUnconnectedPong { 
-                            time: cur_timestamp(), 
+                            time: cur_timestamp_millis(), 
                             guid: guid, 
                             magic: true, 
                             motd: motd
@@ -241,7 +241,7 @@ impl RaknetListener {
 
                         let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
 
-                        sessions.insert(addr, (cur_timestamp() ,sender));
+                        sessions.insert(addr, (cur_timestamp_millis() ,sender));
                         let _ = connection_sender.send(s).await;
                     },
                     PacketID::Disconnect => {
@@ -261,7 +261,7 @@ impl RaknetListener {
                                     continue;
                                 },
                             };
-                            sessions.get_mut(&addr).unwrap().0 = cur_timestamp();
+                            sessions.get_mut(&addr).unwrap().0 = cur_timestamp_millis();
                         }
                     },
                 }

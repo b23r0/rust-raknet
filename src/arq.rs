@@ -548,10 +548,10 @@ pub struct SendQ{
 }
 
 impl SendQ{
-    pub fn new(mtu : u16 , init_sequence_number : u32) -> Self{
+    pub fn new(mtu : u16) -> Self{
         Self{
             mtu : mtu,
-            sequence_number : init_sequence_number,
+            sequence_number : 0,
             packets: HashMap::new(),
             unreliable_packets : vec![],
             repeat_request: HashMap::new(),
@@ -866,7 +866,7 @@ async fn test_recvq_fragment(){
 
 #[tokio::test]
 async fn test_sendq(){
-    let mut s = SendQ::new(1500 , 0);
+    let mut s = SendQ::new(1500);
     let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
     s.insert(Reliability::Reliable, &p.serialize().await, 0);
 

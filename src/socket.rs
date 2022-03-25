@@ -30,7 +30,7 @@ impl RaknetSocket {
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(mtu , 0))),
+            sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             connected : Arc::new(AtomicBool::new(true)),
             _guid : rand::random(),
         };
@@ -48,7 +48,7 @@ impl RaknetSocket {
                     client_address: peer_addr.clone(),
                     system_index: 0,
                     request_timestamp: packet.time,
-                    accepted_timestamp: cur_timestamp(),
+                    accepted_timestamp: cur_timestamp_millis(),
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
@@ -60,7 +60,7 @@ impl RaknetSocket {
                 let packet_reply = NewIncomingConnection{
                     server_address: local_addr.clone(),
                     request_timestamp: packet.request_timestamp,
-                    accepted_timestamp: cur_timestamp(),
+                    accepted_timestamp: cur_timestamp_millis(),
                 };
 
                 let mut sendq = sendq.lock().await;
@@ -69,7 +69,7 @@ impl RaknetSocket {
                 sendq.insert(Reliability::ReliableOrdered ,&buf, cur_timestamp_millis());
 
                 let ping = ConnectedPing{
-                    client_timestamp: cur_timestamp(),
+                    client_timestamp: cur_timestamp_millis(),
                 };
 
                 //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
@@ -84,7 +84,7 @@ impl RaknetSocket {
                 
                 let packet_reply = ConnectedPong{
                     client_timestamp: packet.client_timestamp,
-                    server_timestamp: cur_timestamp(),
+                    server_timestamp: cur_timestamp_millis(),
                 };
 
                 let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
@@ -169,17 +169,19 @@ impl RaknetSocket {
             Err(e) => return Err(e),
         };
 
+        let sendq = Arc::new(Mutex::new(SendQ::new(reply1.mtu_size)));
+
         let packet = ConnectionRequest{
             guid,
-            time: cur_timestamp(),
+            time: cur_timestamp_millis(),
             use_encryption: 0x00,
         };
 
         let buf = write_packet_connection_request(&packet).await.unwrap();
 
-        let frame = FrameSetPacket::new(Reliability::Reliable, buf);
-
-        s.send_to(&frame.serialize().await, addr).await.unwrap();
+        let mut sendq1 = sendq.lock().await;
+        sendq1.insert(Reliability::ReliableOrdered, &buf, cur_timestamp_millis());
+        std::mem::drop(sendq1);
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
 
@@ -225,9 +227,9 @@ impl RaknetSocket {
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver : user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(reply1.mtu_size , 1))),
+            sendq : sendq,
             connected : connected,
-            _guid : guid
+            _guid : guid,
         };
 
         ret.start_receiver(receiver);
@@ -305,7 +307,7 @@ impl RaknetSocket {
                         recvq.insert(frame);
 
                         for f in recvq.flush(){
-                            if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender ).await{
+                            if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender).await{
                                 connected.store(false, Ordering::Relaxed);
                                 return;
                             };
@@ -325,6 +327,7 @@ impl RaknetSocket {
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
+            let mut last_tick = cur_timestamp_millis();
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
 
@@ -353,6 +356,18 @@ impl RaknetSocket {
                 
                 //flush sendq
                 let mut sendq = sendq.lock().await;
+
+                if cur_timestamp_millis() - last_tick >= 2000{
+                    let ping = ConnectedPing{
+                        client_timestamp: cur_timestamp_millis(),
+                    };
+
+                    let buf = write_packet_connected_ping(&ping).await.unwrap();
+                    sendq.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
+
+                    last_tick = cur_timestamp_millis();
+                }
+
                 sendq.tick(cur_timestamp_millis());
                 for f in sendq.flush(){
                     s.send_to(f.serialize().await.as_slice(), peer_addr).await.unwrap();
@@ -364,7 +379,7 @@ impl RaknetSocket {
 
     pub async fn ping(addr : &SocketAddr) -> Result<i64> {
         let packet = PacketUnconnectedPing{
-            time: cur_timestamp(),
+            time: cur_timestamp_millis(),
             magic: true,
             guid: rand::random(),
         };
