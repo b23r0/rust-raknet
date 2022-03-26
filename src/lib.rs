@@ -38,7 +38,7 @@ async fn test_ping_pong(){
 
     let addr = format!("127.0.0.1:{}", port);
     let latency = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap()).await.unwrap();
-    assert!(latency < 10 && latency >= 0);
+    assert!((0..10).contains(&latency));
 }
 
 #[tokio::test]
@@ -173,27 +173,55 @@ async fn chore(){
     client.recv().await.unwrap();
 }
 
-*/
-
 #[tokio::test]
 async fn chore2(){
     let mut listener = RaknetListener::bind("0.0.0.0:19199".parse().unwrap()).await.unwrap();
     listener.listen().await;
-    let mut client1 = listener.accept().await.unwrap();
-    let mut client2 = RaknetSocket::connect(&"192.168.199.127:19132".parse().unwrap()).await.unwrap();
     loop{
-        tokio::select!{
-            a = client1.recv() => {
-                let a = a.unwrap();
-                println!("send data to upstream : {}" , a.len());
-                client2.send(&a, Reliability::ReliableOrdered).await.unwrap();
-            },
-            b = client2.recv() => {
-                let b = b.unwrap();
-                println!("send data to downstream : {}" , b.len());
-                client1.send(&b, Reliability::ReliableOrdered).await.unwrap();
+        let mut client1 = listener.accept().await.unwrap();
+        let mut client2 = RaknetSocket::connect(&"192.168.199.127:19132".parse().unwrap()).await.unwrap();
+        tokio::spawn(async move {
+            println!("build connection");
+            loop{
+                tokio::select!{
+                    a = client1.recv() => {
+                        let a = match a{
+                            Ok(p) => p,
+                            Err(_) => {
+                                client2.close().await.unwrap();
+                                break;
+                            },
+                        };
+                        match client2.send(&a, Reliability::ReliableOrdered).await{
+                            Ok(p) => p,
+                            Err(_) => {
+                                client1.close().await.unwrap();
+                                break;
+                            },
+                        };
+                    },
+                    b = client2.recv() => {
+                        let b = match b{
+                            Ok(p) => p,
+                            Err(_) => {
+                                client1.close().await.unwrap();
+                                break;
+                            },
+                        };
+                        match client1.send(&b, Reliability::ReliableOrdered).await{
+                            Ok(p) => p,
+                            Err(_) => {
+                                client2.close().await.unwrap();
+                                break;
+                            },
+                        };
+                    }
+                }
             }
-        }
+            println!("close connection");
+        });
     }
 
+
 }
+*/

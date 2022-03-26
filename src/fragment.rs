@@ -44,7 +44,7 @@ impl Fragment {
 
         let mut keys : Vec<u32> = self.frames.keys().cloned().collect();
 
-        keys.sort();
+        keys.sort_unstable();
 
         let sequence_number = self.frames[keys.last().unwrap()].sequence_number;
 

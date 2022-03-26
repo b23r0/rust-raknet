@@ -41,8 +41,8 @@ impl RaknetListener {
             socket : Arc::new(s),
             guid : rand::random(),
             listened : false,
-            connection_receiver : connection_receiver,
-            connection_sender : connection_sender,
+            connection_receiver,
+            connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -65,8 +65,8 @@ impl RaknetListener {
             socket : Arc::new(s),
             guid : rand::random(),
             listened : false,
-            connection_receiver : connection_receiver,
-            connection_sender : connection_sender,
+            connection_receiver,
+            connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -104,7 +104,7 @@ impl RaknetListener {
         }
 
         let socket = self.socket.clone();
-        let guid = self.guid.clone();
+        let guid = self.guid;
         let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
         let motd = self.get_motd().await;
@@ -124,7 +124,7 @@ impl RaknetListener {
                 let motd = motd.clone();
                 let (size , addr) = match socket.recv_from(&mut buf).await{
                     Ok(p) => p,
-                    Err(_) => return,
+                    Err(_) => break,
                 };
 
                 let cur_status = PacketID::from(buf[0]).unwrap();
@@ -138,9 +138,9 @@ impl RaknetListener {
 
                         let packet = crate::packet::PacketUnconnectedPong { 
                             time: cur_timestamp_millis(), 
-                            guid: guid, 
+                            guid, 
                             magic: true, 
-                            motd: motd 
+                            motd 
                         };
                         
                         let pong = match write_packet_pong(&packet).await{
@@ -159,9 +159,9 @@ impl RaknetListener {
 
                         let packet = crate::packet::PacketUnconnectedPong { 
                             time: cur_timestamp_millis(), 
-                            guid: guid, 
+                            guid, 
                             magic: true, 
-                            motd: motd
+                            motd
                         };
                         
                         let pong = match write_packet_pong(&packet).await{
@@ -192,7 +192,7 @@ impl RaknetListener {
 
                         let packet = crate::packet::OpenConnectionReply1 {
                             magic: true,
-                            guid: guid,
+                            guid,
                             // Make sure this is false, it is vital for the login sequence to continue
                             use_encryption: 0x00, 
                             // see Open Connection Request 1
@@ -215,7 +215,7 @@ impl RaknetListener {
 
                         let packet = crate::packet::OpenConnectionReply2 {
                             magic: true,
-                            guid: guid,
+                            guid,
                             address: addr,
                             mtu: req.mtu,
                             encryption_enabled: 0x00,
@@ -232,7 +232,7 @@ impl RaknetListener {
 
                             let packet = write_packet_already_connected(&AlreadyConnected{
                                 magic: true,
-                                guid : guid,
+                                guid,
                             }).await.unwrap();
 
                             socket.send_to(&packet, addr).await.unwrap();
@@ -272,7 +272,7 @@ impl RaknetListener {
                     },
                 }
             }
-            
+            raknet_log!("listen worker closed");
         });
     }
 

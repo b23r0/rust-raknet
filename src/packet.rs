@@ -57,7 +57,7 @@ impl PacketID{
 
     pub fn from(id : u8) -> Result<Self>{
 
-        if id >= 0x80 && id <= 0x8d {
+        if (0x80..=0x8d).contains(&id) {
             return Ok(PacketID::FrameSetPacketBegin);
         }
 
@@ -231,7 +231,7 @@ pub async fn read_packet_pong(buf : &[u8]) -> Result<PacketUnconnectedPong>{
         time: unwrap_or_return!(cursor.read_i64(Endian::Big)),
         guid: unwrap_or_return!(cursor.read_u64(Endian::Big)),
         magic: unwrap_or_return!(cursor.read_magic()),
-        motd: unwrap_or_return!(cursor.read_string()).to_owned(),
+        motd: unwrap_or_return!(cursor.read_string()),
     })
 }
 
@@ -389,9 +389,9 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
         }
     };
     Ok(NACK {
-        record_count : record_count,
+        record_count,
         single_sequence_number : single_sequence_number == 0x01,
-        sequences : sequences,
+        sequences,
     })
 }
 
@@ -422,9 +422,9 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
         }
     };
     Ok(ACK {
-        record_count : record_count,
+        record_count,
         single_sequence_number : single_sequence_number == 0x01,
-        sequences : sequences,
+        sequences,
     })
 }
 

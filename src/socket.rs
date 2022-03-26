@@ -1,6 +1,6 @@
 use std::{net::{SocketAddr}, sync::{Arc}};
 use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::{sleep, timeout}};
-use rand;
+
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::{Result, RaknetError};
@@ -24,11 +24,11 @@ impl RaknetSocket {
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
 
         let ret = RaknetSocket{
-            peer_addr : addr.clone(),
+            peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
             s: s.clone(),
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
-            user_data_receiver : user_data_receiver,
+            user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             connected : Arc::new(AtomicBool::new(true)),
@@ -41,10 +41,10 @@ impl RaknetSocket {
     async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Mutex<Sender<Vec<u8>>>) -> Result<bool> {
         match PacketID::from(frame.data[0])? {
             PacketID::ConnectionRequest => {
-                let packet = read_packet_connection_request(&frame.data.as_slice()).await.unwrap();
+                let packet = read_packet_connection_request(frame.data.as_slice()).await.unwrap();
                 
                 let packet_reply = ConnectionRequestAccepted{
-                    client_address: peer_addr.clone(),
+                    client_address: *peer_addr,
                     system_index: 0,
                     request_timestamp: packet.time,
                     accepted_timestamp: cur_timestamp_millis(),
@@ -54,10 +54,10 @@ impl RaknetSocket {
                 sendq.lock().await.insert(Reliability::ReliableOrdered,&buf, cur_timestamp_millis());
             },
             PacketID::ConnectionRequestAccepted => {
-                let packet = read_packet_connection_request_accepted(&frame.data.as_slice()).await.unwrap();
+                let packet = read_packet_connection_request_accepted(frame.data.as_slice()).await.unwrap();
                 
                 let packet_reply = NewIncomingConnection{
-                    server_address: local_addr.clone(),
+                    server_address: *local_addr,
                     request_timestamp: packet.request_timestamp,
                     accepted_timestamp: cur_timestamp_millis(),
                 };
@@ -76,10 +76,10 @@ impl RaknetSocket {
                 sendq.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
             }
             PacketID::NewIncomingConnection => {
-                let _packet = read_packet_new_incomming_connection(&frame.data.as_slice()).await.unwrap();
+                let _packet = read_packet_new_incomming_connection(frame.data.as_slice()).await.unwrap();
             }
             PacketID::ConnectedPing => {
-                let packet = read_packet_connected_ping(&frame.data.as_slice()).await.unwrap();
+                let packet = read_packet_connected_ping(frame.data.as_slice()).await.unwrap();
                 
                 let packet_reply = ConnectedPong{
                     client_timestamp: packet.client_timestamp,
@@ -102,7 +102,7 @@ impl RaknetSocket {
                 };
             },
         }
-        return Ok(true);
+        Ok(true)
     }
     
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
@@ -149,7 +149,7 @@ impl RaknetSocket {
             magic: true,
             address: src,
             mtu: reply1.mtu_size,
-            guid: guid,
+            guid,
         };
 
         let buf = write_packet_connection_open_request_2(&packet).await.unwrap();
@@ -191,7 +191,7 @@ impl RaknetSocket {
         let recv_s = s.clone();
         let connected = Arc::new(AtomicBool::new(true));
         let connected_s = connected.clone();
-        let peer_addr = addr.clone();
+        let peer_addr = *addr;
         tokio::spawn(async move {
             let mut buf = [0u8;2048];
             loop{
@@ -221,14 +221,14 @@ impl RaknetSocket {
         });
 
         let ret = RaknetSocket{
-            peer_addr : addr.clone(),
+            peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
-            s: s,
+            s,
             user_data_sender : Arc::new(Mutex::new(user_data_sender)),
-            user_data_receiver : user_data_receiver,
+            user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : sendq,
-            connected : connected,
+            sendq,
+            connected,
         };
 
         ret.start_receiver(receiver);
@@ -238,8 +238,8 @@ impl RaknetSocket {
 
     fn start_receiver(&self , mut receiver : Receiver<Vec<u8>>) {
         let connected = self.connected.clone();
-        let peer_addr = self.peer_addr.clone();
-        let local_addr = self.local_addr.clone();
+        let peer_addr = self.peer_addr;
+        let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
         let user_data_sender = self.user_data_sender.clone();
         let recvq = self.recvq.clone();
@@ -322,7 +322,7 @@ impl RaknetSocket {
     fn start_tick(&self) {
         let connected = self.connected.clone();
         let s = self.s.clone();
-        let peer_addr = self.peer_addr.clone();
+        let peer_addr = self.peer_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
@@ -344,7 +344,7 @@ impl RaknetSocket {
                     let packet = ACK{
                         // catch minecraft 1.18.2 client packet , the parameter always 1
                         record_count: 1,
-                        single_sequence_number: single_sequence_number,
+                        single_sequence_number,
                         sequences: ack,
                     };
 

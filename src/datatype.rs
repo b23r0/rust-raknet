@@ -21,24 +21,38 @@ impl RaknetWriter {
     }
 
     pub async fn write(&mut self, v: &[u8]) -> Result<()> {
-        Ok(self.buf.put_slice(v))
+        self.buf.put_slice(v);
+        Ok(())
     }
 
     pub async fn write_u8(&mut self, v: u8) -> Result<()> {
-        Ok(self.buf.put_u8(v))
+        self.buf.put_u8(v);
+        Ok(())
     }
 
     pub async fn write_i16(&mut self, v: i16, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_i16(v)),
-            Endian::Little => Ok(self.buf.put_i16_le(v))
+            Endian::Big => {
+                self.buf.put_i16(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_i16_le(v);
+                Ok(())
+            }
         }
     }
 
     pub async fn write_u16(&mut self, v: u16, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_u16(v)),
-            Endian::Little => Ok(self.buf.put_u16_le(v))
+            Endian::Big => {
+                self.buf.put_u16(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_u16_le(v);
+                Ok(())
+            }
         }
     }
 
@@ -62,22 +76,40 @@ impl RaknetWriter {
 
     pub async fn write_u32(&mut self, v: u32, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_u32(v)),
-            Endian::Little => Ok(self.buf.put_u32_le(v))
+            Endian::Big => {
+                self.buf.put_u32(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_u32_le(v);
+                Ok(())
+            }
         }
     }
 
     pub async fn write_i32(&mut self, v: i32, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_i32(v)),
-            Endian::Little => Ok(self.buf.put_i32_le(v))
+            Endian::Big => {
+                self.buf.put_i32(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_i32_le(v);
+                Ok(())
+            }
         }
     }
 
     pub async fn write_i64(&mut self, v: i64, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_i64(v)),
-            Endian::Little => Ok(self.buf.put_i64_le(v))
+            Endian::Big => {
+                self.buf.put_i64(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_i64_le(v);
+                Ok(())
+            }
         }
     }
 
@@ -92,15 +124,22 @@ impl RaknetWriter {
 
     pub async fn write_u64(&mut self, v: u64, n: Endian) -> Result<()> {
         match n {
-            Endian::Big => Ok(self.buf.put_u64(v)),
-            Endian::Little => Ok(self.buf.put_u64_le(v)),
+            Endian::Big => {
+                self.buf.put_u64(v);
+                Ok(())
+            },
+            Endian::Little => {
+                self.buf.put_u64_le(v);
+                Ok(())
+            },
         }
     }
 
     pub async fn write_string(&mut self, body: &str) -> Result<()> {
         let raw = body.as_bytes();
         self.buf.put_u16(raw.len() as u16);
-        Ok(self.buf.put_slice(raw))
+        self.buf.put_slice(raw);
+        Ok(())
     }
 
     pub async fn write_address(&mut self, address: SocketAddr) -> Result<()> {

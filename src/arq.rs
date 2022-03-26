@@ -83,7 +83,7 @@ impl FrameSetPacket {
             compound_size: 0,
             compound_id: 0,
             fragment_index: 0,
-            data: data
+            data
         }
     }
 
@@ -179,7 +179,7 @@ impl FrameSetPacket {
             writer.write_u16(self.compound_id , Endian::Big).await.unwrap();
             writer.write_u32(self.fragment_index , Endian::Big).await.unwrap();
         }
-        writer.write(&self.data.as_slice()).await.unwrap();
+        writer.write(self.data.as_slice()).await.unwrap();
 
         Ok(writer.get_raw_payload())
     }
@@ -360,7 +360,7 @@ impl FrameVec {
                 writer.write_u16(frame.compound_id , Endian::Big).await.unwrap();
                 writer.write_u32(frame.fragment_index , Endian::Big).await.unwrap();
             }
-            writer.write(&frame.data.as_slice()).await.unwrap();
+            writer.write(frame.data.as_slice()).await.unwrap();
         }
 
 
@@ -433,9 +433,7 @@ impl RecvQ {
         match frame.reliability()?{
             // UNRELIABLE - 5, 1, 6
             Reliability::Unreliable => {
-                if !self.packets.contains_key(&frame.sequence_number){
-                    self.packets.insert(frame.sequence_number, frame);
-                }
+                self.packets.entry(frame.sequence_number).or_insert(frame);
             },
             // UNRELIABLE_SEQUENCED - 5 (6 was lost in transit, 1,2,3,4 arrived later than 5)
             // With the UNRELIABLE_SEQUENCED transmission method, the game data does not need to arrive in every packet to avoid packet loss and retransmission, 
@@ -443,8 +441,8 @@ impl RecvQ {
             Reliability::UnreliableSequenced => {
                 let sequenced_frame_index = frame.sequenced_frame_index;
                 if sequenced_frame_index >= self.sequenced_frame_index {
-                    if !self.packets.contains_key(&frame.sequence_number){
-                        self.packets.insert(frame.sequence_number, frame);
+                    if let std::collections::hash_map::Entry::Vacant(e) = self.packets.entry(frame.sequence_number) {
+                        e.insert(frame);
                         self.sequenced_frame_index = sequenced_frame_index + 1;
                     }
                 }
@@ -460,14 +458,10 @@ impl RecvQ {
                     self.fragment_queue.insert(frame);
         
                     for i in self.fragment_queue.flush()?{
-                        if !self.ordered_packets.contains_key(&i.ordered_frame_index){
-                            self.ordered_packets.insert(i.ordered_frame_index , i);
-                        }
+                        self.ordered_packets.entry(i.ordered_frame_index).or_insert(i);
                     }
                 } else {
-                    if !self.ordered_packets.contains_key(&frame.ordered_frame_index){
-                        self.ordered_packets.insert(frame.ordered_frame_index , frame);
-                    }
+                    self.ordered_packets.entry(frame.ordered_frame_index).or_insert(frame);
                 }
             },
             // RELIABLE_SEQUENCED - 5, 6 (1,2,3,4 arrived later than 5)
@@ -475,8 +469,8 @@ impl RecvQ {
 
                 let sequenced_frame_index = frame.sequenced_frame_index;
                 if sequenced_frame_index >= self.sequenced_frame_index {
-                    if !self.packets.contains_key(&frame.sequence_number){
-                        self.packets.insert(frame.sequence_number, frame);
+                    if let std::collections::hash_map::Entry::Vacant(e) = self.packets.entry(frame.sequence_number) {
+                        e.insert(frame);
                         self.sequenced_frame_index = sequenced_frame_index + 1;
                     }
                 }
@@ -493,7 +487,7 @@ impl RecvQ {
         let mut ret = vec![];
         let mut ordered_keys : Vec<u32> = self.ordered_packets.keys().cloned().collect();
 
-        ordered_keys.sort();
+        ordered_keys.sort_unstable();
 
         for i in ordered_keys{
             if i == self.last_ordered_index{
@@ -505,7 +499,7 @@ impl RecvQ {
         }
 
         let mut packets_keys : Vec<u32> = self.packets.keys().cloned().collect();
-        packets_keys.sort();
+        packets_keys.sort_unstable();
 
         for i in packets_keys{
             let v = self.packets.get(&i).unwrap();
@@ -533,7 +527,7 @@ pub struct SendQ{
 impl SendQ{
     pub fn new(mtu : u16) -> Self{
         Self{
-            mtu : mtu,
+            mtu,
             sequence_number : 0,
             packets: HashMap::new(),
             unreliable_packets : vec![],
@@ -694,7 +688,7 @@ impl SendQ{
         if !self.packets.is_empty(){
 
             let mut keys : Vec<u32> = self.packets.keys().cloned().collect();
-            keys.sort();
+            keys.sort_unstable();
 
             for i in keys{
                 let p = self.packets.get_mut(&i).unwrap();
@@ -709,7 +703,7 @@ impl SendQ{
             ret.push(i.clone());
         }
         self.unreliable_packets.clear();
-        return ret;
+        ret
     }
 }
 
@@ -877,7 +871,7 @@ async fn test_sendq(){
     s.ack(1);
 
     let ret = s.flush();
-    assert!(ret.len() == 0);
+    assert!(ret.is_empty());
 }
 
 #[tokio::test]
@@ -922,7 +916,7 @@ async fn test_client_packet2(){
         let v = FrameVec::new(i.clone()).await.unwrap();
         for i in v.frames{
             rq.insert(i).unwrap();
-            if rq.flush().len() != 0{
+            if !rq.flush().is_empty(){
                 n += 1;
             }
         }
