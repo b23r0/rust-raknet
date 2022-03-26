@@ -71,27 +71,17 @@ impl RaknetListener {
         })
     }
 
-    async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>) {
+    async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>> ,mut collect_receiver : Receiver<SocketAddr>) {
         let sessions = sessions.clone();
         let socket = socket.clone();
         tokio::spawn(async move{
             loop{
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let addr = collect_receiver.recv().await.unwrap();
+
                 let mut sessions = sessions.lock().await;
-                let keys : Vec<SocketAddr> = sessions.keys().cloned().collect();
-                for i in keys{
-                    let s = sessions.get(&i).unwrap();
-
-                    //session 30s timeout
-                    if cur_timestamp_millis() - s.0 >= 30000 {
-                        match s.1.send([PacketID::Disconnect.to_u8()].to_vec()).await{
-                            Ok(_) => {},
-                            Err(_) => {},
-                        };
-                        sessions.remove(&i);
-
-                        socket.send_to(&[PacketID::Disconnect.to_u8()], i).await.unwrap();
-                    }
+                if sessions.contains_key(&addr){
+                    socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await.unwrap();
+                    sessions.remove(&addr);
                 }
             }
         });
@@ -111,7 +101,9 @@ impl RaknetListener {
 
         self.listened = true;
 
-        self.start_session_collect(&socket ,&sessions).await;
+        let (collect_sender ,collect_receiver) = channel::<SocketAddr>(10);
+        let collect_sender = Arc::new(Mutex::new(collect_sender));
+        self.start_session_collect(&socket ,&sessions , collect_receiver).await;
 
         let local_addr = socket.local_addr().unwrap();
 
@@ -244,7 +236,7 @@ impl RaknetListener {
 
                         let (sender , receiver) = channel::<Vec<u8>>(10);
 
-                        let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
+                        let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu , collect_sender.clone());
 
                         raknet_log!("accept connection : {}", addr);
                         sessions.insert(addr, (cur_timestamp_millis() ,sender));

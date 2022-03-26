@@ -19,7 +19,7 @@ pub struct RaknetSocket{
 }
 
 impl RaknetSocket {
-    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16) -> Self {
+    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
 
@@ -34,7 +34,7 @@ impl RaknetSocket {
             connected : Arc::new(AtomicBool::new(true)),
         };
         ret.start_receiver(receiver);
-        ret.start_tick();
+        ret.start_tick(Some(collecter));
         ret
     }
 
@@ -232,7 +232,7 @@ impl RaknetSocket {
         };
 
         ret.start_receiver(receiver);
-        ret.start_tick();
+        ret.start_tick(None);
         Ok(ret)
     }
 
@@ -319,7 +319,7 @@ impl RaknetSocket {
         });
     }
 
-    fn start_tick(&self) {
+    fn start_tick(&self , collecter : Option<Arc<Mutex<Sender<SocketAddr>>>>) {
         let connected = self.connected.clone();
         let s = self.s.clone();
         let peer_addr = self.peer_addr;
@@ -359,6 +359,13 @@ impl RaknetSocket {
                     let data = f.serialize().await.unwrap();
                     s.send_to(&data, peer_addr).await.unwrap();
                 }
+            }
+
+            match collecter{
+                Some(p) => {
+                    p.lock().await.send(peer_addr).await.unwrap();
+                },
+                None => {},
             }
             raknet_log!("{} , ticker finished" , peer_addr);
         });
