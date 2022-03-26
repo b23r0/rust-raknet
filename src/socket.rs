@@ -416,6 +416,10 @@ impl RaknetSocket {
 
     pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
 
+        if !self.connected.load(Ordering::Relaxed){
+            return Err(RaknetError::ConnectionClosed);
+        }
+
         self.sendq.lock().await.insert(r , buf, cur_timestamp_millis());
         Ok(())
     }
