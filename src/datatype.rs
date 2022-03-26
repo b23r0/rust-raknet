@@ -1,10 +1,10 @@
 use bytes::{BufMut , Buf};
 use std::{
-    io::{Cursor, Result, Read},
+    io::{Cursor, Read},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str,
 };
-
+use crate::error::*;
 use crate::utils::Endian;
 
 #[derive(Clone)]
@@ -151,7 +151,10 @@ impl RaknetReader {
         }
     }
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
-        self.buf.read_exact(buf)
+        match self.buf.read_exact(buf){
+            Ok(p) => Ok(p),
+            Err(_) => Err(RaknetError::ReadPacketBufferError),
+        }
     }
     pub async fn read_u8(&mut self) -> Result<u8> {
         Ok(self.buf.get_u8())
@@ -209,13 +212,13 @@ impl RaknetReader {
     pub async fn read_string(&mut self) -> Result<String> {
         let size = self.read_u16(Endian::Big).await?;
         let mut buf = vec![0u8 ; size as usize].into_boxed_slice();
-        self.buf.read_exact(&mut buf)?;
+        self.read(&mut buf).await?;
         Ok(String::from_utf8(buf.to_vec()).unwrap())
     }
 
     pub async fn read_magic(&mut self) -> Result<bool> {
         let mut magic = [0; 16];
-        self.buf.read_exact(&mut magic)?;
+        self.read(&mut magic).await?;
         let offline_magic = [
             0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34,
             0x56, 0x78,
@@ -240,7 +243,7 @@ impl RaknetReader {
             let port = self.read_u16(Endian::Big).await?;
             self.next(4);
             let mut addr_buf = [0; 16];
-            self.buf.read_exact(&mut addr_buf)?;
+            self.read(&mut addr_buf).await?;
 
             let mut address_cursor = RaknetReader::new(addr_buf.to_vec());
             self.next(4);

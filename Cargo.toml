@@ -7,8 +7,5 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.1.0"
-chrono = "0.4.1"
 rand = {version = "0.8.5", features = ["std"]}
 tokio = {version = "1.17.0", features = ["full"]}
-tokio-byteorder = "0.3.0"
-async-trait = "0.1.52"

@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::channel;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
-use std::{io::Result, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
 use rand;
-use crate::socket::*;
+use crate::{socket::*, raknet_log};
 use crate::packet::*;
 use crate::utils::*;
+use crate::error::{Result, RaknetError};
 
 const SERVER_NAME : &str = "Rust Raknet Server";
 const MAX_CONNECTION : u64 = 99999;
@@ -28,8 +29,8 @@ impl RaknetListener {
         
         let s = match UdpSocket::bind(sockaddr).await{
             Ok(p) => p,
-            Err(e) => {
-                return Err(e);
+            Err(_) => {
+                return Err(RaknetError::BindAdreesError);
             },
         };
 
@@ -52,8 +53,8 @@ impl RaknetListener {
 
         let s = match UdpSocket::from_std(s){
             Ok(p) => p,
-            Err(e) => {
-                return Err(e);
+            Err(_) => {
+                return Err(RaknetError::SetRaknetRawSocketError);
             },
         };
 
@@ -112,8 +113,12 @@ impl RaknetListener {
 
         self.start_session_collect(&socket ,&sessions).await;
 
+        let local_addr = socket.local_addr().unwrap();
+
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
+
+            raknet_log!("start listen worker : {}" , local_addr );
     
             loop{
                 let motd = motd.clone();
@@ -122,7 +127,7 @@ impl RaknetListener {
                     Err(_) => return,
                 };
 
-                let cur_status = PacketID::from(buf[0]);
+                let cur_status = PacketID::from(buf[0]).unwrap();
                 
                 match cur_status{
                     PacketID::UnconnectedPing1 => {
@@ -241,6 +246,7 @@ impl RaknetListener {
 
                         let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu);
 
+                        raknet_log!("accept connection : {}", addr);
                         sessions.insert(addr, (cur_timestamp_millis() ,sender));
                         let _ = connection_sender.send(s).await;
                     },
@@ -272,7 +278,7 @@ impl RaknetListener {
 
     pub async fn accept(&mut self) -> Result<RaknetSocket> {
         if !self.listened{
-            Err(std::io::Error::new(std::io::ErrorKind::Other , "not listen"))
+            Err(RaknetError::NotListen)
         }else {
             Ok(self.connection_receiver.recv().await.unwrap())
         }

@@ -4,11 +4,14 @@ mod utils;
 mod datatype;
 mod arq;
 mod fragment;
+mod log;
+mod error;
 pub mod server;
 
 pub use crate::arq::Reliability;
 pub use crate::server::*;
 pub use crate::socket::*;
+pub use crate::log::enbale_raknet_log;
 
 #[tokio::test]
 async fn test_ping_pong(){
@@ -170,6 +173,7 @@ async fn chore(){
     client.recv().await.unwrap();
 }
 
+*/
 
 #[tokio::test]
 async fn chore2(){
@@ -193,5 +197,3 @@ async fn chore2(){
     }
 
 }
-
-*/

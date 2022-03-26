@@ -1,6 +1,7 @@
-use std::io::Result;
 use std::net::SocketAddr;
+use crate::error::*;
 use crate::datatype::{RaknetWriter , RaknetReader};
+use crate::error::RaknetError;
 use crate::utils::Endian;
 
 #[warn(non_camel_case_types)]
@@ -25,7 +26,7 @@ pub enum PacketID {
     FrameSetPacketEnd = 0x8d,
     NACK = 0xa0,
     ACK = 0xc0,
-    Unknown = 0xff
+    Game = 0xfe,
 }
 
 impl PacketID{
@@ -46,36 +47,42 @@ impl PacketID{
             PacketID::NewIncomingConnection => 0x13,
             PacketID::Disconnect => 0x15,
             PacketID::IncompatibleProtocolVersion => 0x19,
-            PacketID::Unknown => 0xff,
             PacketID::FrameSetPacketBegin => 0x80,
             PacketID::FrameSetPacketEnd => 0x8d,
             PacketID::NACK => 0xa0,
             PacketID::ACK => 0xc0,
+            PacketID::Game => 0xfe,
         }
     }
 
-    pub fn from(id : u8) -> Self{
+    pub fn from(id : u8) -> Result<Self>{
+
+        if id >= 0x80 && id <= 0x8d {
+            return Ok(PacketID::FrameSetPacketBegin);
+        }
+
         match id{
-            0x00 => PacketID::ConnectedPing,
-            0x01 => PacketID::UnconnectedPing1,
-            0x02 => PacketID::UnconnectedPing2,
-            0x03 => PacketID::ConnectedPong,
-            0x1c => PacketID::UnconnectedPong,
-            0x05 => PacketID::OpenConnectionRequest1,
-            0x06 => PacketID::OpenConnectionReply1,
-            0x07 => PacketID::OpenConnectionRequest2,
-            0x08 => PacketID::OpenConnectionReply2,
-            0x09 => PacketID::ConnectionRequest,
-            0x10 => PacketID::ConnectionRequestAccepted,
-            0x12 => PacketID::AlreadyConnected,
-            0x13 => PacketID::NewIncomingConnection,
-            0x15 => PacketID::Disconnect,
-            0x19 => PacketID::IncompatibleProtocolVersion,
-            0x80 => PacketID::FrameSetPacketBegin,
-            0x8d => PacketID::FrameSetPacketEnd,
-            0xa0 => PacketID::NACK,
-            0xc0 => PacketID::ACK,
-            _ => PacketID::Unknown
+            0x00 => Ok(PacketID::ConnectedPing),
+            0x01 => Ok(PacketID::UnconnectedPing1),
+            0x02 => Ok(PacketID::UnconnectedPing2),
+            0x03 => Ok(PacketID::ConnectedPong),
+            0x1c => Ok(PacketID::UnconnectedPong),
+            0x05 => Ok(PacketID::OpenConnectionRequest1),
+            0x06 => Ok(PacketID::OpenConnectionReply1),
+            0x07 => Ok(PacketID::OpenConnectionRequest2),
+            0x08 => Ok(PacketID::OpenConnectionReply2),
+            0x09 => Ok(PacketID::ConnectionRequest),
+            0x10 => Ok(PacketID::ConnectionRequestAccepted),
+            0x12 => Ok(PacketID::AlreadyConnected),
+            0x13 => Ok(PacketID::NewIncomingConnection),
+            0x15 => Ok(PacketID::Disconnect),
+            0x19 => Ok(PacketID::IncompatibleProtocolVersion),
+            0x80 => Ok(PacketID::FrameSetPacketBegin),
+            0x8d => Ok(PacketID::FrameSetPacketEnd),
+            0xa0 => Ok(PacketID::NACK),
+            0xc0 => Ok(PacketID::ACK),
+            0xfe => Ok(PacketID::Game),
+            _ => Err(RaknetError::IncorrectPacketID)
         }
     }
 }

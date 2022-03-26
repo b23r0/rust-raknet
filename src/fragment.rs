@@ -1,5 +1,5 @@
 use std::{collections::HashMap};
-
+use crate::error::*;
 use crate::arq::{FrameSetPacket, Reliability};
 
 struct Fragment{
@@ -39,7 +39,7 @@ impl Fragment {
         self.frames.insert(frame.fragment_index, frame);
     }
 
-    pub fn merge(&mut self) -> FrameSetPacket{
+    pub fn merge(&mut self) -> Result<FrameSetPacket>{
         let mut buf = vec![];
 
         let mut keys : Vec<u32> = self.frames.keys().cloned().collect();
@@ -53,13 +53,13 @@ impl Fragment {
         }
 
         let mut ret = FrameSetPacket::new(
-            Reliability::from((self.flags & 224) >> 5) , 
+            Reliability::from((self.flags & 224) >> 5)?, 
             buf
         );
 
         ret.ordered_frame_index = self.ordered_frame_index;
         ret.sequence_number = sequence_number;
-        ret
+        Ok(ret)
     }
 }
 
@@ -86,7 +86,7 @@ impl FragmentQ {
         }
     }
 
-    pub fn flush(&mut self) -> Vec<FrameSetPacket>{
+    pub fn flush(&mut self) -> Result<Vec<FrameSetPacket>>{
         let mut ret = vec![];
 
         let keys : Vec<u16> = self.fragments.keys().cloned().collect();
@@ -94,9 +94,9 @@ impl FragmentQ {
         for i in keys{
             let a = self.fragments.get_mut(&i).unwrap();
             if a.full() {
-                ret.push(a.merge());
+                ret.push(a.merge()?);
             }
         }
-        ret
+        Ok(ret)
     }
 }
