@@ -241,6 +241,7 @@ impl RaknetSocket {
         let peer_addr = self.peer_addr;
         let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
+        let socket = self.s.clone();
         let user_data_sender = self.user_data_sender.clone();
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
@@ -300,9 +301,8 @@ impl RaknetSocket {
 
                     let frames = FrameVec::new(buf.clone()).await.unwrap();
 
+                    let mut recvq = recvq.lock().await;
                     for frame in frames.frames{
-                        
-                        let mut recvq = recvq.lock().await;
                         recvq.insert(frame).unwrap();
 
                         for f in recvq.flush(){
@@ -311,6 +311,18 @@ impl RaknetSocket {
                                 return;
                             };
                         }
+                    }
+
+                    for nack in recvq.get_nack(){
+                        let nack = NACK{
+                            // always 1
+                            record_count: 1,
+                            single_sequence_number: nack.0 == nack.1,
+                            sequences: nack,
+                        };
+
+                        let buf = write_packet_nack(&nack).await.unwrap();
+                        socket.send_to(&buf, peer_addr).await.unwrap();
                     }
                 }
             }

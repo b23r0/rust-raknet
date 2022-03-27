@@ -175,6 +175,7 @@ async fn chore(){
 
 #[tokio::test]
 async fn chore2(){
+
     enbale_raknet_log(true);
     let mut listener = RaknetListener::bind("0.0.0.0:19199".parse().unwrap()).await.unwrap();
     listener.listen().await;
