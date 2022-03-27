@@ -11,7 +11,6 @@ pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
     s : Arc<UdpSocket>,
-    user_data_sender : Arc<Mutex<Sender<Vec<u8>>>>,
     user_data_receiver : Receiver<Vec<u8>>,
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
@@ -27,18 +26,17 @@ impl RaknetSocket {
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
             s: s.clone(),
-            user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             connected : Arc::new(AtomicBool::new(true)),
         };
-        ret.start_receiver(receiver);
+        ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(Some(collecter));
         ret
     }
 
-    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Mutex<Sender<Vec<u8>>>) -> Result<bool> {
+    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Sender<Vec<u8>>) -> Result<bool> {
         match PacketID::from(frame.data[0])? {
             PacketID::ConnectionRequest => {
                 let packet = read_packet_connection_request(frame.data.as_slice()).await.unwrap();
@@ -94,7 +92,7 @@ impl RaknetSocket {
                 return Ok(false);
             },
             _ => {
-                match user_data_sender.lock().await.send(frame.data.clone()).await{
+                match user_data_sender.send(frame.data.clone()).await{
                     Ok(_) => {},
                     Err(_) => {
                         return Ok(false);
@@ -224,25 +222,23 @@ impl RaknetSocket {
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
             s,
-            user_data_sender : Arc::new(Mutex::new(user_data_sender)),
             user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq,
             connected,
         };
 
-        ret.start_receiver(receiver);
+        ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(None);
         Ok(ret)
     }
 
-    fn start_receiver(&self , mut receiver : Receiver<Vec<u8>>) {
+    fn start_receiver(&self , mut receiver : Receiver<Vec<u8>> , user_data_sender : Sender<Vec<u8>>) {
         let connected = self.connected.clone();
         let peer_addr = self.peer_addr;
         let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
         let socket = self.s.clone();
-        let user_data_sender = self.user_data_sender.clone();
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
@@ -442,21 +438,14 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        loop{
-            match match timeout(std::time::Duration::from_secs(10), self.user_data_receiver.recv()).await{
-                Ok(p) => p,
-                Err(_) => {
-                    if !self.connected.load(Ordering::Relaxed){
-                        return Err(RaknetError::ConnectionClosed);
-                    }
-                    continue;
-                },
-            }{
-                Some(p) => return Ok(p),
-                None => {
-                    return Err(RaknetError::RecvFromError);
-                },
-            }
+        match self.user_data_receiver.recv().await{
+            Some(p) => return Ok(p),
+            None => {
+                if !self.connected.load(Ordering::Relaxed){
+                    return Err(RaknetError::ConnectionClosed);
+                }
+                return Err(RaknetError::RecvFromError);
+            },
         }
 
     }

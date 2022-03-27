@@ -76,7 +76,13 @@ impl RaknetListener {
         let socket = socket.clone();
         tokio::spawn(async move{
             loop{
-                let addr = collect_receiver.recv().await.unwrap();
+                let addr = match collect_receiver.recv().await{
+                    Some(p) => p,
+                    None => {
+                        raknet_log!("session collecter closed");
+                        break;
+                    },
+                };
 
                 let mut sessions = sessions.lock().await;
                 if sessions.contains_key(&addr){
@@ -116,7 +122,10 @@ impl RaknetListener {
                 let motd = motd.clone();
                 let (size , addr) = match socket.recv_from(&mut buf).await{
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(e) => {
+                        raknet_log!("server recv_from error {}" , e);
+                        break;
+                    },
                 };
 
                 let cur_status = PacketID::from(buf[0]).unwrap();
