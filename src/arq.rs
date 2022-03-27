@@ -535,6 +535,14 @@ impl RecvQ {
         self.packets.clear();
         ret
     }
+
+    pub fn get_fragment_queue_size(&self) -> usize{
+        self.fragment_queue.size()
+    }
+
+    pub fn get_size(&self) -> usize {
+        self.packets.len()
+    }
 }
 
 pub struct SendQ{
@@ -726,6 +734,14 @@ impl SendQ{
         }
         self.unreliable_packets.clear();
         ret
+    }
+
+    pub fn get_repeat_queue_size(&self) -> usize{
+        self.repeat_request.len()
+    }
+
+    pub fn get_reliable_queue_size(&self) -> usize{
+        self.packets.len()
     }
 }
 

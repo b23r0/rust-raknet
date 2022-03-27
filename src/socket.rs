@@ -333,6 +333,7 @@ impl RaknetSocket {
         let peer_addr = self.peer_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
+        let mut last_monitor_tick = cur_timestamp_millis();
         tokio::spawn(async move {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
@@ -367,6 +368,19 @@ impl RaknetSocket {
                     let data = f.serialize().await.unwrap();
                     s.send_to(&data, peer_addr).await.unwrap();
                 }
+
+                //monitor log
+                if cur_timestamp_millis() - last_monitor_tick > 10000{
+                    raknet_log!("peer addr : {} ,repeat queue size : {} , reliable packet queue size : {} , recvq size : {} , recvq fragment size : {}" , 
+                        peer_addr,
+                        sendq.get_repeat_queue_size() , 
+                        sendq.get_reliable_queue_size(),
+                        recvq.get_size(),
+                        recvq.get_fragment_queue_size()
+                    );
+                    last_monitor_tick = cur_timestamp_millis();
+                }
+                
             }
 
             match collecter{

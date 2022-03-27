@@ -99,4 +99,8 @@ impl FragmentQ {
         }
         Ok(ret)
     }
+
+    pub fn size(&self) -> usize{
+        self.fragments.len()
+    }
 }
