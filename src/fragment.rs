@@ -95,8 +95,10 @@ impl FragmentQ {
             let a = self.fragments.get_mut(&i).unwrap();
             if a.full() {
                 ret.push(a.merge()?);
+                self.fragments.remove(&i);
             }
         }
+
         Ok(ret)
     }
 
