@@ -88,6 +88,7 @@ impl RaknetListener {
                 if sessions.contains_key(&addr){
                     socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await.unwrap();
                     sessions.remove(&addr);
+                    raknet_log!("collect socket : {}" , addr);
                 }
             }
         });

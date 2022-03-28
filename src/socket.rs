@@ -242,15 +242,11 @@ impl RaknetSocket {
         let recvq = self.recvq.clone();
         tokio::spawn(async move {
             loop{
-                let buf = match match timeout(std::time::Duration::from_secs(10) ,receiver.recv()).await{
-                    Ok(p) => p,
-                    Err(_) => {
-                        if !connected.load(Ordering::Relaxed){
-                            break;
-                        }
-                        continue;
-                    }
-                }{
+                if !connected.load(Ordering::Relaxed){
+                    break;
+                }
+
+                let buf = match receiver.recv().await{
                     Some(buf) => buf,
                     None => {
                         connected.store(false, Ordering::Relaxed);
@@ -275,6 +271,7 @@ impl RaknetSocket {
                         }
                         
                     }
+                    continue;
                 }
 
                 if buf[0] == PacketID::NACK.to_u8(){
@@ -289,6 +286,7 @@ impl RaknetSocket {
                             sendq.nack(i, cur_timestamp_millis());
                         }
                     }
+                    continue;
                 }
 
                 // handle packet in here
@@ -298,14 +296,20 @@ impl RaknetSocket {
                     let frames = FrameVec::new(buf.clone()).await.unwrap();
 
                     let mut recvq = recvq.lock().await;
+                    let mut is_break = false;
                     for frame in frames.frames{
                         recvq.insert(frame).unwrap();
 
                         for f in recvq.flush(){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender).await.unwrap(){
                                 connected.store(false, Ordering::Relaxed);
-                                return;
+                                is_break = true;
+                                break;
                             };
+                        }
+
+                        if is_break {
+                            break;
                         }
                     }
 
@@ -318,8 +322,15 @@ impl RaknetSocket {
                         };
 
                         let buf = write_packet_nack(&nack).await.unwrap();
-                        socket.send_to(&buf, peer_addr).await.unwrap();
+                        match socket.send_to(&buf, peer_addr).await{
+                            Ok(_) => {},
+                            Err(_) => {
+                                break;
+                            },
+                        };
                     }
+                } else {
+                    raknet_log!("unknown packetid : {}", buf[0]);
                 }
             }
 
@@ -337,10 +348,6 @@ impl RaknetSocket {
         tokio::spawn(async move {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
-
-                if !connected.load(Ordering::Relaxed){
-                    break;
-                }
 
                 // flush ack
                 let mut recvq = recvq.lock().await;
@@ -379,6 +386,10 @@ impl RaknetSocket {
                         recvq.get_fragment_queue_size()
                     );
                     last_monitor_tick = cur_timestamp_millis();
+                }
+
+                if !connected.load(Ordering::Relaxed){
+                    break;
                 }
                 
             }
@@ -424,16 +435,9 @@ impl RaknetSocket {
     }
 
     pub async fn close(&mut self) -> Result<()>{
-        match self.s.send_to(&[PacketID::Disconnect.to_u8()], self.peer_addr).await{
-            Ok(_) => {
-                self.connected.store(false, Ordering::Relaxed);
-                Ok(())
-            },
-            Err(_) => {
-                self.connected.store(false, Ordering::Relaxed);
-                Err(RaknetError::ConnectionClosed)
-            },
-        }
+        self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()] , cur_timestamp_millis());
+        self.connected.store(false, Ordering::Relaxed);
+        Ok(())
     }
 
     pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
