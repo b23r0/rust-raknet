@@ -6,7 +6,7 @@ mod arq;
 mod fragment;
 mod log;
 mod error;
-pub mod server;
+mod server;
 
 pub use crate::arq::Reliability;
 pub use crate::server::*;

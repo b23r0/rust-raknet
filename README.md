@@ -1,9 +1,9 @@
-# rust-raknet [![ChatOnDiscord](https://img.shields.io/badge/chat-on%20discord-blue)](https://discord.gg/ZKtYMvDFN4)
+# rust-raknet [![Build Status](https://img.shields.io/github/workflow/status/b23r0/rust-raknet/Rust)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml) [![ChatOnDiscord](https://img.shields.io/badge/chat-on%20discord-blue)](https://discord.gg/ZKtYMvDFN4)
 RakNet Protocol implementation by Rust.
 
 Raknet is a reliable udp transport protocol that is often used for communication between game clients and servers. This project is an incomplete implementation of the protocol.
 
-This project is not affiliated with `Oculus`.
+_This project is not affiliated with Jenkins Software LLC nor RakNet._
 
 # Features
 
@@ -14,7 +14,7 @@ This project is not affiliated with `Oculus`.
 
 # Get Started
 
-```
+```toml
 # Cargo.toml
 [dependencies]
 rust-raknet = "0.1.0"
