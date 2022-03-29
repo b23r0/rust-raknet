@@ -555,8 +555,6 @@ pub struct SendQ{
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
     packets : Vec<(FrameSetPacket , bool , i64)>,
     unreliable_packets : Vec<FrameSetPacket>,
-    //packet : FrameSetPacket , last_tick : i64 
-    repeat_request : Vec<(FrameSetPacket , i64)>,
 }
 
 impl SendQ{
@@ -566,7 +564,6 @@ impl SendQ{
             sequence_number : 0,
             packets: vec![],
             unreliable_packets : vec![],
-            repeat_request: vec![],
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
             ordered_frame_index : 0,
@@ -578,7 +575,9 @@ impl SendQ{
 
         match reliability{
             Reliability::Unreliable => {
-                let frame = FrameSetPacket::new(reliability, buf.to_vec());
+                let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                frame.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
                 self.unreliable_packets.push(frame);
             },
             Reliability::UnreliableSequenced => {
@@ -587,6 +586,8 @@ impl SendQ{
                 // https://wiki.vg/Raknet_Protocol
                 frame.ordered_frame_index = self.ordered_frame_index;
                 frame.sequenced_frame_index = self.sequenced_frame_index;
+                frame.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
                 self.unreliable_packets.push(frame);
                 self.sequenced_frame_index +=1;
             },
@@ -598,6 +599,8 @@ impl SendQ{
                 }
 
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                frame.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
                 frame.reliable_frame_index = self.reliable_frame_index;
                 self.packets.push((frame , false , tick));
                 self.reliable_frame_index += 1;
@@ -608,6 +611,8 @@ impl SendQ{
                     let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                     frame.reliable_frame_index = self.reliable_frame_index;
                     frame.ordered_frame_index = self.ordered_frame_index;
+                    frame.sequence_number = self.sequence_number;
+                    self.sequence_number += 1;
                     self.packets.push((frame , false , tick));
                     self.reliable_frame_index += 1;
                     self.ordered_frame_index += 1;
@@ -627,11 +632,12 @@ impl SendQ{
                         // set fragment flag
                         frame.flags |= 16;
                         frame.compound_size = compound_size as u32;
-                        // I dont know why the compound_id always 0
                         frame.compound_id = self.compound_id;
                         frame.fragment_index = i as u32;
                         frame.reliable_frame_index = self.reliable_frame_index;
                         frame.ordered_frame_index = self.ordered_frame_index;
+                        frame.sequence_number = self.sequence_number;
+                        self.sequence_number += 1;
                         self.packets.push((frame , false , tick));
                         self.reliable_frame_index += 1;
                     }
@@ -651,6 +657,8 @@ impl SendQ{
                 // I dont know why Sequenced packet need Ordered 
                 // https://wiki.vg/Raknet_Protocol
                 frame.ordered_frame_index = self.ordered_frame_index;
+                frame.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
                 self.packets.push((frame , false , tick));
                 self.reliable_frame_index += 1;
                 self.sequenced_frame_index += 1;
@@ -663,7 +671,10 @@ impl SendQ{
         for i in 0..self.packets.len(){
             let item = &mut self.packets[i];
             if item.1 && item.0.sequence_number == sequence{
-                self.repeat_request.push((item.0.clone() , tick));
+                item.0.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
+                item.1 = false;
+                item.2 = tick;
             }
         }
 
@@ -680,14 +691,6 @@ impl SendQ{
                 }
             }
         }
-
-        for i in 0..self.repeat_request.len(){
-            let item = &mut self.repeat_request[i];
-            if item.0.sequence_number == sequence{
-                self.repeat_request.remove(i);
-                break;
-            }
-        }
     }
 
     pub fn tick(&mut self , tick : i64){
@@ -695,9 +698,12 @@ impl SendQ{
         for i in 0..self.packets.len(){
             let p = &mut self.packets[i];
             
-            // RTO = 1000ms
-            if p.1 && tick - p.2 >= 1000{
-                self.repeat_request.push((p.0.clone() ,tick));
+            // RTO = 200ms
+            if p.1 && tick - p.2 >= 200{
+                p.0.sequence_number = self.sequence_number;
+                self.sequence_number += 1;
+                p.1 = false;
+                p.2 = tick;
             }
         }
 
@@ -708,21 +714,10 @@ impl SendQ{
 
         let mut ret = vec![];
 
-        if !self.repeat_request.is_empty(){
-            for i in 0..self.repeat_request.len(){
-                let frame = &mut self.repeat_request[i].0;
-                frame.sequence_number = self.sequence_number;
-                self.sequence_number += 1;
-                ret.push(frame.clone());
-            }
-        }
-
         if !self.packets.is_empty(){
             for i in 0..self.packets.len(){
                 let p = &mut self.packets[i];
                 if !p.1{
-                    p.0.sequence_number = self.sequence_number;
-                    self.sequence_number +=1 ;
                     ret.push(p.0.clone());
                     p.1 = true;
                 }
@@ -730,17 +725,11 @@ impl SendQ{
         }
 
         for i in &self.unreliable_packets{
-            let mut item = i.clone();
-            item.sequence_number = self.sequence_number;
-            self.sequence_number +=1 ;
+            let item = i.clone();
             ret.push(item);
         }
         self.unreliable_packets.clear();
         ret
-    }
-
-    pub fn get_repeat_queue_size(&self) -> usize{
-        self.repeat_request.len()
     }
 
     pub fn get_reliable_queue_size(&self) -> usize{
@@ -890,26 +879,27 @@ async fn test_sendq(){
     let ret = s.flush();
     assert!(ret.len() == 2);
 
-    s.tick(1000);
+    s.tick(200);
 
     let ret = s.flush();
     assert!(ret.len() == 1);
     assert!(ret[0].sequence_number == 2);
 
-    s.tick(1050);
-
-    let ret = s.flush();
-    assert!(ret.len() == 2);
-    assert!(ret[0].sequence_number == 3);
-    assert!(ret[1].sequence_number == 4);
-
-    s.ack(3);
+    s.tick(250);
 
     let ret = s.flush();
     assert!(ret.len() == 1);
-    assert!(ret[0].sequence_number == 5);
+    assert!(ret[0].sequence_number == 3);
 
-    s.ack(5);
+    s.ack(3);
+
+    s.tick(400);
+
+    let ret = s.flush();
+    assert!(ret.len() == 1);
+    assert!(ret[0].sequence_number == 4);
+
+    s.ack(4);
 
     let ret = s.flush();
     assert!(ret.is_empty());

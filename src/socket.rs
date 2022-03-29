@@ -347,7 +347,7 @@ impl RaknetSocket {
         let mut last_monitor_tick = cur_timestamp_millis();
         tokio::spawn(async move {
             loop{
-                sleep(std::time::Duration::from_millis(50)).await;
+                sleep(std::time::Duration::from_millis(20)).await;
 
                 // flush ack
                 let mut recvq = recvq.lock().await;
@@ -378,9 +378,8 @@ impl RaknetSocket {
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000{
-                    raknet_log!("peer addr : {} ,repeat queue size : {} , reliable packet queue size : {} , recvq size : {} , recvq fragment size : {}" , 
+                    raknet_log!("peer addr : {} , sendq size : {} , recvq size : {} , recvq fragment size : {}" , 
                         peer_addr,
-                        sendq.get_repeat_queue_size() , 
                         sendq.get_reliable_queue_size(),
                         recvq.get_size(),
                         recvq.get_fragment_queue_size()
@@ -447,6 +446,14 @@ impl RaknetSocket {
         }
 
         self.sendq.lock().await.insert(r , buf, cur_timestamp_millis());
+
+        //flush sendq
+        let mut sendq = self.sendq.lock().await;
+        sendq.tick(cur_timestamp_millis());
+        for f in sendq.flush(){
+            let data = f.serialize().await.unwrap();
+            self.s.send_to(&data, self.peer_addr).await.unwrap();
+        }
         Ok(())
     }
 
