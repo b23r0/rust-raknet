@@ -51,7 +51,7 @@ async fn serve(){
 ```
 
 ```rs
-//clients
+//client
 
 async fn connect(){
     let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
