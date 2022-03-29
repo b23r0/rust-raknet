@@ -551,6 +551,7 @@ pub struct SendQ{
     reliable_frame_index : u32,
     sequenced_frame_index : u32,
     ordered_frame_index : u32,
+    compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
     packets : Vec<(FrameSetPacket , bool , i64)>,
     unreliable_packets : Vec<FrameSetPacket>,
@@ -569,6 +570,7 @@ impl SendQ{
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
             ordered_frame_index : 0,
+            compound_id : 0
         }
     }
 
@@ -626,13 +628,14 @@ impl SendQ{
                         frame.flags |= 16;
                         frame.compound_size = compound_size as u32;
                         // I dont know why the compound_id always 0
-                        frame.compound_id = 0;
+                        frame.compound_id = self.compound_id;
                         frame.fragment_index = i as u32;
                         frame.reliable_frame_index = self.reliable_frame_index;
                         frame.ordered_frame_index = self.ordered_frame_index;
                         self.packets.push((frame , false , tick));
                         self.reliable_frame_index += 1;
                     }
+                    self.compound_id += 1;
                     self.ordered_frame_index += 1;
                 }
             },
