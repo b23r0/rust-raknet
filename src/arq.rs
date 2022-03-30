@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{datatype::*, utils::*, fragment::FragmentQ, error::*};
+use crate::{datatype::*, utils::*, fragment::FragmentQ, error::*, raknet_log};
 
 #[derive(Clone)]
 pub enum Reliability {
@@ -389,7 +389,7 @@ impl ACKSet {
                 self.nack.push((self.last_max + 1 , s - 1));   
             }
 
-            if s > self .last_max{
+            if s > self.last_max{
                 self .last_max = s;
             }
         }
@@ -476,6 +476,11 @@ impl RecvQ {
             // RELIABLE_ORDERED - 1, 2, 3, 4, 5, 6
             Reliability::ReliableOrdered => {
 
+                // if remote host not received ack , and local program has flush ordered packet. recvq will insert old packet caused memory leak.
+                if frame.ordered_frame_index < self.last_ordered_index{
+                    return Ok(());
+                }
+
                 if frame.is_fragment() {
                     self.fragment_queue.insert(frame);
         
@@ -535,9 +540,16 @@ impl RecvQ {
         self.packets.clear();
         ret
     }
+    pub fn get_ordered_packet(&self) -> usize{
+        self.ordered_packets.len()
+    }
 
     pub fn get_fragment_queue_size(&self) -> usize{
         self.fragment_queue.size()
+    }
+
+    pub fn get_ordered_keys(&self) -> Vec<u32>{
+        self.ordered_packets.keys().cloned().collect()
     }
 
     pub fn get_size(&self) -> usize {
@@ -553,7 +565,7 @@ pub struct SendQ{
     ordered_frame_index : u32,
     compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
-    packets : Vec<(FrameSetPacket , bool , i64)>,
+    packets : Vec<(FrameSetPacket , bool , i64 , u32)>,
     unreliable_packets : Vec<FrameSetPacket>,
 }
 
@@ -602,7 +614,7 @@ impl SendQ{
                 frame.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 frame.reliable_frame_index = self.reliable_frame_index;
-                self.packets.push((frame , false , tick));
+                self.packets.push((frame , false , tick , 0));
                 self.reliable_frame_index += 1;
             },
             Reliability::ReliableOrdered => {
@@ -613,7 +625,7 @@ impl SendQ{
                     frame.ordered_frame_index = self.ordered_frame_index;
                     frame.sequence_number = self.sequence_number;
                     self.sequence_number += 1;
-                    self.packets.push((frame , false , tick));
+                    self.packets.push((frame , false , tick , 0));
                     self.reliable_frame_index += 1;
                     self.ordered_frame_index += 1;
                 } else {
@@ -638,7 +650,7 @@ impl SendQ{
                         frame.ordered_frame_index = self.ordered_frame_index;
                         frame.sequence_number = self.sequence_number;
                         self.sequence_number += 1;
-                        self.packets.push((frame , false , tick));
+                        self.packets.push((frame , false , tick , 0));
                         self.reliable_frame_index += 1;
                     }
                     self.compound_id += 1;
@@ -659,7 +671,7 @@ impl SendQ{
                 frame.ordered_frame_index = self.ordered_frame_index;
                 frame.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
-                self.packets.push((frame , false , tick));
+                self.packets.push((frame , false , tick , 0));
                 self.reliable_frame_index += 1;
                 self.sequenced_frame_index += 1;
             }
@@ -671,10 +683,12 @@ impl SendQ{
         for i in 0..self.packets.len(){
             let item = &mut self.packets[i];
             if item.1 && item.0.sequence_number == sequence{
+                raknet_log!("packet {}-{}-{} nack {} times" , item.0.sequence_number , item.0.reliable_frame_index , item.0.ordered_frame_index , item.3 + 1);
                 item.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 item.1 = false;
                 item.2 = tick;
+                item.3 += 1;
             }
         }
 
@@ -700,10 +714,12 @@ impl SendQ{
             
             // RTO = 200ms
             if p.1 && tick - p.2 >= 200{
+                raknet_log!("packet {}-{}-{} resend {} times" , p.0.sequence_number , p.0.reliable_frame_index , p.0.ordered_frame_index , p.3 + 1);
                 p.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 p.1 = false;
                 p.2 = tick;
+                p.3 += 1;
             }
         }
 

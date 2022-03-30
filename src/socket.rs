@@ -378,11 +378,13 @@ impl RaknetSocket {
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000{
-                    raknet_log!("peer addr : {} , sendq size : {} , recvq size : {} , recvq fragment size : {}" , 
+                    raknet_log!("peer addr : {} , sendq size : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
                         peer_addr,
                         sendq.get_reliable_queue_size(),
                         recvq.get_size(),
-                        recvq.get_fragment_queue_size()
+                        recvq.get_fragment_queue_size(),
+                        recvq.get_ordered_packet(),
+                        recvq.get_ordered_keys()
                     );
                     last_monitor_tick = cur_timestamp_millis();
                 }
