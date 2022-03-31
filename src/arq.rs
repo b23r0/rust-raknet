@@ -566,7 +566,6 @@ pub struct SendQ{
     compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 
     packets : Vec<(FrameSetPacket , bool , i64 , u32)>,
-    unreliable_packets : Vec<FrameSetPacket>,
 }
 
 impl SendQ{
@@ -575,7 +574,6 @@ impl SendQ{
             mtu,
             sequence_number : 0,
             packets: vec![],
-            unreliable_packets : vec![],
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
             ordered_frame_index : 0,
@@ -590,7 +588,7 @@ impl SendQ{
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                 frame.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
-                self.unreliable_packets.push(frame);
+                self.packets.push((frame,false , tick , 0));
             },
             Reliability::UnreliableSequenced => {
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
@@ -600,7 +598,7 @@ impl SendQ{
                 frame.sequenced_frame_index = self.sequenced_frame_index;
                 frame.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
-                self.unreliable_packets.push(frame);
+                self.packets.push((frame,false , tick , 0));
                 self.sequenced_frame_index +=1;
             },
             Reliability::Reliable => {
@@ -691,8 +689,6 @@ impl SendQ{
                 item.3 += 1;
             }
         }
-
-        self.packets.retain(|x| !x.1 || !(x.1 && x.0.sequence_number == sequence));
     }
 
     pub fn ack(&mut self , sequence : u32){
@@ -722,13 +718,13 @@ impl SendQ{
                 p.3 += 1;
             }
         }
-
-        self.packets.retain( |x| !(x.1 && tick - x.2 >= 1000));
     }
 
     pub fn flush(&mut self) -> Vec<FrameSetPacket> {
 
         let mut ret = vec![];
+
+        self.packets.sort_by(|x , y| x.0.sequence_number.cmp(&y.0.sequence_number) );
 
         if !self.packets.is_empty(){
             for i in 0..self.packets.len(){
@@ -740,11 +736,8 @@ impl SendQ{
             }
         }
 
-        for i in &self.unreliable_packets{
-            let item = i.clone();
-            ret.push(item);
-        }
-        self.unreliable_packets.clear();
+        self.packets.retain(|x| x.0.is_reliable().unwrap() );
+
         ret
     }
 
