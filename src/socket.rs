@@ -49,7 +49,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply).await.unwrap();
-                sendq.lock().await.insert(Reliability::ReliableOrdered,&buf, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::ReliableOrdered,&buf);
             },
             PacketID::ConnectionRequestAccepted => {
                 let packet = read_packet_connection_request_accepted(frame.data.as_slice()).await.unwrap();
@@ -63,7 +63,7 @@ impl RaknetSocket {
                 let mut sendq = sendq.lock().await;
 
                 let buf = write_packet_new_incomming_connection(&packet_reply).await.unwrap();
-                sendq.insert(Reliability::ReliableOrdered ,&buf, cur_timestamp_millis());
+                sendq.insert(Reliability::ReliableOrdered ,&buf);
 
                 let ping = ConnectedPing{
                     client_timestamp: cur_timestamp_millis(),
@@ -71,7 +71,7 @@ impl RaknetSocket {
 
                 //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
                 let buf = write_packet_connected_ping(&ping).await.unwrap();
-                sendq.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
+                sendq.insert(Reliability::Unreliable ,&buf);
             }
             PacketID::NewIncomingConnection => {
                 let _packet = read_packet_new_incomming_connection(frame.data.as_slice()).await.unwrap();
@@ -85,7 +85,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connected_pong(&packet_reply).await.unwrap();
-                sendq.lock().await.insert(Reliability::Unreliable ,&buf, cur_timestamp_millis());
+                sendq.lock().await.insert(Reliability::Unreliable ,&buf);
             }
             PacketID::ConnectedPong => {}
             PacketID::Disconnect => {
@@ -177,7 +177,7 @@ impl RaknetSocket {
         let buf = write_packet_connection_request(&packet).await.unwrap();
 
         let mut sendq1 = sendq.lock().await;
-        sendq1.insert(Reliability::ReliableOrdered, &buf, cur_timestamp_millis());
+        sendq1.insert(Reliability::ReliableOrdered, &buf);
         std::mem::drop(sendq1);
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
@@ -347,7 +347,7 @@ impl RaknetSocket {
         let mut last_monitor_tick = cur_timestamp_millis();
         tokio::spawn(async move {
             loop{
-                sleep(std::time::Duration::from_millis(20)).await;
+                sleep(std::time::Duration::from_millis(50)).await;
 
                 // flush ack
                 let mut recvq = recvq.lock().await;
@@ -370,17 +370,17 @@ impl RaknetSocket {
                 
                 //flush sendq
                 let mut sendq = sendq.lock().await;
-                sendq.tick(cur_timestamp_millis());
-                for f in sendq.flush(){
+                for f in sendq.flush(cur_timestamp_millis(), &peer_addr){
                     let data = f.serialize().await.unwrap();
                     s.send_to(&data, peer_addr).await.unwrap();
                 }
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000{
-                    raknet_log!("peer addr : {} , sendq size : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
+                    raknet_log!("peer addr : {} , sendq size : {} , sentq size : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
                         peer_addr,
                         sendq.get_reliable_queue_size(),
+                        sendq.get_sent_queue_size(),
                         recvq.get_size(),
                         recvq.get_fragment_queue_size(),
                         recvq.get_ordered_packet(),
@@ -436,7 +436,7 @@ impl RaknetSocket {
     }
 
     pub async fn close(&mut self) -> Result<()>{
-        self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()] , cur_timestamp_millis());
+        self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()]);
         self.connected.store(false, Ordering::Relaxed);
         Ok(())
     }
@@ -447,12 +447,11 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        self.sendq.lock().await.insert(r , buf, cur_timestamp_millis());
+        self.sendq.lock().await.insert(r , buf);
 
         //flush sendq
         let mut sendq = self.sendq.lock().await;
-        sendq.tick(cur_timestamp_millis());
-        for f in sendq.flush(){
+        for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().await.unwrap();
             self.s.send_to(&data, self.peer_addr).await.unwrap();
         }
