@@ -584,14 +584,26 @@ impl SendQ{
         }
     }
 
-    pub fn insert(&mut self ,reliability : Reliability , buf : &[u8]){
+    pub fn insert(&mut self ,reliability : Reliability , buf : &[u8]) -> Result<()>{
 
         match reliability{
             Reliability::Unreliable => {
+
+                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
+                if buf.len() > (self.mtu - 60).into() {
+                    return Err(RaknetError::PacketSizeExceedMTU);
+                }
+                
                 let frame = FrameSetPacket::new(reliability, buf.to_vec());
                 self.packets.push(frame);
             },
             Reliability::UnreliableSequenced => {
+
+                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
+                if buf.len() > (self.mtu - 60).into() {
+                    return Err(RaknetError::PacketSizeExceedMTU);
+                }
+
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                 // I dont know why Sequenced packet need Ordered 
                 // https://wiki.vg/Raknet_Protocol
@@ -604,7 +616,7 @@ impl SendQ{
 
                 // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
-                    return;
+                    return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
@@ -649,9 +661,10 @@ impl SendQ{
                 }
             },
             Reliability::ReliableSequenced => {
+
                 // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
-                    return;
+                    return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
@@ -664,7 +677,8 @@ impl SendQ{
                 self.reliable_frame_index += 1;
                 self.sequenced_frame_index += 1;
             }
-        }
+        };
+        Ok(())
     }
 
     pub fn nack(&mut self , sequence : u32 , tick : i64){
@@ -887,10 +901,10 @@ async fn test_recvq_fragment(){
 async fn test_sendq(){
     let mut s = SendQ::new(1500);
     let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
-    s.insert(Reliability::Reliable, &p.serialize().await.unwrap());
+    s.insert(Reliability::Reliable, &p.serialize().await.unwrap()).unwrap();
 
     let p = FrameSetPacket::new(Reliability::Reliable, vec![]);
-    s.insert(Reliability::Reliable, &p.serialize().await.unwrap());
+    s.insert(Reliability::Reliable, &p.serialize().await.unwrap()).unwrap();
 
     let sockaddr : SocketAddr = "127.0.0.1:8000".parse().unwrap();
     let ret = s.flush(0 ,&sockaddr);
