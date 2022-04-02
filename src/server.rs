@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
-use rand;
+
 use crate::{socket::*, raknet_log};
 use crate::packet::*;
 use crate::utils::*;

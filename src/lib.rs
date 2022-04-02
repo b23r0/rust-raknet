@@ -171,7 +171,7 @@ async fn test_loss_packet1(){
         client1.set_loss_rate(8);
 
         for i in 0..10{
-            let mut flag = vec![0xfe as u8];
+            let mut flag = vec![0xfe_u8];
             let mut data = vec![i as u8; 2000];
             flag.append(&mut data);
             client1.send(&flag, Reliability::ReliableOrdered).await.unwrap();
@@ -186,7 +186,7 @@ async fn test_loss_packet1(){
     client2.set_loss_rate(8);
 
     for i in 0..10{
-        let mut flag = vec![0xfe as u8];
+        let mut flag = vec![0xfe_u8];
         let mut data = vec![i as u8; 2000];
         flag.append(&mut data);
         client2.send(&flag, Reliability::ReliableOrdered).await.unwrap();
@@ -209,14 +209,14 @@ async fn test_loss_packet2(){
         client1.set_loss_rate(8);
 
         for i in 0..10{
-            let mut flag = vec![0xfe as u8];
+            let mut flag = vec![0xfe_u8];
             let mut data = vec![i as u8; 2000];
             flag.append(&mut data);
             client1.send(&flag, Reliability::ReliableOrdered).await.unwrap();
         }
 
         for i in 0..10{
-            let mut flag = vec![0xfe as u8];
+            let mut flag = vec![0xfe_u8];
             let mut data = vec![i as u8; 2000];
             flag.append(&mut data);
             let data = client1.recv().await.unwrap();
@@ -229,14 +229,14 @@ async fn test_loss_packet2(){
     client2.set_loss_rate(8);
 
     for i in 0..10{
-        let mut flag = vec![0xfe as u8];
+        let mut flag = vec![0xfe_u8];
         let mut data = vec![i as u8; 2000];
         flag.append(&mut data);
         client2.send(&flag, Reliability::ReliableOrdered).await.unwrap();
     }
 
     for i in 0..10{
-        let mut flag = vec![0xfe as u8];
+        let mut flag = vec![0xfe_u8];
         let mut data = vec![i as u8; 2000];
         flag.append(&mut data);
         let data = client2.recv().await.unwrap();

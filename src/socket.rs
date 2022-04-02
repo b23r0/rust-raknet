@@ -495,12 +495,12 @@ impl RaknetSocket {
         }
 
         match self.user_data_receiver.recv().await{
-            Some(p) => return Ok(p),
+            Some(p) => Ok(p),
             None => {
                 if !self.connected.load(Ordering::Relaxed){
                     return Err(RaknetError::ConnectionClosed);
                 }
-                return Err(RaknetError::RecvFromError);
+                Err(RaknetError::RecvFromError)
             },
         }
 
