@@ -1,4 +1,5 @@
-use std::{net::{SocketAddr}, sync::{Arc}};
+use std::{net::{SocketAddr}, sync::{Arc, atomic::AtomicU8}};
+use rand::Rng;
 use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::{sleep, timeout}};
 
 use tokio::sync::mpsc::{Sender, Receiver};
@@ -15,9 +16,12 @@ pub struct RaknetSocket{
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
     connected : Arc<AtomicBool>,
+    enable_loss : Arc<AtomicBool>,
+    loss_rate : Arc<AtomicU8>
 }
 
 impl RaknetSocket {
+    
     pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
@@ -30,6 +34,8 @@ impl RaknetSocket {
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             connected : Arc::new(AtomicBool::new(true)),
+            enable_loss : Arc::new(AtomicBool::new(false)),
+            loss_rate : Arc::new(AtomicU8::new(0))
         };
         ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(Some(collecter));
@@ -102,7 +108,25 @@ impl RaknetSocket {
         }
         Ok(true)
     }
+
+    pub fn set_loss_rate(&mut self ,stage : u8){
+        self.enable_loss.store(true, Ordering::Relaxed);
+        self.loss_rate.store(stage, Ordering::Relaxed);
+
+    }
     
+    async fn sendto(s : &UdpSocket , buf : &[u8] , target : &SocketAddr , enable_loss : &AtomicBool , loss_rate : &AtomicU8) -> tokio::io::Result<usize>{
+        if enable_loss.load(Ordering::Relaxed){
+            let mut rng = rand::thread_rng();
+            let i: u8 = rng.gen_range(1..11);
+            if i > loss_rate.load(Ordering::Relaxed) {
+                raknet_log!("loss packet");
+                return Ok(0);
+            }
+        }
+        s.send_to(buf, target).await
+    }
+
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
 
         let guid : u64 = rand::random();
@@ -226,6 +250,8 @@ impl RaknetSocket {
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq,
             connected,
+            enable_loss : Arc::new(AtomicBool::new(false)),
+            loss_rate : Arc::new(AtomicU8::new(0))
         };
 
         ret.start_receiver(receiver , user_data_sender);
@@ -240,6 +266,8 @@ impl RaknetSocket {
         let sendq = self.sendq.clone();
         let socket = self.s.clone();
         let recvq = self.recvq.clone();
+        let enable_loss = self.enable_loss.clone();
+        let loss_rate = self.loss_rate.clone();
         tokio::spawn(async move {
             loop{
                 if !connected.load(Ordering::Relaxed){
@@ -300,7 +328,7 @@ impl RaknetSocket {
                     for frame in frames.frames{
                         recvq.insert(frame).unwrap();
 
-                        for f in recvq.flush(){
+                        for f in recvq.flush(&peer_addr){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender).await.unwrap(){
                                 connected.store(false, Ordering::Relaxed);
                                 is_break = true;
@@ -322,7 +350,7 @@ impl RaknetSocket {
                         };
 
                         let buf = write_packet_nack(&nack).await.unwrap();
-                        match socket.send_to(&buf, peer_addr).await{
+                        match RaknetSocket::sendto(&socket , &buf, &peer_addr , &enable_loss , &loss_rate).await{
                             Ok(_) => {},
                             Err(_) => {
                                 break;
@@ -345,6 +373,8 @@ impl RaknetSocket {
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
         let mut last_monitor_tick = cur_timestamp_millis();
+        let enable_loss = self.enable_loss.clone();
+        let loss_rate = self.loss_rate.clone();
         tokio::spawn(async move {
             loop{
                 sleep(std::time::Duration::from_millis(50)).await;
@@ -365,14 +395,14 @@ impl RaknetSocket {
                     };
 
                     let buf = write_packet_ack(&packet).await.unwrap();
-                    s.send_to(&buf, peer_addr).await.unwrap();
+                    RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
                 }
                 
                 //flush sendq
                 let mut sendq = sendq.lock().await;
                 for f in sendq.flush(cur_timestamp_millis(), &peer_addr){
                     let data = f.serialize().await.unwrap();
-                    s.send_to(&data, peer_addr).await.unwrap();
+                    RaknetSocket::sendto(&s , &data, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
                 }
 
                 //monitor log
@@ -453,7 +483,7 @@ impl RaknetSocket {
         let mut sendq = self.sendq.lock().await;
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().await.unwrap();
-            self.s.send_to(&data, self.peer_addr).await.unwrap();
+            RaknetSocket::sendto(&self.s , &data, &self.peer_addr , &self.enable_loss , &self.loss_rate).await.unwrap();
         }
         Ok(())
     }

@@ -514,7 +514,7 @@ impl RecvQ {
         self.sequence_number_ackset.get_nack()
     }
 
-    pub fn flush(&mut self ) -> Vec<FrameSetPacket>{
+    pub fn flush(&mut self , _peer_addr : &SocketAddr) -> Vec<FrameSetPacket>{
         let mut ret = vec![];
         let mut ordered_keys : Vec<u32> = self.ordered_packets.keys().cloned().collect();
 
@@ -523,8 +523,9 @@ impl RecvQ {
         for i in ordered_keys{
             if i == self.last_ordered_index{
                 let frame = self.ordered_packets[&i].clone();
-                self.packets.insert(frame.sequence_number, frame);
+                ret.push(frame);
                 self.ordered_packets.remove(&i);
+                //raknet_log!("{} : received ordered [{}]" , peer_addr ,self.last_ordered_index);
                 self.last_ordered_index = i + 1;
             }
         }
@@ -566,7 +567,7 @@ pub struct SendQ{
     compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
     packets : Vec<FrameSetPacket>,
-    sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32, Vec<u32>)>,
+    sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32)>,
 }
 
 impl SendQ{
@@ -683,7 +684,7 @@ impl SendQ{
     pub fn ack(&mut self , sequence : u32){
         for i in 0..self.sent_packet.len(){
             let item = &mut self.sent_packet[i];
-            if item.0.sequence_number == sequence || item.4.contains(&sequence){
+            if item.0.sequence_number == sequence{
                 self.sent_packet.remove(i);
                 break;
             }
@@ -698,7 +699,6 @@ impl SendQ{
             // RTO = 1000ms
             if p.1 && tick - p.2 >= (1000 * (p.3 + 1)) as i64{
                 p.0.sequence_number = self.sequence_number;
-                p.4.push(p.0.sequence_number);
                 self.sequence_number += 1;
                 p.1 = false;
             }
@@ -734,7 +734,7 @@ impl SendQ{
                 self.sequence_number += 1;
                 ret.push(self.packets[i].clone());
                 if self.packets[i].is_reliable().unwrap(){
-                    self.sent_packet.push((self.packets[i].clone() , true , tick , 0 , vec![self.packets[i].sequence_number]));
+                    self.sent_packet.push((self.packets[i].clone() , true , tick , 0));
                 }
             }
 
@@ -844,7 +844,7 @@ async fn test_recvq(){
     p.ordered_frame_index = 1;
     r.insert(p).unwrap();
 
-    let ret = r.flush();
+    let ret = r.flush(&"0.0.0.0:0".parse().unwrap());
     assert!(ret.len() == 2);
 }
 
@@ -878,7 +878,7 @@ async fn test_recvq_fragment(){
     p.fragment_index = 3;
     r.insert(p).unwrap();
 
-    let ret = r.flush();
+    let ret = r.flush(&"0.0.0.0:0".parse().unwrap());
     assert!(ret.len() == 1);
     assert!(ret[0].data == vec![1,2,3]);
 }
@@ -958,7 +958,7 @@ async fn test_client_packet2(){
         let v = FrameVec::new(i.clone()).await.unwrap();
         for i in v.frames{
             rq.insert(i).unwrap();
-            if !rq.flush().is_empty(){
+            if !rq.flush(&"0.0.0.0:0".parse().unwrap()).is_empty(){
                 n += 1;
             }
         }
