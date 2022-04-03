@@ -1,7 +1,7 @@
 # rust-raknet [![Build Status](https://img.shields.io/github/workflow/status/b23r0/rust-raknet/Rust)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml) [![ChatOnDiscord](https://img.shields.io/badge/chat-on%20discord-blue)](https://discord.gg/ZKtYMvDFN4) [![Crate](https://img.shields.io/crates/v/rust-raknet)](https://crates.io/crates/rust-raknet)
 RakNet Protocol implementation by Rust.
 
-Raknet is a reliable udp transport protocol that is often used for communication between game clients and servers. This project is an incomplete implementation of the protocol.
+Raknet is a reliable udp transport protocol that is often used for communication between game clients and servers. This project is an incomplete implementation of the protocol. Reference : http://www.jenkinssoftware.com/raknet/manual/index.html
 
 _This project is not affiliated with Jenkins Software LLC nor RakNet._
 
