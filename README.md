@@ -17,7 +17,7 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 ```toml
 # Cargo.toml
 [dependencies]
-rust-raknet = "0.1.0"
+rust-raknet = "0.2.0"
 ```
 
 # Reliability
