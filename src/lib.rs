@@ -162,6 +162,8 @@ async fn test_send_recv_more_reliability_type_packet(){
 
 #[tokio::test]
 async fn test_loss_packet1(){
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
     let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
@@ -179,6 +181,7 @@ async fn test_loss_packet1(){
             let data = client1.recv().await.unwrap();
             assert!(data == flag);
         }
+        notify.notify_one();
 
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
@@ -194,6 +197,7 @@ async fn test_loss_packet1(){
         let data = client2.recv().await.unwrap();
         assert!(data == flag);
     }
+    notify2.notified().await;
 }
 
 #[tokio::test]
@@ -222,7 +226,7 @@ async fn test_loss_packet2(){
             let data = client1.recv().await.unwrap();
             assert!(data == flag);
         }
-        notify2.notified().await;
+        notify.notify_one();
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     // 80% loss packet rate
@@ -242,7 +246,61 @@ async fn test_loss_packet2(){
         let data = client2.recv().await.unwrap();
         assert!(data == flag);
     }
-    notify.notify_one();
+    notify2.notified().await;
+}
+
+#[tokio::test]
+async fn test_loss_packet_with_sequenced(){
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
+    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let local_addr = server.local_addr().unwrap();
+    server.listen().await;
+    tokio::spawn(async move {
+        let mut client1 = server.accept().await.unwrap();
+        // 80% loss packet rate
+        client1.set_loss_rate(8);
+
+        for i in 0..100{
+            let mut flag = vec![0xfe_u8];
+            let mut data = vec![i as u8; 20];
+            flag.append(&mut data);
+            client1.send(&flag, Reliability::ReliableSequenced).await.unwrap();
+        }
+
+        let mut last = 0;
+        for i in 0..50{
+            let mut flag = vec![0xfe_u8];
+            let mut data = vec![i as u8; 20];
+            flag.append(&mut data);
+            let data = client1.recv().await.unwrap();
+            assert!(data[1] >= last);
+            last = data[1];
+        }
+        notify.notify_one();
+    });
+    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    // 80% loss packet rate
+    client2.set_loss_rate(8);
+
+    for i in 0..100{
+        let mut flag = vec![0xfe_u8];
+        let mut data = vec![i as u8; 20];
+        flag.append(&mut data);
+        client2.send(&flag, Reliability::ReliableSequenced).await.unwrap();
+    }
+
+    let mut last = 0;
+    for i in 0..50{
+        let mut flag = vec![0xfe_u8];
+        let mut data = vec![i as u8; 20];
+        flag.append(&mut data);
+        let data = client2.recv().await.unwrap();
+        assert!(data[1] >= last);
+        last = data[1];
+
+    }
+    notify2.notified().await;
 }
 
 /*
