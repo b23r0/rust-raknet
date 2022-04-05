@@ -1,6 +1,6 @@
 use std::{net::{SocketAddr}, sync::{Arc, atomic::{AtomicU8, AtomicI64}}};
 use rand::Rng;
-use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel}, time::{sleep, timeout}};
+use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, timeout}};
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,8 @@ pub struct RaknetSocket{
     connected : Arc<AtomicBool>,
     last_heartbeat_time : Arc<AtomicI64>,
     enable_loss : Arc<AtomicBool>,
-    loss_rate : Arc<AtomicU8>
+    loss_rate : Arc<AtomicU8>,
+    incomming_notify : Arc<Notify>,
 }
 
 impl RaknetSocket {
@@ -37,14 +38,15 @@ impl RaknetSocket {
             connected : Arc::new(AtomicBool::new(true)),
             last_heartbeat_time : Arc::new(AtomicI64::new(cur_timestamp_millis())),
             enable_loss : Arc::new(AtomicBool::new(false)),
-            loss_rate : Arc::new(AtomicU8::new(0))
+            loss_rate : Arc::new(AtomicU8::new(0)),
+            incomming_notify : Arc::new(Notify::new()),
         };
         ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(Some(collecter));
         ret
     }
 
-    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Sender<Vec<u8>>) -> Result<bool> {
+    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Sender<Vec<u8>> , incomming_notify : &Notify) -> Result<bool> {
         match PacketID::from(frame.data[0])? {
             PacketID::ConnectionRequest => {
                 let packet = read_packet_connection_request(frame.data.as_slice()).await?;
@@ -80,6 +82,8 @@ impl RaknetSocket {
                 //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
                 let buf = write_packet_connected_ping(&ping).await?;
                 sendq.insert(Reliability::Unreliable ,&buf)?;
+                raknet_log!("incomming notified");
+                incomming_notify.notify_one();
             }
             PacketID::NewIncomingConnection => {
                 let _packet = read_packet_new_incomming_connection(frame.data.as_slice()).await?;
@@ -254,11 +258,16 @@ impl RaknetSocket {
             connected,
             last_heartbeat_time : Arc::new(AtomicI64::new(cur_timestamp_millis())),
             enable_loss : Arc::new(AtomicBool::new(false)),
-            loss_rate : Arc::new(AtomicU8::new(0))
+            loss_rate : Arc::new(AtomicU8::new(0)),
+            incomming_notify : Arc::new(Notify::new()),
         };
 
         ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(None);
+
+        raknet_log!("wait incomming notify");
+        ret.incomming_notify.notified().await;
+        
         Ok(ret)
     }
 
@@ -272,6 +281,7 @@ impl RaknetSocket {
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
+        let incomming_notify = self.incomming_notify.clone();
         tokio::spawn(async move {
             loop{
                 if !connected.load(Ordering::Relaxed){
@@ -335,7 +345,7 @@ impl RaknetSocket {
                         recvq.insert(frame).unwrap();
 
                         for f in recvq.flush(&peer_addr){
-                            if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender).await.unwrap(){
+                            if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap(){
                                 connected.store(false, Ordering::Relaxed);
                                 is_break = true;
                                 break;
