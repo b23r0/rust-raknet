@@ -489,8 +489,11 @@ impl RaknetSocket {
     }
 
     pub async fn close(&mut self) -> Result<()>{
-        self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
-        self.connected.store(false, Ordering::Relaxed);
+
+        if self.connected.load(Ordering::Relaxed){
+            self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
+            self.connected.store(false, Ordering::Relaxed);
+        }
         Ok(())
     }
 
