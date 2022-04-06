@@ -200,6 +200,11 @@ impl RaknetReader {
     }
 
     pub async fn read_u16(&mut self, n: Endian) -> Result<u16> {
+
+        if self.buf.remaining() < 2{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         match n {
             Endian::Big => Ok(self.buf.get_u16()),
             Endian::Little => Ok(self.buf.get_u16_le()),
@@ -207,6 +212,11 @@ impl RaknetReader {
     }
 
     pub async fn read_u24(&mut self , n : Endian) -> Result<u32>{
+
+        if self.buf.remaining() < 3{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         match n {
             Endian::Big => {
 
@@ -229,6 +239,11 @@ impl RaknetReader {
     }
 
     pub async fn read_u32(&mut self, n: Endian) -> Result<u32> {
+
+        if self.buf.remaining() < 4{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         match n {
             Endian::Big => Ok(self.buf.get_u32()),
             Endian::Little => Ok(self.buf.get_u32_le()),
@@ -236,12 +251,22 @@ impl RaknetReader {
     }
 
     pub async fn read_u64(&mut self, n: Endian) -> Result<u64> {
+
+        if self.buf.remaining() < 8{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         match n {
             Endian::Big => Ok(self.buf.get_u64()),
             Endian::Little => Ok(self.buf.get_u64_le()),
         }
     }
     pub async fn read_i64(&mut self, n: Endian) -> Result<i64> {
+
+        if self.buf.remaining() < 8{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         match n {
             Endian::Big => Ok(self.buf.get_i64()),
             Endian::Little => Ok(self.buf.get_i64_le()),
@@ -249,13 +274,28 @@ impl RaknetReader {
     }
 
     pub async fn read_string(&mut self) -> Result<String> {
+
+        if self.buf.remaining() < 2{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         let size = self.read_u16(Endian::Big).await?;
         let mut buf = vec![0u8 ; size as usize].into_boxed_slice();
+
+        if self.buf.remaining() < size as usize{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         self.read(&mut buf).await?;
         Ok(String::from_utf8(buf.to_vec()).unwrap())
     }
 
     pub async fn read_magic(&mut self) -> Result<bool> {
+
+        if self.buf.remaining() < 16{
+            return Err(RaknetError::ReadPacketBufferError);
+        }
+
         let mut magic = [0; 16];
         self.read(&mut magic).await?;
         let offline_magic = [
@@ -266,9 +306,15 @@ impl RaknetReader {
     }
     
     pub async fn read_address(&mut self) -> Result<SocketAddr> {
+
         let ip_ver = self.read_u8().await?;
 
         if ip_ver == 4 {
+
+            if self.buf.remaining() < 6{
+                return Err(RaknetError::ReadPacketBufferError);
+            }
+
             let ip = Ipv4Addr::new(
                 0xff - self.read_u8().await?,
                 0xff - self.read_u8().await?,
@@ -278,6 +324,11 @@ impl RaknetReader {
             let port = self.read_u16(Endian::Big).await?;
             Ok(SocketAddr::new(IpAddr::V4(ip), port))
         } else {
+
+            if self.buf.remaining() < 44{
+                return Err(RaknetError::ReadPacketBufferError);
+            }
+
             self.next(2);
             let port = self.read_u16(Endian::Big).await?;
             self.next(4);

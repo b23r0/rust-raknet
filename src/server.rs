@@ -129,7 +129,13 @@ impl RaknetListener {
                     },
                 };
 
-                let cur_status = PacketID::from(buf[0]).unwrap();
+                let cur_status = match PacketID::from(buf[0]){
+                    Ok(p) => p,
+                    Err(e) => {
+                        raknet_log!("parse packetid faild : {:?}" ,e );
+                        continue;
+                    },
+                };
                 
                 match cur_status{
                     PacketID::UnconnectedPing1 => {
