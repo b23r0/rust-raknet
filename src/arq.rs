@@ -567,7 +567,7 @@ pub struct SendQ{
     compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
     packets : Vec<FrameSetPacket>,
-    sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32)>,
+    sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32 , Vec<u32>)>,
 }
 
 impl SendQ{
@@ -691,6 +691,7 @@ impl SendQ{
                 self.sequence_number += 1;
                 item.2 = tick;
                 item.3 += 1;
+                item.4.push(item.0.sequence_number);
             }
         }
     }
@@ -698,7 +699,7 @@ impl SendQ{
     pub fn ack(&mut self , sequence : u32){
         for i in 0..self.sent_packet.len(){
             let item = &mut self.sent_packet[i];
-            if item.0.sequence_number == sequence{
+            if item.0.sequence_number == sequence || item.4.contains(&sequence){
                 self.sent_packet.remove(i);
                 break;
             }
@@ -715,6 +716,7 @@ impl SendQ{
                 p.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 p.1 = false;
+                p.4.push(p.0.sequence_number);
             }
         }
     }
@@ -748,7 +750,7 @@ impl SendQ{
                 self.sequence_number += 1;
                 ret.push(self.packets[i].clone());
                 if self.packets[i].is_reliable().unwrap(){
-                    self.sent_packet.push((self.packets[i].clone() , true , tick , 0));
+                    self.sent_packet.push((self.packets[i].clone() , true , tick , 0 , vec![self.packets[i].sequence_number]));
                 }
             }
 
