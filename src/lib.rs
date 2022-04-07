@@ -35,7 +35,7 @@
 
 //! # Example
 
-//! ```no_run
+//! ```ignore
 //! //server
 //! 
 //! async fn serve(){
@@ -52,7 +52,7 @@
 //! 
 //! ```
 //! 
-//! ```no_run
+//! ```ignore
 //! //client
 //! 
 //! async fn connect(){

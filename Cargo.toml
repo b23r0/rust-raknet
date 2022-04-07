@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["b23r0 <b23r0@foxmail.com>"]
 description = "RakNet Protocol implementation by Rust."
 repository = "https://github.com/b23r0/rust-raknet"
+documentation = "https://docs.rs/rust-raknet/latest/rust_raknet/"
 readme = "README.md"
 license = "MIT"
 keywords = ["raknet", "networking" , "game"]

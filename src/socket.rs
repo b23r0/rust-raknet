@@ -133,7 +133,7 @@ impl RaknetSocket {
     /// Connect to a Raknet server and return a Raknet socket
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// let buf = socket.recv().await.unwrap();
@@ -473,7 +473,7 @@ impl RaknetSocket {
     /// This method can be called repeatedly.
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.close().await.unwarp();
     /// ```
@@ -489,7 +489,7 @@ impl RaknetSocket {
     /// Unconnected ping a Raknet Server and return latency
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let latency = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// assert!((0..10).contains(&latency));
     /// ```
@@ -530,7 +530,7 @@ impl RaknetSocket {
     /// Except Reliability::ReliableOrdered, all other reliability packets must be less than MTU - 60 (default 1340 bytes), otherwise RaknetError::PacketSizeExceedMTU will be returned
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// ```
@@ -554,7 +554,7 @@ impl RaknetSocket {
     /// Recv a packet
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// let buf = socket.recv().await.unwrap();
     /// if buf[0] == 0xfe{
@@ -582,7 +582,7 @@ impl RaknetSocket {
     /// Returns the socket address of the remote peer of this Raknet connection.
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// assert_eq!(socket.peer_addr().unwrap(), SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 19132)));
     /// ```
@@ -593,7 +593,7 @@ impl RaknetSocket {
     /// Returns the socket address of the local half of this Raknet connection.
     /// 
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// assert_eq!(socket.local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     /// ```
@@ -605,7 +605,7 @@ impl RaknetSocket {
     /// 
     /// The `stage` parameter ranges from 1 to 10, indicating a packet loss rate of 10% to 20%.
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// // set 80% loss packet rate.
     /// socket.set_loss_rate(8);
