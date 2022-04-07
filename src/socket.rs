@@ -8,6 +8,7 @@ use crate::error::{Result, RaknetError};
 
 use crate::{packet::*, utils::*, arq::*, raknet_log};
 
+/// Raknet socket wrapper with local and remote.
 pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
@@ -23,7 +24,9 @@ pub struct RaknetSocket{
 }
 
 impl RaknetSocket {
-    
+    /// Create a Raknet Socket from a UDP socket with an established Raknet connection
+    /// 
+    /// This method is used for RaknetListener, users of the library should not care about it.
     pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
@@ -114,12 +117,6 @@ impl RaknetSocket {
         }
         Ok(true)
     }
-
-    pub fn set_loss_rate(&mut self ,stage : u8){
-        self.enable_loss.store(true, Ordering::Relaxed);
-        self.loss_rate.store(stage, Ordering::Relaxed);
-
-    }
     
     async fn sendto(s : &UdpSocket , buf : &[u8] , target : &SocketAddr , enable_loss : &AtomicBool , loss_rate : &AtomicU8) -> tokio::io::Result<usize>{
         if enable_loss.load(Ordering::Relaxed){
@@ -132,7 +129,19 @@ impl RaknetSocket {
         }
         s.send_to(buf, target).await
     }
-
+    
+    /// Connect to a Raknet server and return a Raknet socket
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
+    /// let buf = socket.recv().await.unwrap();
+    /// if buf[0] == 0xfe{
+    ///    //do something
+    /// }
+    /// socket.close().await.unwarp(); // you need to manually close raknet connection
+    /// ```
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
 
         let guid : u64 = rand::random();
@@ -458,6 +467,32 @@ impl RaknetSocket {
         });
     }
 
+    /// Close Raknet Socket
+    /// 
+    /// The Raknet Socket needs to be closed manually, and if no valid data packets are received for more than 1 minute, the Raknet connection will be closed automatically. 
+    /// This method can be called repeatedly.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.close().await.unwarp();
+    /// ```
+    pub async fn close(&mut self) -> Result<()>{
+
+        if self.connected.load(Ordering::Relaxed){
+            self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
+            self.connected.store(false, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Unconnected ping a Raknet Server and return latency
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let latency = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// assert!((0..10).contains(&latency));
+    /// ```
     pub async fn ping(addr : &SocketAddr) -> Result<i64> {
         let packet = PacketUnconnectedPing{
             time: cur_timestamp_millis(),
@@ -488,15 +523,17 @@ impl RaknetSocket {
         Ok(pong.time - packet.time)
     }
 
-    pub async fn close(&mut self) -> Result<()>{
-
-        if self.connected.load(Ordering::Relaxed){
-            self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
-            self.connected.store(false, Ordering::Relaxed);
-        }
-        Ok(())
-    }
-
+    /// Send a packet
+    /// 
+    /// packet must be `0xfe` as the first byte, using other values of bytes may cause unexpected errors.
+    /// 
+    /// Except Reliability::ReliableOrdered, all other reliability packets must be less than MTU - 60 (default 1340 bytes), otherwise RaknetError::PacketSizeExceedMTU will be returned
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
+    /// ```
     pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
 
         if !self.connected.load(Ordering::Relaxed){
@@ -514,6 +551,16 @@ impl RaknetSocket {
         Ok(())
     }
 
+    /// Recv a packet
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let buf = socket.recv().await.unwrap();
+    /// if buf[0] == 0xfe{
+    ///    //do something
+    /// }
+    /// ```
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
 
         if !self.connected.load(Ordering::Relaxed){
@@ -532,11 +579,40 @@ impl RaknetSocket {
 
     }
 
+    /// Returns the socket address of the remote peer of this Raknet connection.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// assert_eq!(socket.peer_addr().unwrap(), SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 19132)));
+    /// ```
     pub fn peer_addr(&self) -> Result<SocketAddr>{
         Ok(self.peer_addr)
     }
 
+    /// Returns the socket address of the local half of this Raknet connection.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// assert_eq!(socket.local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    /// ```
     pub fn local_addr(&self) -> Result<SocketAddr>{
         Ok(self.local_addr)
+    }
+
+    /// Set the packet loss rate and use it for testing
+    /// 
+    /// The `stage` parameter ranges from 1 to 10, indicating a packet loss rate of 10% to 20%.
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// // set 80% loss packet rate.
+    /// socket.set_loss_rate(8);
+    /// ```
+    pub fn set_loss_rate(&mut self ,stage : u8){
+        self.enable_loss.store(true, Ordering::Relaxed);
+        self.loss_rate.store(stage, Ordering::Relaxed);
+
     }
 }

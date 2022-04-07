@@ -13,6 +13,7 @@ use crate::error::{Result, RaknetError};
 const SERVER_NAME : &str = "Rust Raknet Server";
 const MAX_CONNECTION : u32 = 99999;
 
+/// Implementation of Raknet Server.
 pub struct RaknetListener {
     motd : String,
     socket : Arc<UdpSocket>,
@@ -25,6 +26,14 @@ pub struct RaknetListener {
 
 impl RaknetListener {
 
+    /// Creates a new RaknetListener which will be bound to the specified address.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// listener.listen().await;
+    /// let mut socket = socket = listener.accept().await.unwrap();
+    /// ```
     pub async fn bind(sockaddr : SocketAddr) -> Result<Self> {
         
         let s = match UdpSocket::bind(sockaddr).await{
@@ -47,6 +56,13 @@ impl RaknetListener {
         })
     }
     
+    /// Creates a new RaknetListener from a UdpSocket.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let raw_socket = UdpSocket::bind("127.0.0.1:19132").unwrap();
+    /// let listener = RaknetListener::from_std(raw_socket);
+    /// ```
     pub async fn from_std(s : std::net::UdpSocket) -> Result<Self>{
 
         s.set_nonblocking(true).expect("set udpsocket nonblocking error");
@@ -94,6 +110,15 @@ impl RaknetListener {
         });
     }
 
+    /// Listen to a RaknetListener
+    /// 
+    /// This method must be called before calling RaknetListener::accept()
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// listener.listen().await;
+    /// ```
     pub async fn listen(&mut self) {
 
         if self.motd.is_empty(){
@@ -284,6 +309,16 @@ impl RaknetListener {
         });
     }
 
+    /// Waiting for and receiving new Raknet connections, returning a Raknet socket
+    /// 
+    /// Call this method must be after calling RaknetListener::listen()
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// listener.listen().await;
+    /// let mut socket = listener.accept().await.unwrap();
+    /// ```
     pub async fn accept(&mut self) -> Result<RaknetSocket> {
         if !self.listened{
             Err(RaknetError::NotListen)
@@ -292,14 +327,37 @@ impl RaknetListener {
         }
     }
 
+    /// Set the current motd, this motd will be provided to the client in the unconnected pong.
+    /// 
+    /// Call this method must be after calling RaknetListener::listen()
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// listener.set_motd("Another Minecraft Server" , 999999 , "486" , "1.18.11", "Survival" , 19132).await;
+    /// ```
     pub async fn set_motd(&mut self ,server_name : &str, max_connection : u32,  mc_protocol_version : &str , mc_version : &str ,  game_type : &str ,port : u16 ) {
         self.motd = format!("MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",server_name, mc_protocol_version , mc_version , max_connection , self.guid , game_type,  port);
     }
 
+    /// Get the current motd, this motd will be provided to the client in the unconnected pong.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let motd = listener.get_motd().await;
+    /// ```
     pub async fn get_motd(&self) -> String{
         self.motd.clone()
     }
 
+    /// Returns the socket address of the local half of this Raknet connection.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// let mut socket = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// assert_eq!(socket.local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    /// ```
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.socket.local_addr().unwrap())
     }
