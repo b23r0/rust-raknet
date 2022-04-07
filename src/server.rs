@@ -11,7 +11,7 @@ use crate::utils::*;
 use crate::error::{Result, RaknetError};
 
 const SERVER_NAME : &str = "Rust Raknet Server";
-const MAX_CONNECTION : u64 = 99999;
+const MAX_CONNECTION : u32 = 99999;
 
 pub struct RaknetListener {
     motd : String,
@@ -97,7 +97,7 @@ impl RaknetListener {
     pub async fn listen(&mut self) {
 
         if self.motd.is_empty(){
-            self.set_motd("486" , "1.18.11" ,self.guid, "Survival" , self.socket.local_addr().unwrap().port()).await;
+            self.set_motd(SERVER_NAME , MAX_CONNECTION, "486" , "1.18.11" ,self.guid, "Survival" , self.socket.local_addr().unwrap().port()).await;
         }
 
         let socket = self.socket.clone();
@@ -292,8 +292,8 @@ impl RaknetListener {
         }
     }
 
-    pub async fn set_motd(&mut self , mc_protocol_version : &str , mc_version : &str , guid : u64 ,  game_type : &str ,port : u16 ) {
-        self.motd = format!("MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",SERVER_NAME, mc_protocol_version , mc_version , MAX_CONNECTION , guid , game_type,  port);
+    pub async fn set_motd(&mut self ,server_name : &str, max_connection : u32,  mc_protocol_version : &str , mc_version : &str , guid : u64 ,  game_type : &str ,port : u16 ) {
+        self.motd = format!("MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",server_name, mc_protocol_version , mc_version , max_connection , guid , game_type,  port);
     }
 
     pub async fn get_motd(&self) -> String{
