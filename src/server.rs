@@ -97,7 +97,7 @@ impl RaknetListener {
     pub async fn listen(&mut self) {
 
         if self.motd.is_empty(){
-            self.set_motd(SERVER_NAME , MAX_CONNECTION, "486" , "1.18.11" ,self.guid, "Survival" , self.socket.local_addr().unwrap().port()).await;
+            self.set_motd(SERVER_NAME , MAX_CONNECTION, "486" , "1.18.11", "Survival" , self.socket.local_addr().unwrap().port()).await;
         }
 
         let socket = self.socket.clone();
@@ -292,8 +292,8 @@ impl RaknetListener {
         }
     }
 
-    pub async fn set_motd(&mut self ,server_name : &str, max_connection : u32,  mc_protocol_version : &str , mc_version : &str , guid : u64 ,  game_type : &str ,port : u16 ) {
-        self.motd = format!("MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",server_name, mc_protocol_version , mc_version , max_connection , guid , game_type,  port);
+    pub async fn set_motd(&mut self ,server_name : &str, max_connection : u32,  mc_protocol_version : &str , mc_version : &str ,  game_type : &str ,port : u16 ) {
+        self.motd = format!("MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",server_name, mc_protocol_version , mc_version , max_connection , self.guid , game_type,  port);
     }
 
     pub async fn get_motd(&self) -> String{
