@@ -316,13 +316,15 @@ impl RaknetSocket {
                     //handle ack
                     let mut sendq = sendq.lock().await;
                     let ack = read_packet_ack(&buf).await.unwrap();
-                    if ack.single_sequence_number{
-                        sendq.ack(ack.sequences.0);
-                    } else{
-                        for i in ack.sequences.0..ack.sequences.1+1{
-                            sendq.ack(i);
+                    for i in 0..ack.record_count{
+                        if ack.sequences[i as usize].0 == ack.sequences[i as usize].1{
+                            sendq.ack(ack.sequences[i as usize].0);
+                        } else{
+                            for i in ack.sequences[i as usize].0..ack.sequences[i as usize].1+1{
+                                sendq.ack(i);
+                            }
+                            
                         }
-                        
                     }
                     continue;
                 }
@@ -331,12 +333,15 @@ impl RaknetSocket {
                     //handle nack
                     let nack  = read_packet_nack(&buf).await.unwrap();
 
-                    if nack.single_sequence_number {
-                        sendq.lock().await.nack(nack.sequences.0 , cur_timestamp_millis());
-                    } else {
-                        let mut sendq = sendq.lock().await;
-                        for i in nack.sequences.0..nack.sequences.1+1{
-                            sendq.nack(i, cur_timestamp_millis());
+                    let mut sendq = sendq.lock().await;
+
+                    for i in 0..nack.record_count{
+                        if nack.sequences[i as usize].0 == nack.sequences[i as usize].1 {
+                            sendq.nack(nack.sequences[i as usize].0 , cur_timestamp_millis());
+                        } else {
+                            for i in nack.sequences[i as usize].0..nack.sequences[i as usize].1+1{
+                                sendq.nack(i, cur_timestamp_millis());
+                            }
                         }
                     }
                     continue;
@@ -366,12 +371,12 @@ impl RaknetSocket {
                         }
                     }
 
-                    for nack in recvq.get_nack(){
+
+                    let nacks = recvq.get_nack();
+                    if nacks.len() != 0{
                         let nack = NACK{
-                            // always 1
-                            record_count: 1,
-                            single_sequence_number: nack.0 == nack.1,
-                            sequences: nack,
+                            record_count: nacks.len() as u16,
+                            sequences: nacks,
                         };
 
                         let buf = write_packet_nack(&nack).await.unwrap();
@@ -409,15 +414,11 @@ impl RaknetSocket {
                 let mut recvq = recvq.lock().await;
                 let acks = recvq.get_ack();
 
-                for ack in acks {
-
-                    let single_sequence_number = ack.1 == ack.0;
+                if acks.len() != 0 {
 
                     let packet = ACK{
-                        // catch minecraft 1.18.2 client packet , the parameter always 1
-                        record_count: 1,
-                        single_sequence_number,
-                        sequences: ack,
+                        record_count: acks.len() as u16,
+                        sequences: acks,
                     };
 
                     let buf = write_packet_ack(&packet).await.unwrap();

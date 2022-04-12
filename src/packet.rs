@@ -194,15 +194,13 @@ pub struct AlreadyConnected {
 #[derive(Clone)]
 pub struct NACK {
     pub record_count: u16,
-    pub single_sequence_number: bool,
-    pub sequences: (u32, u32),
+    pub sequences: Vec<(u32, u32)>,
 }
 
 #[derive(Clone)]
 pub struct ACK {
     pub record_count: u16,
-    pub single_sequence_number: bool,
-    pub sequences: (u32, u32),
+    pub sequences: Vec<(u32, u32)>,
 }
 
 pub async fn read_packet_ping(buf : &[u8]) -> Result<PacketUnconnectedPing>{
@@ -378,19 +376,23 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
     let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
-    let single_sequence_number = unwrap_or_return!(cursor.read_u8());
     let sequences = {
-        let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
-        if single_sequence_number == 0x01 {
-            (sequence, sequence)
-        } else {
-            let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
-            (sequence, sequence_max)
+        let mut s = vec![];
+        for _ in 0..record_count{
+            let single_sequence_number = unwrap_or_return!(cursor.read_u8());
+            let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
+            if single_sequence_number == 0x01 {
+                s.push((sequence, sequence));
+            } else {
+                let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
+                s.push((sequence, sequence_max));
+            }
         }
+        s
     };
+
     Ok(NACK {
         record_count,
-        single_sequence_number : single_sequence_number == 0x01,
         sequences,
     })
 }
@@ -399,11 +401,16 @@ pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::NACK.to_u8()));
     cursor.write_u16(packet.record_count, Endian::Big).await?;
-    cursor.write_u8(packet.single_sequence_number as u8).await?;
-    cursor.write_u24(packet.sequences.0, Endian::Little).await?;
-    if !packet.single_sequence_number {
-        cursor.write_u24(packet.sequences.1, Endian::Little).await?;
+
+    for i in 0..packet.record_count{
+        let single_sequence_number = if packet.sequences[i as usize].0 == packet.sequences[i as usize].1 { 1u8 } else { 0u8 };
+        cursor.write_u8(single_sequence_number).await?;
+        cursor.write_u24(packet.sequences[i as usize].0, Endian::Little).await?;
+        if single_sequence_number == 0x00 {
+            cursor.write_u24(packet.sequences[i as usize].1, Endian::Little).await?;
+        }
     }
+
     Ok(cursor.get_raw_payload())
 }
 
@@ -411,19 +418,22 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
     let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
-    let single_sequence_number = unwrap_or_return!(cursor.read_u8());
     let sequences = {
-        let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
-        if single_sequence_number == 0x01 {
-            (sequence, sequence)
-        } else {
-            let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
-            (sequence, sequence_max)
+        let mut s = vec![];
+        for _ in 0..record_count{
+            let single_sequence_number = unwrap_or_return!(cursor.read_u8());
+            let sequence = unwrap_or_return!(cursor.read_u24(Endian::Little));
+            if single_sequence_number == 0x01 {
+                s.push((sequence, sequence));
+            } else {
+                let sequence_max = unwrap_or_return!(cursor.read_u24(Endian::Little));
+                s.push((sequence, sequence_max));
+            }
         }
+        s
     };
     Ok(ACK {
         record_count,
-        single_sequence_number : single_sequence_number == 0x01,
         sequences,
     })
 }
@@ -432,11 +442,16 @@ pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::ACK.to_u8()));
     unwrap_or_return!(cursor.write_u16(packet.record_count, Endian::Big));
-    unwrap_or_return!(cursor.write_u8(packet.single_sequence_number as u8));
-    unwrap_or_return!(cursor.write_u24(packet.sequences.0, Endian::Little));
-    if !packet.single_sequence_number {
-        unwrap_or_return!(cursor.write_u24(packet.sequences.1, Endian::Little));
+
+    for i in 0..packet.record_count{
+        let single_sequence_number = if packet.sequences[i as usize].0 == packet.sequences[i as usize].1 { 1u8 } else { 0u8 };
+        unwrap_or_return!(cursor.write_u8(single_sequence_number as u8));
+        unwrap_or_return!(cursor.write_u24(packet.sequences[i as usize].0, Endian::Little));
+        if single_sequence_number == 0x00 {
+            unwrap_or_return!(cursor.write_u24(packet.sequences[i as usize].1, Endian::Little));
+        }
     }
+
     Ok(cursor.get_raw_payload())
 }
 
