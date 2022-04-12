@@ -285,10 +285,7 @@ impl RaknetSocket {
         let peer_addr = self.peer_addr;
         let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
-        let socket = self.s.clone();
         let recvq = self.recvq.clone();
-        let enable_loss = self.enable_loss.clone();
-        let loss_rate = self.loss_rate.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         let incomming_notify = self.incomming_notify.clone();
         tokio::spawn(async move {
@@ -371,22 +368,6 @@ impl RaknetSocket {
                         }
                     }
 
-
-                    let nacks = recvq.get_nack();
-                    if nacks.len() != 0{
-                        let nack = NACK{
-                            record_count: nacks.len() as u16,
-                            sequences: nacks,
-                        };
-
-                        let buf = write_packet_nack(&nack).await.unwrap();
-                        match RaknetSocket::sendto(&socket , &buf, &peer_addr , &enable_loss , &loss_rate).await{
-                            Ok(_) => {},
-                            Err(_) => {
-                                break;
-                            },
-                        };
-                    }
                 } else {
                     raknet_log!("unknown packetid : {}", buf[0]);
                 }
@@ -423,6 +404,23 @@ impl RaknetSocket {
 
                     let buf = write_packet_ack(&packet).await.unwrap();
                     RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
+                }
+
+                // flush nack
+                let nacks = recvq.get_nack();
+                if nacks.len() != 0{
+                    let nack = NACK{
+                        record_count: nacks.len() as u16,
+                        sequences: nacks,
+                    };
+
+                    let buf = write_packet_nack(&nack).await.unwrap();
+                    match RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss , &loss_rate).await{
+                        Ok(_) => {},
+                        Err(_) => {
+                            break;
+                        },
+                    };
                 }
                 
                 //flush sendq
