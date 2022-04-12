@@ -30,9 +30,6 @@ rust-raknet = "0.3.1"
 - [x] reliable
 - [x] reliable ordered
 - [x] reliable sequenced
-- [ ] unreliable (+ ACK receipt)
-- [ ] reliable (+ ACK receipt)
-- [ ] reliable ordered (+ ACK receipt)
 
 # Example
 
