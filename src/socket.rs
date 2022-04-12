@@ -602,11 +602,11 @@ impl RaknetSocket {
 
     /// Set the packet loss rate and use it for testing
     /// 
-    /// The `stage` parameter ranges from 1 to 10, indicating a packet loss rate of 10% to 20%.
+    /// The `stage` parameter ranges from 1 to 10, indicating a packet loss rate of 90% to 0%.
     /// # Example
     /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    /// // set 80% loss packet rate.
+    /// // set 20% loss packet rate.
     /// socket.set_loss_rate(8);
     /// ```
     pub fn set_loss_rate(&mut self ,stage : u8){
