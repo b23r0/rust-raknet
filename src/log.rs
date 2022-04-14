@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static ENABLE_RAKNET_LOG: AtomicBool = AtomicBool::new(false);
 
 /// A switch to print Raknet logs
-pub fn enbale_raknet_log(flag : bool){
+pub fn enable_raknet_log(flag : bool){
     ENABLE_RAKNET_LOG.store(flag, Ordering::Relaxed);
 }
 

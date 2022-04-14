@@ -121,7 +121,7 @@ impl RaknetSocket {
     async fn sendto(s : &UdpSocket , buf : &[u8] , target : &SocketAddr , enable_loss : &AtomicBool , loss_rate : &AtomicU8) -> tokio::io::Result<usize>{
         if enable_loss.load(Ordering::Relaxed){
             let mut rng = rand::thread_rng();
-            let i: u8 = rng.gen_range(1..11);
+            let i: u8 = rng.gen_range(0..11);
             if i > loss_rate.load(Ordering::Relaxed) {
                 raknet_log!("loss packet");
                 return Ok(0);
@@ -602,7 +602,7 @@ impl RaknetSocket {
 
     /// Set the packet loss rate and use it for testing
     /// 
-    /// The `stage` parameter ranges from 1 to 10, indicating a packet loss rate of 90% to 0%.
+    /// The `stage` parameter ranges from 0 to 10, indicating a packet loss rate of 0% to 100%.
     /// # Example
     /// ```ignore
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();

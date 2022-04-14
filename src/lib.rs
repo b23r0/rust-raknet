@@ -79,7 +79,7 @@ mod server;
 pub use crate::arq::Reliability;
 pub use crate::server::*;
 pub use crate::socket::*;
-pub use crate::log::enbale_raknet_log;
+pub use crate::log::enable_raknet_log;
 
 #[tokio::test]
 async fn test_ping_pong(){
