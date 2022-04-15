@@ -569,10 +569,14 @@ pub struct SendQ{
     compound_id : u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
     packets : Vec<FrameSetPacket>,
+    rto : i64,
+    rtts : Vec<i64>,
     sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32 , Vec<u32>)>,
 }
 
 impl SendQ{
+    pub const SENDQ_RTO_MILLS : i64 = 20;
+
     pub fn new(mtu : u16) -> Self{
         Self{
             mtu,
@@ -582,7 +586,10 @@ impl SendQ{
             reliable_frame_index: 0,
             sequenced_frame_index: 0,
             ordered_frame_index : 0,
-            compound_id : 0
+            compound_id : 0,
+            // default RTO = 25 ms
+            rto : 25,
+            rtts : vec![]
         }
     }
 
@@ -683,6 +690,27 @@ impl SendQ{
         Ok(())
     }
 
+    fn update_rto(&mut self , rtt : i64){
+        if self.rtts.len() == 0 {
+            return;
+        }
+
+        if self.rtts.len() == 10{
+            self.rtts.pop();
+        }
+
+        self.rtts.push(rtt);
+
+        let mut sum = 0;
+        let _ = self.rtts.iter().map(|x| sum += x);
+        let rto = sum / (self.rtts.len() as i64);
+        if rto < SendQ::SENDQ_RTO_MILLS {
+            self.rto = SendQ::SENDQ_RTO_MILLS;
+        } else {
+            self.rto = rto;
+        }
+    }
+
     pub fn nack(&mut self , sequence : u32 , tick : i64){
 
         for i in 0..self.sent_packet.len(){
@@ -698,13 +726,21 @@ impl SendQ{
         }
     }
 
-    pub fn ack(&mut self , sequence : u32){
+    pub fn ack(&mut self , sequence : u32 , tick : i64){
+
+        let mut rtts = vec![];
+
         for i in 0..self.sent_packet.len(){
             let item = &mut self.sent_packet[i];
             if item.0.sequence_number == sequence || item.4.contains(&sequence){
+                rtts.push(tick - item.2);
                 self.sent_packet.remove(i);
                 break;
             }
+        }
+
+        for i in rtts {
+            self.update_rto(i);
         }
     }
 
@@ -713,8 +749,7 @@ impl SendQ{
         for i in 0..self.sent_packet.len(){
             let p = &mut self.sent_packet[i];
             
-            // RTO = 1000ms
-            if p.1 && tick - p.2 >= (1000 * (p.3 + 1)) as i64{
+            if p.1 && tick - p.2 >= (self.rto * ((p.3 + 1) as i64)) as i64{
                 p.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 p.1 = false;
@@ -914,23 +949,23 @@ async fn test_sendq(){
     let ret = s.flush(0 ,&sockaddr);
     assert!(ret.len() == 2);
 
-    let ret = s.flush(1000 ,&sockaddr);
+    let ret = s.flush(50 ,&sockaddr);
     assert!(ret.len() == 2);
     assert!(ret[0].sequence_number == 2);
 
-    let ret = s.flush(3000 ,&sockaddr);
+    let ret = s.flush(100 ,&sockaddr);
     assert!(ret.len() == 2);
     assert!(ret[0].sequence_number == 4);
 
-    s.ack(4);
+    s.ack(4 ,200);
 
-    let ret = s.flush(6000 ,&sockaddr);
+    let ret = s.flush(200 ,&sockaddr);
     assert!(ret.len() == 1);
     assert!(ret[0].sequence_number == 6);
 
-    s.ack(6);
+    s.ack(6, 300);
 
-    let ret = s.flush(10000 ,&sockaddr);
+    let ret = s.flush(300 ,&sockaddr);
     assert!(ret.is_empty());
 }
 

@@ -4,7 +4,7 @@ use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, 
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::error::{Result, RaknetError};
+use crate::{error::{Result, RaknetError}};
 
 use crate::{packet::*, utils::*, arq::*, raknet_log};
 
@@ -288,6 +288,9 @@ impl RaknetSocket {
         let recvq = self.recvq.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         let incomming_notify = self.incomming_notify.clone();
+        let s = self.s.clone();
+        let enable_loss = self.enable_loss.clone();
+        let loss_rate = self.loss_rate.clone();
         tokio::spawn(async move {
             loop{
                 if !connected.load(Ordering::Relaxed){
@@ -315,10 +318,10 @@ impl RaknetSocket {
                     let ack = read_packet_ack(&buf).await.unwrap();
                     for i in 0..ack.record_count{
                         if ack.sequences[i as usize].0 == ack.sequences[i as usize].1{
-                            sendq.ack(ack.sequences[i as usize].0);
+                            sendq.ack(ack.sequences[i as usize].0 , cur_timestamp_millis());
                         } else{
                             for i in ack.sequences[i as usize].0..ack.sequences[i as usize].1+1{
-                                sendq.ack(i);
+                                sendq.ack(i , cur_timestamp_millis());
                             }
                             
                         }
@@ -368,6 +371,19 @@ impl RaknetSocket {
                         }
                     }
 
+                    //flush ack
+                    let acks = recvq.get_ack();
+
+                    if acks.len() != 0 {
+    
+                        let packet = ACK{
+                            record_count: acks.len() as u16,
+                            sequences: acks,
+                        };
+    
+                        let buf = write_packet_ack(&packet).await.unwrap();
+                        RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
+                    }
                 } else {
                     raknet_log!("unknown packetid : {}", buf[0]);
                 }
@@ -389,24 +405,10 @@ impl RaknetSocket {
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         tokio::spawn(async move {
             loop{
-                sleep(std::time::Duration::from_millis(50)).await;
-
-                // flush ack
-                let mut recvq = recvq.lock().await;
-                let acks = recvq.get_ack();
-
-                if acks.len() != 0 {
-
-                    let packet = ACK{
-                        record_count: acks.len() as u16,
-                        sequences: acks,
-                    };
-
-                    let buf = write_packet_ack(&packet).await.unwrap();
-                    RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
-                }
+                sleep(std::time::Duration::from_millis(SendQ::SENDQ_RTO_MILLS as u64)).await;
 
                 // flush nack
+                let mut recvq = recvq.lock().await;
                 let nacks = recvq.get_nack();
                 if nacks.len() != 0{
                     let nack = NACK{
@@ -539,10 +541,9 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        self.sendq.lock().await.insert(r , buf)?;
-
         //flush sendq
         let mut sendq = self.sendq.lock().await;
+        sendq.insert(r , buf)?;
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().await.unwrap();
             RaknetSocket::sendto(&self.s , &data, &self.peer_addr , &self.enable_loss , &self.loss_rate).await.unwrap();
