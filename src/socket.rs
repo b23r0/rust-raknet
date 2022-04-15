@@ -240,7 +240,14 @@ impl RaknetSocket {
                     Err(_) => continue
                 }{
                     Ok(p) => p,
-                    Err(_) => {
+                    Err(e) => {
+                        #[cfg(target_family = "windows")]
+                        if e.raw_os_error().unwrap() == 10040{
+                            // https://docs.microsoft.com/zh-CN/troubleshoot/windows-server/networking/wsaemsgsize-error-10040-in-winsock-2
+                            raknet_log!("recv_from error : {}" , e.raw_os_error().unwrap());
+                            continue;
+                        }
+                        raknet_log!("recv_from error : {}" , e);
                         connected_s.store(false, Ordering::Relaxed);
                         break;
                     },
@@ -248,7 +255,8 @@ impl RaknetSocket {
 
                 match sender.send(buf[..size].to_vec()).await{
                     Ok(_) => {},
-                    Err(_) => {
+                    Err(e) => {
+                        raknet_log!("channel send error : {}" , e);
                         connected_s.store(false, Ordering::Relaxed);
                         break;
                     },
@@ -300,6 +308,7 @@ impl RaknetSocket {
                 let buf = match receiver.recv().await{
                     Some(buf) => buf,
                     None => {
+                        raknet_log!("channel receiver finished");
                         connected.store(false, Ordering::Relaxed);
                         break;
                     },
@@ -360,6 +369,7 @@ impl RaknetSocket {
 
                         for f in recvq.flush(&peer_addr){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap(){
+                                raknet_log!("handle error");
                                 connected.store(false, Ordering::Relaxed);
                                 is_break = true;
                                 break;
@@ -448,6 +458,7 @@ impl RaknetSocket {
 
                 // if exceed 60s not received any packet will close connection.
                 if cur_timestamp_millis() - last_heartbeat_time.load(Ordering::Relaxed) > RECEIVE_TIMEOUT{
+                    raknet_log!("recv timeout");
                     connected.store(false, Ordering::Relaxed);
                     break;
                 }
