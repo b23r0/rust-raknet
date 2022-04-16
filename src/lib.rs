@@ -11,6 +11,9 @@
 //! * Async
 //! * MIT License
 //! * Pure Rust implementation
+//! * Selective Retransmission (TCP/Full Retransmission)
+//! * Non-delayed ACK (TCP/Delayed ACK)
+//! * RTO Not Doubled (TCP/RTO Doubled)
 //! * Linux/Windows/Mac/BSD support
 //! * Compatible with Minecraft 1.18.x
 //! 
@@ -29,9 +32,6 @@
 //! - [x] reliable
 //! - [x] reliable ordered
 //! - [x] reliable sequenced
-//! - [ ] unreliable (+ ACK receipt)
-//! - [ ] reliable (+ ACK receipt)
-//! - [ ] reliable ordered (+ ACK receipt)
 
 //! # Example
 
@@ -47,6 +47,7 @@
 //!         if buf[0] == 0xfe{
 //!             //do something
 //!         }
+//!         socket.close().await.unwrap();
 //!     }
 //! }
 //! 
@@ -62,7 +63,7 @@
 //!     if buf[0] == 0xfe{
 //!         //do something
 //!     }
-//!     socket.close();
+//!     socket.close().await.unwrap();
 //! }
 //! ```
 
