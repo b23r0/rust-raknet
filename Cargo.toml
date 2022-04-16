@@ -1,6 +1,6 @@
 [package]
 name = "rust-raknet"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["b23r0 <b23r0@foxmail.com>"]
 description = "RakNet Protocol implementation by Rust."

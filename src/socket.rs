@@ -415,7 +415,7 @@ impl RaknetSocket {
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         tokio::spawn(async move {
             loop{
-                sleep(std::time::Duration::from_millis(SendQ::SENDQ_RTO_MILLS as u64)).await;
+                sleep(std::time::Duration::from_millis(SendQ::DEFAULT_TIMEOUT_MILLS as u64)).await;
 
                 // flush nack
                 let mut recvq = recvq.lock().await;
@@ -444,10 +444,11 @@ impl RaknetSocket {
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000{
-                    raknet_log!("peer addr : {} , sendq size : {} , sentq size : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
+                    raknet_log!("peer addr : {} , sendq size : {} , sentq size : {} , rto : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
                         peer_addr,
                         sendq.get_reliable_queue_size(),
                         sendq.get_sent_queue_size(),
+                        sendq.get_rto(),
                         recvq.get_size(),
                         recvq.get_fragment_queue_size(),
                         recvq.get_ordered_packet(),

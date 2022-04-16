@@ -12,6 +12,9 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 * Async
 * MIT License
 * Pure Rust implementation
+* Selective Retransmission (TCP/Full Retransmission)
+* Non-delayed ACK (TCP/Delayed ACK)
+* RTO Not Doubled (TCP/RTO Doubled)
 * Linux/Windows/Mac/BSD support
 * Compatible with Minecraft 1.18.x
 
@@ -20,7 +23,7 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 ```toml
 # Cargo.toml
 [dependencies]
-rust-raknet = "0.4.0"
+rust-raknet = "0.5.0"
 ```
 
 # Reliability

@@ -570,12 +570,15 @@ pub struct SendQ{
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
     packets : Vec<FrameSetPacket>,
     rto : i64,
-    rtts : Vec<i64>,
+    srtt : i64,
     sent_packet : Vec<(FrameSetPacket ,bool , i64 , u32 , Vec<u32>)>,
 }
 
 impl SendQ{
-    pub const SENDQ_RTO_MILLS : i64 = 20;
+    pub const DEFAULT_TIMEOUT_MILLS : i64 = 50;
+
+    const RTO_UBOUND : i64 = 12000;
+    const RTO_LBOUND : i64 = 50;
 
     pub fn new(mtu : u16) -> Self{
         Self{
@@ -587,9 +590,9 @@ impl SendQ{
             sequenced_frame_index: 0,
             ordered_frame_index : 0,
             compound_id : 0,
-            // default RTO = 25 ms
-            rto : 25,
-            rtts : vec![]
+
+            rto : SendQ::DEFAULT_TIMEOUT_MILLS,
+            srtt : SendQ::DEFAULT_TIMEOUT_MILLS,
         }
     }
 
@@ -691,24 +694,18 @@ impl SendQ{
     }
 
     fn update_rto(&mut self , rtt : i64){
-        if self.rtts.len() == 0 {
-            return;
-        }
-
-        if self.rtts.len() == 10{
-            self.rtts.pop();
-        }
-
-        self.rtts.push(rtt);
-
-        let mut sum = 0;
-        let _ = self.rtts.iter().map(|x| sum += x);
-        let rto = sum / (self.rtts.len() as i64);
-        if rto < SendQ::SENDQ_RTO_MILLS {
-            self.rto = SendQ::SENDQ_RTO_MILLS;
-        } else {
-            self.rto = rto;
-        }
+        // SRTT = ( ALPHA * SRTT ) + ((1-ALPHA) * RTT) 
+        // ALPHA = 0.8
+        self.srtt = ((self.srtt as f64 * 0.8) + (rtt as f64 * 0.2)) as i64;
+        // RTO = min[UBOUND,max[LBOUND,(BETA*SRTT)]]
+        // BETA = 1.5
+        let rto_right = (1.5 * self.srtt as f64) as i64;
+        let rto_right = if rto_right > SendQ::RTO_LBOUND { rto_right } else { SendQ::RTO_LBOUND };
+        self.rto = if rto_right < SendQ::RTO_UBOUND { rto_right } else { SendQ::RTO_UBOUND };
+    }
+    
+    pub fn get_rto(&self) -> i64 {
+        self.rto
     }
 
     pub fn nack(&mut self , sequence : u32 , tick : i64){
@@ -748,8 +745,16 @@ impl SendQ{
 
         for i in 0..self.sent_packet.len(){
             let p = &mut self.sent_packet[i];
+
+            let mut cur_rto = self.rto;
+
+            // TCP timeout calculation is RTOx2, so three consecutive packet losses will make it RTOx8, which is very terrible, 
+            // while rust-raknet it is not x2, but x1.5 (Experimental results show that the value of 1.5 is relatively good), which has improved the transmission speed.
+            for _  in 0..p.3{
+                cur_rto = (cur_rto as f64 * 1.5) as i64;
+            }
             
-            if p.1 && tick - p.2 >= (self.rto * ((p.3 + 1) as i64)) as i64{
+            if p.1 && tick - p.2 >= cur_rto{
                 p.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 p.1 = false;
@@ -949,21 +954,8 @@ async fn test_sendq(){
     let ret = s.flush(0 ,&sockaddr);
     assert!(ret.len() == 2);
 
-    let ret = s.flush(50 ,&sockaddr);
-    assert!(ret.len() == 2);
-    assert!(ret[0].sequence_number == 2);
-
-    let ret = s.flush(100 ,&sockaddr);
-    assert!(ret.len() == 2);
-    assert!(ret[0].sequence_number == 4);
-
-    s.ack(4 ,200);
-
-    let ret = s.flush(200 ,&sockaddr);
-    assert!(ret.len() == 1);
-    assert!(ret[0].sequence_number == 6);
-
-    s.ack(6, 300);
+    s.ack(0 , 0);
+    s.ack(1, 0);
 
     let ret = s.flush(300 ,&sockaddr);
     assert!(ret.is_empty());
