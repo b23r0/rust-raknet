@@ -562,6 +562,7 @@ impl RecvQ {
 
 pub struct SendQ{
     mtu : u16,
+    ack_sequence_number : u32,
     sequence_number : u32,
     reliable_frame_index : u32,
     sequenced_frame_index : u32,
@@ -583,6 +584,7 @@ impl SendQ{
     pub fn new(mtu : u16) -> Self{
         Self{
             mtu,
+            ack_sequence_number : 0,
             sequence_number : 0,
             packets: vec![],
             sent_packet : vec![],
@@ -724,6 +726,14 @@ impl SendQ{
     }
 
     pub fn ack(&mut self , sequence : u32 , tick : i64){
+
+        if sequence != 0 && sequence != self.ack_sequence_number + 1{
+            for i in self.ack_sequence_number + 1..sequence{
+                self.nack(i, tick);
+            }
+        }
+
+        self.ack_sequence_number = sequence;
 
         let mut rtts = vec![];
 
