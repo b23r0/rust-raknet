@@ -481,13 +481,10 @@ pub async fn read_packet_connection_request_accepted(buf : &[u8]) -> Result<Conn
     Ok(ConnectionRequestAccepted {
         client_address: unwrap_or_return!(cursor.read_address()),
         system_index: unwrap_or_return!(cursor.read_u16(Endian::Big)),
-        request_timestamp: {
-            for _ in 0..10{
-                unwrap_or_return!(cursor.read_address());
-            }
-            unwrap_or_return!(cursor.read_i64(Endian::Big))
-        },
-        accepted_timestamp: unwrap_or_return!(cursor.read_i64(Endian::Big)),
+        // Some Raknet server implementations cannot determine the exact number of Internal IDs, which may cause parsing failures.
+        // But in fact, we don't use this parameter in the current implementation. So don't parse the value of this field for now.
+        request_timestamp: 0,
+        accepted_timestamp: 0,
     })
 }
 

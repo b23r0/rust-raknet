@@ -159,51 +159,80 @@ impl RaknetSocket {
 
         let buf = write_packet_connection_open_request_1(&packet).await.unwrap();
 
-        s.send_to(&buf, addr).await.unwrap();
+        let remote_addr : SocketAddr;
+        let reply1_size : usize;
 
-        let mut buf = [0u8 ; 2048];
-        let (size ,src ) = s.recv_from(&mut buf).await.unwrap();
+        let mut reply1_buf =  [0u8 ; 2048];
 
-        if buf[0] != PacketID::OpenConnectionReply1.to_u8(){
-            if buf[0] == PacketID::IncompatibleProtocolVersion.to_u8(){
-                let _packet = match read_packet_incompatible_protocol_version(&buf[..size]).await{
-                    Ok(p) => p,
-                    Err(_) => return Err(RaknetError::NotSupportVersion),
-                };
+        loop{
+            s.send_to(&buf, addr).await.unwrap();
+            let (size ,src ) = match timeout(std::time::Duration::from_secs(2),s.recv_from(&mut reply1_buf)).await{
+                Ok(p) => p.unwrap(),
+                Err(_) =>{
+                    raknet_log!("wait reply1 timeout");
+                    continue;
+                }
+            };
 
-                return Err(RaknetError::NotSupportVersion);
-            }else{
-                return Err(RaknetError::IncorrectReply);
+            remote_addr = src;
+            reply1_size = size;
+
+            if reply1_buf[0] != PacketID::OpenConnectionReply1.to_u8(){
+                if reply1_buf[0] == PacketID::IncompatibleProtocolVersion.to_u8(){
+                    let _packet = match read_packet_incompatible_protocol_version(&buf[..size]).await{
+                        Ok(p) => p,
+                        Err(_) => return Err(RaknetError::NotSupportVersion),
+                    };
+    
+                    return Err(RaknetError::NotSupportVersion);
+                }else{
+                    raknet_log!("incorrect reply1");
+                    return Err(RaknetError::IncorrectReply);
+                }
             }
+
+            break;
         }
 
-        let reply1 = match read_packet_connection_open_reply_1(&buf[..size]).await{
+
+        let reply1 = match read_packet_connection_open_reply_1(&reply1_buf[..reply1_size]).await{
             Ok(p) => p,
             Err(_) => return Err(RaknetError::PacketParseError),
         };
 
         let packet = OpenConnectionRequest2{
             magic: true,
-            address: src,
+            address: remote_addr,
             mtu: reply1.mtu_size,
             guid,
         };
 
         let buf = write_packet_connection_open_request_2(&packet).await.unwrap();
 
-        s.send_to(&buf, addr).await.unwrap();
+        loop{
+            s.send_to(&buf, addr).await.unwrap();
 
-        let mut buf = [0u8 ; 2048];
-        let (size ,_ ) = s.recv_from(&mut buf).await.unwrap();
+            let mut buf = [0u8 ; 2048];
+            let (size ,_ ) = match timeout(std::time::Duration::from_secs(2) ,s.recv_from(&mut buf)).await{
+                Ok(p) => p.unwrap(),
+                Err(_) => {
+                    raknet_log!("wait reply2 timeout");
+                    continue;
+                },
+            };
 
-        if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
-            return Err(RaknetError::IncorrectReply);
+            if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
+                raknet_log!("incorrect reply2");
+                return Err(RaknetError::IncorrectReply);
+            }
+    
+            let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]).await{
+                Ok(p) => p,
+                Err(_) => return Err(RaknetError::PacketParseError),
+            };
+
+            break;
         }
-
-        let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]).await{
-            Ok(p) => p,
-            Err(_) => return Err(RaknetError::PacketParseError),
-        };
 
         let sendq = Arc::new(Mutex::new(SendQ::new(reply1.mtu_size)));
 
