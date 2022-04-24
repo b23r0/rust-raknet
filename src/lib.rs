@@ -22,7 +22,7 @@
 //! ```toml
 //! # Cargo.toml
 //! [dependencies]
-//! rust-raknet = "0.5.0"
+//! rust-raknet = "0.5.1"
 //! ```
 //! 
 //! # Reliability
