@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr};
 
-use crate::{datatype::*, utils::*, fragment::FragmentQ, error::*, raknet_log};
+use crate::{datatype::*, utils::*, fragment::FragmentQ, error::*, raknet_log_debug};
 
 
 /// Enumeration type options for Raknet transport reliability
@@ -715,7 +715,7 @@ impl SendQ{
         for i in 0..self.sent_packet.len(){
             let item = &mut self.sent_packet[i];
             if item.1 && item.0.sequence_number == sequence{
-                raknet_log!("packet {}-{}-{} nack {} times" , item.0.sequence_number , item.0.reliable_frame_index , item.0.ordered_frame_index , item.3 + 1);
+                raknet_log_debug!("packet {}-{}-{} nack {} times" , item.0.sequence_number , item.0.reliable_frame_index , item.0.ordered_frame_index , item.3 + 1);
                 item.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
                 item.2 = tick;
@@ -786,7 +786,7 @@ impl SendQ{
             for i in 0..self.sent_packet.len(){
                 let p = &mut self.sent_packet[i];
                 if !p.1{
-                    raknet_log!("{} , packet {}-{}-{} resend {} times" ,peer_addr , p.0.sequence_number , p.0.reliable_frame_index , p.0.ordered_frame_index , p.3 + 1);
+                    raknet_log_debug!("{} , packet {}-{}-{} resend {} times" ,peer_addr , p.0.sequence_number , p.0.reliable_frame_index , p.0.ordered_frame_index , p.3 + 1);
                     ret.push(p.0.clone());
                     p.1 = true;
                     p.2 = tick;

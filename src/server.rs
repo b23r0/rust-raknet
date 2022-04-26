@@ -5,7 +5,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
 
-use crate::{socket::*, raknet_log};
+use crate::{socket::*, raknet_log_debug, raknet_log_error};
 use crate::packet::*;
 use crate::utils::*;
 use crate::error::{Result, RaknetError};
@@ -95,16 +95,21 @@ impl RaknetListener {
                 let addr = match collect_receiver.recv().await{
                     Some(p) => p,
                     None => {
-                        raknet_log!("session collecter closed");
+                        raknet_log_debug!("session collecter closed");
                         break;
                     },
                 };
 
                 let mut sessions = sessions.lock().await;
                 if sessions.contains_key(&addr){
-                    socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await.unwrap();
+                    match socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await{
+                        Ok(_) => {},
+                        Err(e) => {
+                            raknet_log_error!("udp socket send_to error : {}" ,e);
+                        },
+                    };
                     sessions.remove(&addr);
-                    raknet_log!("collect socket : {}" , addr);
+                    raknet_log_debug!("collect socket : {}" , addr);
                 }
             }
         });
@@ -142,14 +147,14 @@ impl RaknetListener {
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
 
-            raknet_log!("start listen worker : {}" , local_addr );
+            raknet_log_debug!("start listen worker : {}" , local_addr );
     
             loop{
                 let motd = motd.clone();
                 let (size , addr) = match socket.recv_from(&mut buf).await{
                     Ok(p) => p,
                     Err(e) => {
-                        raknet_log!("server recv_from error {}" , e);
+                        raknet_log_debug!("server recv_from error {}" , e);
                         break;
                     },
                 };
@@ -157,7 +162,7 @@ impl RaknetListener {
                 let cur_status = match PacketID::from(buf[0]){
                     Ok(p) => p,
                     Err(e) => {
-                        raknet_log!("parse packetid faild : {:?}" ,e );
+                        raknet_log_debug!("parse packetid faild : {:?}" ,e );
                         continue;
                     },
                 };
@@ -181,7 +186,12 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        socket.send_to(&pong, addr).await.unwrap();
+                        match socket.send_to(&pong, addr).await{
+                            Ok(_) => {},
+                            Err(e) => {
+                                raknet_log_error!("udp socket send_to error : {}" ,e);
+                            },
+                        };
                         continue;
                     },
                     PacketID::UnconnectedPing2 => {
@@ -202,7 +212,12 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        socket.send_to(&pong, addr).await.unwrap();
+                        match socket.send_to(&pong, addr).await{
+                            Ok(_) => {},
+                            Err(e) => {
+                                raknet_log_error!("udp socket send_to error : {}" ,e);
+                            },
+                        };
                         continue;
                     },
                     PacketID::OpenConnectionRequest1 => {
@@ -219,7 +234,12 @@ impl RaknetListener {
                             };
                             let buf = write_packet_incompatible_protocol_version(&packet).await.unwrap();
 
-                            socket.send_to(&buf, addr).await.unwrap();
+                            match socket.send_to(&buf, addr).await{
+                                Ok(_) => {},
+                                Err(e) => {
+                                    raknet_log_error!("udp socket send_to error : {}" ,e);
+                                },
+                            };
                             continue;
                         }
 
@@ -237,7 +257,12 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        socket.send_to(&reply, addr).await.unwrap();
+                        match socket.send_to(&reply, addr).await{
+                            Ok(_) => {},
+                            Err(e) => {
+                                raknet_log_error!("udp socket send_to error : {}" ,e);
+                            },
+                        };
                         continue;
                     },
                     PacketID::OpenConnectionRequest2 => {
@@ -268,18 +293,28 @@ impl RaknetListener {
                                 guid,
                             }).await.unwrap();
 
-                            socket.send_to(&packet, addr).await.unwrap();
+                            match socket.send_to(&packet, addr).await{
+                                Ok(_) => {},
+                                Err(e) => {
+                                    raknet_log_error!("udp socket send_to error : {}" ,e);
+                                },
+                            };
 
                             continue;
                         }
 
-                        socket.send_to(&reply, addr).await.unwrap();
+                        match socket.send_to(&reply, addr).await{
+                            Ok(_) => {},
+                            Err(e) => {
+                                raknet_log_error!("udp socket send_to error : {}" ,e);
+                            },
+                        };
 
                         let (sender , receiver) = channel::<Vec<u8>>(10);
 
                         let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu , collect_sender.clone());
 
-                        raknet_log!("accept connection : {}", addr);
+                        raknet_log_debug!("accept connection : {}", addr);
                         sessions.insert(addr, (cur_timestamp_millis() ,sender));
                         let _ = connection_sender.send(s).await;
                     },
@@ -305,7 +340,7 @@ impl RaknetListener {
                     },
                 }
             }
-            raknet_log!("listen worker closed");
+            raknet_log_debug!("listen worker closed");
         });
     }
 

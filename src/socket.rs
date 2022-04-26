@@ -4,9 +4,9 @@ use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, 
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::{error::{Result, RaknetError}};
+use crate::{error::{Result, RaknetError}, raknet_log_error};
 
-use crate::{packet::*, utils::*, arq::*, raknet_log};
+use crate::{packet::*, utils::*, arq::*, raknet_log_debug};
 
 /// Raknet socket wrapper with local and remote.
 pub struct RaknetSocket{
@@ -85,7 +85,7 @@ impl RaknetSocket {
                 //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
                 let buf = write_packet_connected_ping(&ping).await?;
                 sendq.insert(Reliability::Unreliable ,&buf)?;
-                raknet_log!("incomming notified");
+                raknet_log_debug!("incomming notified");
                 incomming_notify.notify_one();
             }
             PacketID::NewIncomingConnection => {
@@ -123,11 +123,17 @@ impl RaknetSocket {
             let mut rng = rand::thread_rng();
             let i: u8 = rng.gen_range(0..11);
             if i > loss_rate.load(Ordering::Relaxed) {
-                raknet_log!("loss packet");
+                raknet_log_debug!("loss packet");
                 return Ok(0);
             }
         }
-        s.send_to(buf, target).await
+        match s.send_to(buf, target).await{
+            Ok(p) => return Ok(p),
+            Err(e) => {
+                raknet_log_error!("udp socket send_to error : {}" ,e);
+                return Err(e);
+            },
+        }
     }
     
     /// Connect to a Raknet server and return a Raknet socket
@@ -169,7 +175,7 @@ impl RaknetSocket {
             let (size ,src ) = match timeout(std::time::Duration::from_secs(2),s.recv_from(&mut reply1_buf)).await{
                 Ok(p) => p.unwrap(),
                 Err(_) =>{
-                    raknet_log!("wait reply1 timeout");
+                    raknet_log_debug!("wait reply1 timeout");
                     continue;
                 }
             };
@@ -186,7 +192,7 @@ impl RaknetSocket {
     
                     return Err(RaknetError::NotSupportVersion);
                 }else{
-                    raknet_log!("incorrect reply1");
+                    raknet_log_debug!("incorrect reply1");
                     return Err(RaknetError::IncorrectReply);
                 }
             }
@@ -216,13 +222,13 @@ impl RaknetSocket {
             let (size ,_ ) = match timeout(std::time::Duration::from_secs(2) ,s.recv_from(&mut buf)).await{
                 Ok(p) => p.unwrap(),
                 Err(_) => {
-                    raknet_log!("wait reply2 timeout");
+                    raknet_log_debug!("wait reply2 timeout");
                     continue;
                 },
             };
 
             if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
-                raknet_log!("incorrect reply2");
+                raknet_log_debug!("incorrect reply2");
                 return Err(RaknetError::IncorrectReply);
             }
     
@@ -273,10 +279,10 @@ impl RaknetSocket {
                         #[cfg(target_family = "windows")]
                         if e.raw_os_error().unwrap() == 10040{
                             // https://docs.microsoft.com/zh-CN/troubleshoot/windows-server/networking/wsaemsgsize-error-10040-in-winsock-2
-                            raknet_log!("recv_from error : {}" , e.raw_os_error().unwrap());
+                            raknet_log_debug!("recv_from error : {}" , e.raw_os_error().unwrap());
                             continue;
                         }
-                        raknet_log!("recv_from error : {}" , e);
+                        raknet_log_debug!("recv_from error : {}" , e);
                         connected_s.store(false, Ordering::Relaxed);
                         break;
                     },
@@ -285,13 +291,13 @@ impl RaknetSocket {
                 match sender.send(buf[..size].to_vec()).await{
                     Ok(_) => {},
                     Err(e) => {
-                        raknet_log!("channel send error : {}" , e);
+                        raknet_log_debug!("channel send error : {}" , e);
                         connected_s.store(false, Ordering::Relaxed);
                         break;
                     },
                 };
             }
-            raknet_log!("{} , recv_from finished" , peer_addr );
+            raknet_log_debug!("{} , recv_from finished" , peer_addr );
         });
 
         let ret = RaknetSocket{
@@ -311,7 +317,7 @@ impl RaknetSocket {
         ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(None);
 
-        raknet_log!("wait incomming notify");
+        raknet_log_debug!("wait incomming notify");
         ret.incomming_notify.notified().await;
         
         Ok(ret)
@@ -337,7 +343,7 @@ impl RaknetSocket {
                 let buf = match receiver.recv().await{
                     Some(buf) => buf,
                     None => {
-                        raknet_log!("channel receiver finished");
+                        raknet_log_debug!("channel receiver finished");
                         connected.store(false, Ordering::Relaxed);
                         break;
                     },
@@ -398,7 +404,7 @@ impl RaknetSocket {
 
                         for f in recvq.flush(&peer_addr){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap(){
-                                raknet_log!("handle error");
+                                raknet_log_error!("handle faild");
                                 connected.store(false, Ordering::Relaxed);
                                 is_break = true;
                                 break;
@@ -424,11 +430,11 @@ impl RaknetSocket {
                         RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
                     }
                 } else {
-                    raknet_log!("unknown packetid : {}", buf[0]);
+                    raknet_log_debug!("unknown packetid : {}", buf[0]);
                 }
             }
 
-            raknet_log!("{} , receiver finished" , peer_addr);
+            raknet_log_debug!("{} , receiver finished" , peer_addr);
         });
     }
 
@@ -473,7 +479,7 @@ impl RaknetSocket {
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000{
-                    raknet_log!("peer addr : {} , sendq size : {} , sentq size : {} , rto : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
+                    raknet_log_debug!("peer addr : {} , sendq size : {} , sentq size : {} , rto : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
                         peer_addr,
                         sendq.get_reliable_queue_size(),
                         sendq.get_sent_queue_size(),
@@ -488,7 +494,7 @@ impl RaknetSocket {
 
                 // if exceed 60s not received any packet will close connection.
                 if cur_timestamp_millis() - last_heartbeat_time.load(Ordering::Relaxed) > RECEIVE_TIMEOUT{
-                    raknet_log!("recv timeout");
+                    raknet_log_debug!("recv timeout");
                     connected.store(false, Ordering::Relaxed);
                     break;
                 }
@@ -505,7 +511,7 @@ impl RaknetSocket {
                 },
                 None => {},
             }
-            raknet_log!("{} , ticker finished" , peer_addr);
+            raknet_log_debug!("{} , ticker finished" , peer_addr);
         });
     }
 
