@@ -4,7 +4,7 @@ use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, 
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::{error::{Result, RaknetError}, raknet_log_error};
+use crate::{error::{Result, RaknetError}, raknet_log_error, raknet_log_info};
 
 use crate::{packet::*, utils::*, arq::*, raknet_log_debug};
 
@@ -171,7 +171,14 @@ impl RaknetSocket {
         let mut reply1_buf =  [0u8 ; 2048];
 
         loop{
-            s.send_to(&buf, addr).await.unwrap();
+            match s.send_to(&buf, addr).await{
+                Ok(p) => p,
+                Err(e) => {
+                    raknet_log_error!("udp socket sendto error {}" , e);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                },
+            };
             let (size ,src ) = match match timeout(std::time::Duration::from_secs(2),s.recv_from(&mut reply1_buf)).await{
                 Ok(p) => p,
                 Err(_) =>{
@@ -222,7 +229,14 @@ impl RaknetSocket {
         let buf = write_packet_connection_open_request_2(&packet).await.unwrap();
 
         loop{
-            s.send_to(&buf, addr).await.unwrap();
+            match s.send_to(&buf, addr).await{
+                Ok(_) => {},
+                Err(e) => {
+                    raknet_log_error!("udp socket sendto error {}" , e);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                },
+            };
 
             let mut buf = [0u8 ; 2048];
             let (size ,_ ) = match match timeout(std::time::Duration::from_secs(2) ,s.recv_from(&mut buf)).await{
@@ -416,7 +430,7 @@ impl RaknetSocket {
 
                         for f in recvq.flush(&peer_addr){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap(){
-                                raknet_log_error!("handle faild");
+                                raknet_log_info!("handle over");
                                 connected.store(false, Ordering::Relaxed);
                                 is_break = true;
                                 break;
@@ -567,7 +581,17 @@ impl RaknetSocket {
 
         let buf = write_packet_ping(&packet).await?;
 
-        s.send_to(buf.as_slice(), addr).await.unwrap();
+        loop{
+            match s.send_to(buf.as_slice(), addr).await{
+                Ok(_) => break,
+                Err(e) => {
+                    raknet_log_error!("udp socket sendto error {}" , e);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                },
+            };
+        }
+
 
         let mut buf = [0u8 ; 1024];
         match s.recv_from(&mut buf).await{

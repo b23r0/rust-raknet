@@ -12,7 +12,7 @@ pub fn enable_raknet_log(flag : u8){
     ENABLE_RAKNET_LOG.store(flag, Ordering::Relaxed);
 }
 
-/// Print Raknet Log
+/// Print Raknet Debug Log
 #[macro_export] macro_rules! raknet_log_debug {
     ($($arg:tt)*) => ({
         if $crate::log::ENABLE_RAKNET_LOG.load(std::sync::atomic::Ordering::Relaxed) & 1 != 0 {
@@ -23,24 +23,24 @@ pub fn enable_raknet_log(flag : u8){
     })
 }
 
-/// Print Raknet Log
+/// Print Raknet Error Log
 #[macro_export] macro_rules! raknet_log_error {
     ($($arg:tt)*) => ({
         if $crate::log::ENABLE_RAKNET_LOG.load(std::sync::atomic::Ordering::Relaxed) & 2 != 0 {
             let now = $crate::utils::cur_timestamp_millis();
             let msg = format!($($arg)*);
-            println!("debug - {} - {} - {}" , now , "raknet" , msg);
+            println!("error - {} - {} - {}" , now , "raknet" , msg);
         }
     })
 }
 
-/// Print Raknet Log
+/// Print Raknet Info Log
 #[macro_export] macro_rules! raknet_log_info {
     ($($arg:tt)*) => ({
         if $crate::log::ENABLE_RAKNET_LOG.load(std::sync::atomic::Ordering::Relaxed) & 4 != 0 {
             let now = $crate::utils::cur_timestamp_millis();
             let msg = format!($($arg)*);
-            println!("debug - {} - {} - {}" , now , "raknet" , msg);
+            println!("info - {} - {} - {}" , now , "raknet" , msg);
         }
     })
 }
