@@ -172,10 +172,16 @@ impl RaknetSocket {
 
         loop{
             s.send_to(&buf, addr).await.unwrap();
-            let (size ,src ) = match timeout(std::time::Duration::from_secs(2),s.recv_from(&mut reply1_buf)).await{
-                Ok(p) => p.unwrap(),
+            let (size ,src ) = match match timeout(std::time::Duration::from_secs(2),s.recv_from(&mut reply1_buf)).await{
+                Ok(p) => p,
                 Err(_) =>{
                     raknet_log_debug!("wait reply1 timeout");
+                    continue;
+                }
+            }{
+                Ok(p) => p,
+                Err(e) => {
+                    raknet_log_error!("recvfrom error : {}" , e);
                     continue;
                 }
             };
@@ -219,12 +225,18 @@ impl RaknetSocket {
             s.send_to(&buf, addr).await.unwrap();
 
             let mut buf = [0u8 ; 2048];
-            let (size ,_ ) = match timeout(std::time::Duration::from_secs(2) ,s.recv_from(&mut buf)).await{
-                Ok(p) => p.unwrap(),
+            let (size ,_ ) = match match timeout(std::time::Duration::from_secs(2) ,s.recv_from(&mut buf)).await{
+                Ok(p) => p,
                 Err(_) => {
                     raknet_log_debug!("wait reply2 timeout");
                     continue;
                 },
+            }{
+                Ok(p) => p,
+                Err(e) => {
+                    raknet_log_error!("recvfrom error : {}" , e);
+                    continue;
+                }
             };
 
             if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
