@@ -128,10 +128,10 @@ impl RaknetSocket {
             }
         }
         match s.send_to(buf, target).await{
-            Ok(p) => return Ok(p),
+            Ok(p) => Ok(p),
             Err(e) => {
                 raknet_log_error!("udp socket send_to error : {}" ,e);
-                return Err(e);
+                Err(e)
             },
         }
     }
@@ -419,7 +419,7 @@ impl RaknetSocket {
                     //flush ack
                     let acks = recvq.get_ack();
 
-                    if acks.len() != 0 {
+                    if !acks.is_empty() {
     
                         let packet = ACK{
                             record_count: acks.len() as u16,
@@ -455,7 +455,7 @@ impl RaknetSocket {
                 // flush nack
                 let mut recvq = recvq.lock().await;
                 let nacks = recvq.get_nack();
-                if nacks.len() != 0{
+                if !nacks.is_empty(){
                     let nack = NACK{
                         record_count: nacks.len() as u16,
                         sequences: nacks,
