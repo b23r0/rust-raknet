@@ -1,6 +1,7 @@
 use std::{net::{SocketAddr}, sync::{Arc, atomic::{AtomicU8, AtomicI64}}};
+use futures::FutureExt;
 use rand::Rng;
-use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, timeout}};
+use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, timeout}, io::{AsyncRead, AsyncWrite}};
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -697,5 +698,52 @@ impl RaknetSocket {
         self.enable_loss.store(true, Ordering::Relaxed);
         self.loss_rate.store(stage, Ordering::Relaxed);
 
+    }
+}
+
+impl AsyncRead for RaknetSocket {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+
+        match self.user_data_receiver.poll_recv(cx){
+            std::task::Poll::Ready(data) => {
+                if data != None{
+                    let data = data.unwrap();
+                    buf.put_slice(&data);
+                    std::task::Poll::Ready(Ok(()))
+                } else {
+                    std::task::Poll::Pending
+                }
+            },
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for RaknetSocket {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.sendq.lock().boxed_local().poll_unpin(cx){
+            std::task::Poll::Ready(mut p) => {
+                p.insert(Reliability::ReliableOrdered, buf).unwrap();
+                std::task::Poll::Ready(Ok(buf.len()))
+            },
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+
+    }
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
 }
