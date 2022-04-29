@@ -22,6 +22,7 @@ pub struct RaknetSocket{
     enable_loss : Arc<AtomicBool>,
     loss_rate : Arc<AtomicU8>,
     incomming_notify : Arc<Notify>,
+    async_read_remaining : Vec<u8>
 }
 
 impl RaknetSocket {
@@ -44,6 +45,7 @@ impl RaknetSocket {
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
             incomming_notify : Arc::new(Notify::new()),
+            async_read_remaining : vec![]
         };
         ret.start_receiver(receiver , user_data_sender);
         ret.start_tick(Some(collecter));
@@ -339,6 +341,7 @@ impl RaknetSocket {
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
             incomming_notify : Arc::new(Notify::new()),
+            async_read_remaining : vec![]
         };
 
         ret.start_receiver(receiver , user_data_sender);
@@ -701,6 +704,14 @@ impl RaknetSocket {
     }
 }
 
+/// Note: AsyncRead requires you to provide a fixed-size buffer for reading data.
+/// 
+/// However, Raknet is not a streaming protocol, so when you use AsyncRead, if you don't provide enough buffer size (less than Raknet Packet size), then a Raknet Packet will be split into multiple reads.
+/// 
+/// This will lead to a similar TCP unpacking problem when you use AsyncRead when you are developing scenarios such as Raknet reverse proxy where the packet size cannot be predicted.
+/// https://programmer.ink/think/tcp-packet-sticking-unpacking.html
+/// So it is not recommended to use AsyncRead for developing Raknet reverse proxy.
+/// 
 impl AsyncRead for RaknetSocket {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -708,14 +719,36 @@ impl AsyncRead for RaknetSocket {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
 
+        if !self.async_read_remaining.is_empty() {
+
+            if buf.remaining() >= self.async_read_remaining.len() {
+                buf.put_slice(&self.async_read_remaining);
+                self.async_read_remaining.clear();
+            }else {
+                let pos = buf.remaining();
+                buf.put_slice(&self.async_read_remaining[..pos]);
+                self.async_read_remaining = self.async_read_remaining[pos..].to_vec();
+            }
+            return std::task::Poll::Ready(Ok(()));
+        }
+
         match self.user_data_receiver.poll_recv(cx){
             std::task::Poll::Ready(data) => {
+
                 if data != None{
                     let data = data.unwrap();
-                    buf.put_slice(&data);
+
+                    if buf.remaining() >= data.len() {
+                        buf.put_slice(&data);
+                    }else {
+                        let pos = buf.remaining();
+                        buf.put_slice(&data[..pos]);
+                        self.async_read_remaining = data[pos..].to_vec();
+                    }
+
                     std::task::Poll::Ready(Ok(()))
                 } else {
-                    std::task::Poll::Pending
+                    std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")))
                 }
             },
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -723,12 +756,19 @@ impl AsyncRead for RaknetSocket {
     }
 }
 
+/// Note: AsyncWrite is not stream written. 
+/// Every time the data sent using AsyncWrite will be completely put into the Raknet Packet, so the returned write size is always equal to the incoming buffer size.
 impl AsyncWrite for RaknetSocket {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
+
+        if !self.connected.load(Ordering::Relaxed) {
+            return std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")));
+        }
+
         match self.sendq.lock().boxed_local().poll_unpin(cx){
             std::task::Poll::Ready(mut p) => {
                 p.insert(Reliability::ReliableOrdered, buf).unwrap();
