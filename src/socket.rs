@@ -134,7 +134,7 @@ impl RaknetSocket {
             Ok(p) => Ok(p),
             Err(e) => {
                 raknet_log_error!("udp socket send_to error : {}" ,e);
-                Err(e)
+                Ok(0)
             },
         }
     }
@@ -492,12 +492,7 @@ impl RaknetSocket {
                     };
 
                     let buf = write_packet_nack(&nack).await.unwrap();
-                    match RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss , &loss_rate).await{
-                        Ok(_) => {},
-                        Err(_) => {
-                            break;
-                        },
-                    };
+                    RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss , &loss_rate).await.unwrap();
                 }
                 
                 //flush sendq
