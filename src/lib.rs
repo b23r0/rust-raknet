@@ -276,8 +276,8 @@ async fn test_loss_packet1(){
             let data = client1.recv().await.unwrap();
             assert!(data == flag);
         }
-        notify.notify_one();
-
+        
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     // 80% loss packet rate
@@ -292,7 +292,7 @@ async fn test_loss_packet1(){
         let data = client2.recv().await.unwrap();
         assert!(data == flag);
     }
-    notify2.notified().await;
+    notify.notify_one();
 }
 
 #[tokio::test]
@@ -321,7 +321,7 @@ async fn test_loss_packet2(){
             let data = client1.recv().await.unwrap();
             assert!(data == flag);
         }
-        notify.notify_one();
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     // 80% loss packet rate
@@ -341,7 +341,7 @@ async fn test_loss_packet2(){
         let data = client2.recv().await.unwrap();
         assert!(data == flag);
     }
-    notify2.notified().await;
+    notify.notify_one();
 }
 
 #[tokio::test]
@@ -372,7 +372,7 @@ async fn test_loss_packet_with_sequenced(){
             assert!(data[1] >= last);
             last = data[1];
         }
-        notify.notify_one();
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     // 80% loss packet rate
@@ -395,7 +395,7 @@ async fn test_loss_packet_with_sequenced(){
         last = data[1];
 
     }
-    notify2.notified().await;
+    notify.notify_one();
 }
 
 #[tokio::test]
