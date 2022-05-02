@@ -550,7 +550,7 @@ impl RaknetSocket {
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.close().await.unwarp();
     /// ```
-    pub async fn close(&mut self) -> Result<()>{
+    async fn close(&mut self) -> Result<()>{
 
         if self.connected.load(Ordering::Relaxed){
             self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
@@ -780,5 +780,11 @@ impl AsyncWrite for RaknetSocket {
 
     fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
         std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for RaknetSocket{
+    fn drop(&mut self) {
+        futures::executor::block_on(self.close()).unwrap();
     }
 }

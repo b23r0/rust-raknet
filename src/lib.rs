@@ -115,7 +115,7 @@ async fn test_ping_pong(){
 
 #[tokio::test]
 async fn test_connect(){
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -131,7 +131,7 @@ async fn test_connect(){
 
 #[tokio::test]
 async fn test_send_recv_fragment_data(){
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -157,7 +157,7 @@ async fn test_send_recv_fragment_data(){
 
 #[tokio::test]
 async fn test_send_recv_more_reliability_type_packet(){
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -236,7 +236,7 @@ async fn test_send_recv_more_reliability_type_packet(){
 async fn test_loss_packet1(){
     let notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify2 = notify.clone();
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -276,7 +276,7 @@ async fn test_loss_packet1(){
 async fn test_loss_packet2(){
     let notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify2 = notify.clone();
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -325,7 +325,7 @@ async fn test_loss_packet2(){
 async fn test_loss_packet_with_sequenced(){
     let notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify2 = notify.clone();
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -377,7 +377,7 @@ async fn test_loss_packet_with_sequenced(){
 
 #[tokio::test]
 async fn test_async_read_write_trait(){
-    let mut server = RaknetListener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
     tokio::spawn(async move {
@@ -418,14 +418,16 @@ async fn test_async_read_write_trait(){
 /*
 #[tokio::test]
 async fn chore(){
-    let mut client = RaknetSocket::connect(&"192.168.199.127:19132".parse().unwrap()).await.unwrap();
+    let mut server = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    server.listen().await;
+    let mut client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
     let mut a = vec![3u8;1000];
     let mut b = vec![2u8;1000];
     let mut c = vec![0xfe;1000];
     b.append(&mut a);
     c.append(&mut b);
     client.send(&c, Reliability::ReliableOrdered).await.unwrap();
-    client.recv().await.unwrap();
+    std::mem::drop(client);
 }
 
 #[tokio::test]

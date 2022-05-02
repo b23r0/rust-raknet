@@ -34,7 +34,7 @@ impl RaknetListener {
     /// listener.listen().await;
     /// let mut socket = socket = listener.accept().await.unwrap();
     /// ```
-    pub async fn bind(sockaddr : SocketAddr) -> Result<Self> {
+    pub async fn bind(sockaddr : &SocketAddr) -> Result<Self> {
         
         let s = match UdpSocket::bind(sockaddr).await{
             Ok(p) => p,
