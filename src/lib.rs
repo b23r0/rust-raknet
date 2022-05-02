@@ -118,15 +118,22 @@ async fn test_connect(){
     let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
+
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
+
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
         client1.send(&[1,2,3] , Reliability::Reliable).await.unwrap();
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
     let buf = client2.recv().await.unwrap();
     assert!(buf == vec![1,2,3]);
+
+    notify.notify_one();
 }
 
 #[tokio::test]
@@ -134,6 +141,10 @@ async fn test_send_recv_fragment_data(){
     let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
+
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
+
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
@@ -145,6 +156,8 @@ async fn test_send_recv_fragment_data(){
         c.append(&mut b);
 
         client1.send(&c , Reliability::ReliableOrdered).await.unwrap();
+
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
@@ -153,6 +166,8 @@ async fn test_send_recv_fragment_data(){
     assert!(buf[0..1000] == vec![1u8;1000]);
     assert!(buf[1000..2000] == vec![2u8;1000]);
     assert!(buf[2000..3000] == vec![3u8;1000]);
+
+    notify.notify_one();
 }
 
 #[tokio::test]
@@ -160,6 +175,10 @@ async fn test_send_recv_more_reliability_type_packet(){
     let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
+
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
+
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
@@ -193,6 +212,8 @@ async fn test_send_recv_more_reliability_type_packet(){
         client1.send(&[0xfe,19,20,21], Reliability::ReliableSequenced).await.unwrap();
         let data = client1.recv().await.unwrap();
         assert!(data == [0xfe,22,23,24].to_vec());
+
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
@@ -230,6 +251,8 @@ async fn test_send_recv_more_reliability_type_packet(){
     assert!(buf == [0xfe,19,20,21]);
 
     client2.send(&[0xfe,22,23,24], Reliability::ReliableSequenced).await.unwrap();
+
+    notify.notify_one();
 }
 
 #[tokio::test]
@@ -380,6 +403,10 @@ async fn test_async_read_write_trait(){
     let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
     let local_addr = server.local_addr().unwrap();
     server.listen().await;
+
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify2 = notify.clone();
+
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
@@ -387,6 +414,8 @@ async fn test_async_read_write_trait(){
         tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,4,5,6]).await.unwrap();
         tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,7,8,9]).await.unwrap();
         tokio::io::AsyncWriteExt::write(&mut client1, &[1,2,3]).await.unwrap();
+
+        notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
@@ -413,6 +442,8 @@ async fn test_async_read_write_trait(){
     let mut buf : Vec<u8> = vec![0u8;3];
     tokio::io::AsyncReadExt::read(&mut client2, &mut buf).await.unwrap();
     assert!(buf == vec![1,2,3]);
+
+    notify.notify_one();
 }
 
 /*
