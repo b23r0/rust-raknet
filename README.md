@@ -53,7 +53,6 @@ async fn serve(){
         if buf[0] == 0xfe{
             //do something
         }
-        socket.close().await.unwrap();
     }
 }
 
@@ -69,7 +68,6 @@ async fn connect(){
     if buf[0] == 0xfe{
         //do something
     }
-    socket.close().await.unwrap();
 }
 ```
 

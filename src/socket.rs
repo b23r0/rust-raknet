@@ -149,7 +149,6 @@ impl RaknetSocket {
     /// if buf[0] == 0xfe{
     ///    //do something
     /// }
-    /// socket.close().await.unwarp(); // you need to manually close raknet connection
     /// ```
     pub async fn connect(addr : &SocketAddr) -> Result<Self>{
 
@@ -541,15 +540,6 @@ impl RaknetSocket {
     }
 
     /// Close Raknet Socket
-    /// 
-    /// The Raknet Socket needs to be closed manually, and if no valid data packets are received for more than 1 minute, the Raknet connection will be closed automatically. 
-    /// This method can be called repeatedly.
-    /// 
-    /// # Example
-    /// ```ignore
-    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    /// socket.close().await.unwarp();
-    /// ```
     async fn close(&mut self) -> Result<()>{
 
         if self.connected.load(Ordering::Relaxed){
