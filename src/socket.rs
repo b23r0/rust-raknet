@@ -540,7 +540,7 @@ impl RaknetSocket {
     }
 
     /// Close Raknet Socket
-    async fn close(&mut self) -> Result<()>{
+    pub async fn close(&mut self) -> Result<()>{
 
         if self.connected.load(Ordering::Relaxed){
             self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
@@ -608,6 +608,14 @@ impl RaknetSocket {
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// ```
     pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
+
+        if buf.len() < 1 {
+            return Err(RaknetError::PacketHeaderError);
+        }
+
+        if buf[0] != 0xfe{
+            return Err(RaknetError::PacketHeaderError);
+        }
 
         if !self.connected.load(Ordering::Relaxed){
             return Err(RaknetError::ConnectionClosed);
@@ -756,6 +764,14 @@ impl AsyncWrite for RaknetSocket {
 
         match self.sendq.lock().boxed_local().poll_unpin(cx){
             std::task::Poll::Ready(mut p) => {
+                if buf.len() < 1 {
+                    return std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "packet header must be 0xfe")));
+                }
+        
+                if buf[0] != 0xfe{
+                    return std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "packet header must be 0xfe")));
+                }
+
                 p.insert(Reliability::ReliableOrdered, buf).unwrap();
                 std::task::Poll::Ready(Ok(buf.len()))
             },

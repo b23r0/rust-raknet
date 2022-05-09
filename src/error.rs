@@ -11,7 +11,8 @@ pub enum RaknetError{
     IncorrectReliability,
     IncorrectPacketID,
     ReadPacketBufferError,
-    PacketSizeExceedMTU
+    PacketSizeExceedMTU,
+    PacketHeaderError,
 }
 
 pub type Result<T> = std::result::Result<T , RaknetError>;

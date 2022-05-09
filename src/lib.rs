@@ -123,13 +123,13 @@ async fn test_connect(){
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
-        client1.send(&[1,2,3] , Reliability::Reliable).await.unwrap();
+        client1.send(&[0xfe,2,3] , Reliability::Reliable).await.unwrap();
         notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
     let buf = client2.recv().await.unwrap();
-    assert!(buf == vec![1,2,3]);
+    assert!(buf == vec![0xfe,2,3]);
 
     notify.notify_one();
 }
@@ -149,7 +149,7 @@ async fn test_send_recv_fragment_data(){
 
         let mut a = vec![3u8;1000];
         let mut b = vec![2u8;1000];
-        let mut c = vec![1u8;1000];
+        let mut c = vec![0xfe;1000];
         b.append(&mut a);
         c.append(&mut b);
 
@@ -161,7 +161,7 @@ async fn test_send_recv_fragment_data(){
     assert!(client2.peer_addr().unwrap() == local_addr);
     let buf = client2.recv().await.unwrap();
     assert!(buf.len() == 3000);
-    assert!(buf[0..1000] == vec![1u8;1000]);
+    assert!(buf[0..1000] == vec![0xfe;1000]);
     assert!(buf[1000..2000] == vec![2u8;1000]);
     assert!(buf[2000..3000] == vec![3u8;1000]);
 
@@ -195,7 +195,7 @@ async fn test_send_recv_more_reliability_type_packet(){
 
         let mut a = vec![3u8;1000];
         let mut b = vec![2u8;1000];
-        let mut c = vec![1u8;1000];
+        let mut c = vec![0xfe;1000];
         b.append(&mut a);
         c.append(&mut b);
 
@@ -203,7 +203,7 @@ async fn test_send_recv_more_reliability_type_packet(){
 
         let buf = client1.recv().await.unwrap();
         assert!(buf.len() == 3000);
-        assert!(buf[0..1000] == vec![1u8;1000]);
+        assert!(buf[0..1000] == vec![0xfe;1000]);
         assert!(buf[1000..2000] == vec![2u8;1000]);
         assert!(buf[2000..3000] == vec![3u8;1000]);
 
@@ -233,13 +233,13 @@ async fn test_send_recv_more_reliability_type_packet(){
 
     let buf = client2.recv().await.unwrap();
     assert!(buf.len() == 3000);
-    assert!(buf[0..1000] == vec![1u8;1000]);
+    assert!(buf[0..1000] == vec![0xfe;1000]);
     assert!(buf[1000..2000] == vec![2u8;1000]);
     assert!(buf[2000..3000] == vec![3u8;1000]);
 
     let mut a = vec![3u8;1000];
     let mut b = vec![2u8;1000];
-    let mut c = vec![1u8;1000];
+    let mut c = vec![0xfe;1000];
     b.append(&mut a);
     c.append(&mut b);
 
@@ -408,10 +408,10 @@ async fn test_async_read_write_trait(){
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
-        tokio::io::AsyncWriteExt::write(&mut client1, &[1,2,3]).await.unwrap();
+        tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,2,3]).await.unwrap();
         tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,4,5,6]).await.unwrap();
         tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,7,8,9]).await.unwrap();
-        tokio::io::AsyncWriteExt::write(&mut client1, &[1,2,3]).await.unwrap();
+        tokio::io::AsyncWriteExt::write(&mut client1, &[0xfe,2,3]).await.unwrap();
 
         notify2.notified().await;
     });
@@ -419,7 +419,7 @@ async fn test_async_read_write_trait(){
     assert!(client2.peer_addr().unwrap() == local_addr);
     let mut buf : Vec<u8> = vec![0u8;1];
     tokio::io::AsyncReadExt::read(&mut client2, &mut buf).await.unwrap();
-    assert!(buf == vec![1]);
+    assert!(buf == vec![0xfe]);
     tokio::io::AsyncReadExt::read(&mut client2, &mut buf).await.unwrap();
     assert!(buf == vec![2]);
     tokio::io::AsyncReadExt::read(&mut client2, &mut buf).await.unwrap();
@@ -439,7 +439,7 @@ async fn test_async_read_write_trait(){
 
     let mut buf : Vec<u8> = vec![0u8;3];
     tokio::io::AsyncReadExt::read(&mut client2, &mut buf).await.unwrap();
-    assert!(buf == vec![1,2,3]);
+    assert!(buf == vec![0xfe,2,3]);
 
     notify.notify_one();
 }
