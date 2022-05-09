@@ -549,51 +549,62 @@ impl RaknetSocket {
         Ok(())
     }
 
-    /// Unconnected ping a Raknet Server and return latency
+    /// Unconnected ping a Raknet Server and return latency and motd.
     /// 
     /// # Example
     /// ```ignore
-    /// let latency = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let (latency, motd) = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// assert!((0..10).contains(&latency));
     /// ```
-    pub async fn ping(addr : &SocketAddr) -> Result<i64> {
-        let packet = PacketUnconnectedPing{
-            time: cur_timestamp_millis(),
-            magic: true,
-            guid: rand::random(),
-        };
+    pub async fn ping(addr : &SocketAddr) -> Result<(i64 , String)> {
+
 
         let s = match UdpSocket::bind("0.0.0.0:0").await{
             Ok(p) => p,
             Err(_) => return Err(RaknetError::BindAdreesError),
         };
 
-        let buf = write_packet_ping(&packet).await?;
-
         loop{
+
+            let packet = PacketUnconnectedPing{
+                time: cur_timestamp_millis(),
+                magic: true,
+                guid: rand::random(),
+            };
+
+            let buf = write_packet_ping(&packet).await?;
+
             match s.send_to(buf.as_slice(), addr).await{
-                Ok(_) => break,
+                Ok(_) => {},
                 Err(e) => {
                     raknet_log_error!("udp socket sendto error {}" , e);
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    continue;
+                    return Err(RaknetError::SocketError);
                 },
             };
+
+            let mut buf = [0u8 ; 1024];
+
+            match match tokio::time::timeout(std::time::Duration::from_secs(5), s.recv_from(&mut buf)).await{
+                Ok(p) => p,
+                Err(_) => {
+                    continue;
+                },
+            }{
+                Ok(p) => p,
+                Err(_) => return Err(RaknetError::SocketError),
+            };
+    
+            match read_packet_pong(&buf).await{
+                Ok(p) => {
+                    return Ok((p.time - packet.time , p.motd))
+                },
+                Err(_) => {},
+            };
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-
-        let mut buf = [0u8 ; 1024];
-        match s.recv_from(&mut buf).await{
-            Ok(p) => p,
-            Err(_) => return Err(RaknetError::RecvFromError),
-        };
-
-        let pong = match read_packet_pong(&buf).await{
-            Ok(p) => p,
-            Err(_) => return Err(RaknetError::PacketParseError),
-        };
-
-        Ok(pong.time - packet.time)
+        
     }
 
     /// Send a packet
@@ -653,7 +664,7 @@ impl RaknetSocket {
                 if !self.connected.load(Ordering::Relaxed){
                     return Err(RaknetError::ConnectionClosed);
                 }
-                Err(RaknetError::RecvFromError)
+                Err(RaknetError::SocketError)
             },
         }
 

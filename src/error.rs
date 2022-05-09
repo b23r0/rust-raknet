@@ -7,7 +7,7 @@ pub enum RaknetError{
     NotSupportVersion,
     IncorrectReply,
     PacketParseError,
-    RecvFromError,
+    SocketError,
     IncorrectReliability,
     IncorrectPacketID,
     ReadPacketBufferError,
