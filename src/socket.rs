@@ -531,7 +531,12 @@ impl RaknetSocket {
 
             match collecter{
                 Some(p) => {
-                    p.lock().await.send(peer_addr).await.unwrap();
+                    match p.lock().await.send(peer_addr).await{
+                        Ok(_) => {},
+                        Err(e) => {
+                            raknet_log_error!("channel send error : {}" , e);
+                        },
+                    };
                 },
                 None => {},
             }
@@ -539,7 +544,15 @@ impl RaknetSocket {
         });
     }
 
-    /// Close Raknet Socket
+    /// Close Raknet Socket.
+    /// Normally you don't need to call this method, the RaknetSocket will be closed automatically when it is released.
+    /// This method can be called repeatedly.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let (latency, motd) = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// assert!((0..10).contains(&latency));
+    /// ```
     pub async fn close(&mut self) -> Result<()>{
 
         if self.connected.load(Ordering::Relaxed){

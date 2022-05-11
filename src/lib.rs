@@ -112,7 +112,7 @@ async fn test_ping_pong(){
     let addr = format!("127.0.0.1:{}", port);
     let (latency , motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap()).await.unwrap();
     assert!(motd_str == motd);
-    assert!((0..10).contains(&latency));
+    assert!((0..100).contains(&latency));
 }
 
 #[tokio::test]
@@ -451,6 +451,7 @@ async fn test_async_read_write_trait(){
 /*
 #[tokio::test]
 async fn chore(){
+    enable_raknet_log(255);
     let mut server = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
     server.listen().await;
     let mut client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
@@ -460,7 +461,10 @@ async fn chore(){
     b.append(&mut a);
     c.append(&mut b);
     client.send(&c, Reliability::ReliableOrdered).await.unwrap();
+    server.close().await.unwrap();
+    client.close().await.unwrap();
     std::mem::drop(client);
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 }
 
 #[tokio::test]

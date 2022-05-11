@@ -21,7 +21,8 @@ pub struct RaknetListener {
     listened : bool, 
     connection_receiver : Receiver<RaknetSocket>,
     connection_sender : Sender<RaknetSocket>,
-    sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>
+    sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>,
+    close_notify : Arc<tokio::sync::Semaphore>
 }
 
 impl RaknetListener {
@@ -53,6 +54,7 @@ impl RaknetListener {
             connection_receiver,
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
+            close_notify : Arc::new(tokio::sync::Semaphore::new(0))
         })
     }
     
@@ -84,21 +86,33 @@ impl RaknetListener {
             connection_receiver,
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
+            close_notify : Arc::new(tokio::sync::Semaphore::new(0))
         })
     }
 
     async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>> ,mut collect_receiver : Receiver<SocketAddr>) {
         let sessions = sessions.clone();
         let socket = socket.clone();
+        let close_notify = self.close_notify.clone();
         tokio::spawn(async move{
             loop{
-                let addr = match collect_receiver.recv().await{
-                    Some(p) => p,
-                    None => {
-                        raknet_log_debug!("session collecter closed");
-                        break;
+                let addr : SocketAddr;
+
+                tokio::select! {
+                    a = collect_receiver.recv() => {
+                        match a {
+                            Some(p) => { addr = p },
+                            None => {
+                                raknet_log_debug!("session collecter closed");
+                                break;
+                            },
+                        };
                     },
-                };
+                    _ = close_notify.acquire() => {
+                        raknet_log_debug!("session collecter close notified");
+                        break;
+                    }
+                }
 
                 let mut sessions = sessions.lock().await;
                 if sessions.contains_key(&addr){
@@ -112,6 +126,27 @@ impl RaknetListener {
                     raknet_log_debug!("collect socket : {}" , addr);
                 }
             }
+
+            let mut sessions = sessions.lock().await;
+
+            for i in sessions.iter(){
+                match i.1.1.send(vec![PacketID::Disconnect.to_u8()]).await{
+                    Ok(_) => {},
+                    Err(_) => {},
+                };
+
+                match socket.send_to(&[PacketID::Disconnect.to_u8()], i.0).await{
+                    Ok(_) => {},
+                    Err(e) => {
+                        raknet_log_error!("udp socket send_to error : {}" ,e);
+                    },
+                };
+
+            }
+
+            sessions.clear();
+
+            raknet_log_debug!("session collect closed");
         });
     }
 
@@ -143,7 +178,7 @@ impl RaknetListener {
         self.start_session_collect(&socket ,&sessions , collect_receiver).await;
 
         let local_addr = socket.local_addr().unwrap();
-
+        let close_notify = self.close_notify.clone();
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
 
@@ -151,13 +186,27 @@ impl RaknetListener {
     
             loop{
                 let motd = motd.clone();
-                let (size , addr) = match socket.recv_from(&mut buf).await{
-                    Ok(p) => p,
-                    Err(e) => {
-                        raknet_log_debug!("server recv_from error {}" , e);
+                let size : usize ;
+                let addr : SocketAddr;
+
+                tokio::select!{
+                    a = socket.recv_from(&mut buf) => {
+                        match a {
+                            Ok(p) => {
+                                size = p.0;
+                                addr = p.1;
+                            },
+                            Err(e) => {
+                                raknet_log_debug!("server recv_from error {}" , e);
+                                break;
+                            },
+                        };
+                    }, 
+                    _ = close_notify.acquire() => {
+                        raknet_log_debug!("listen close notified");
                         break;
-                    },
-                };
+                    }
+                }
 
                 let cur_status = match PacketID::from(buf[0]){
                     Ok(p) => p,
@@ -358,7 +407,13 @@ impl RaknetListener {
         if !self.listened{
             Err(RaknetError::NotListen)
         }else {
-            Ok(self.connection_receiver.recv().await.unwrap())
+            let client = match self.connection_receiver.recv().await{
+                Some(p) => p,
+                None => {
+                    return Err(RaknetError::NotListen);
+                },
+            };
+            Ok(client)
         }
     }
 
@@ -395,5 +450,29 @@ impl RaknetListener {
     /// ```
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.socket.local_addr().unwrap())
+    }
+
+    /// Close Raknet Server and all connections.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let mut socket = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.close().await;
+    /// ```
+    pub fn close(&self) -> Result<()>{
+        self.close_notify.close();
+        Ok(())
+    }
+
+    /// Set full motd string.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let mut socket = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.set_full_motd("motd").await;
+    /// ```
+    pub fn set_full_motd(&mut self, motd : String ) -> Result<()>{
+        self.motd = motd;
+        Ok(())
     }
 }
