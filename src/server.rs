@@ -407,13 +407,20 @@ impl RaknetListener {
         if !self.listened{
             Err(RaknetError::NotListen)
         }else {
-            let client = match self.connection_receiver.recv().await{
-                Some(p) => p,
-                None => {
+            tokio::select!{
+                a = self.connection_receiver.recv() => {
+                    match a {
+                        Some(p) => return Ok(p),
+                        None => {
+                            return Err(RaknetError::NotListen);
+                        },
+                    };
+                }, 
+                _ = self.close_notify.acquire() => {
+                    raknet_log_debug!("accept close notified");
                     return Err(RaknetError::NotListen);
-                },
-            };
-            Ok(client)
+                }
+            }
         }
     }
 
