@@ -73,4 +73,10 @@ async fn connect(){
 
 # Contribution
 
-If you want to develop with me, you can contact me via discord or email.
+Options :
+
+* Report a BUG
+* Submit an ISSUE about suggestion
+* Submit a improved PR
+* Add an example of using rust-raknet
+* Supplement the documentation on using rust-raknet
