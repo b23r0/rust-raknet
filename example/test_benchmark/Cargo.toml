@@ -1,0 +1,11 @@
+[package]
+name = "test_benchmark"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rust-raknet = { path = "../rust-raknet"}
+tokio = "1"
+getopts = "0.2"

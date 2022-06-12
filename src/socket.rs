@@ -167,8 +167,8 @@ impl RaknetSocket {
 
         let buf = write_packet_connection_open_request_1(&packet).await.unwrap();
 
-        let remote_addr : SocketAddr;
-        let reply1_size : usize;
+        let mut remote_addr : SocketAddr;
+        let mut reply1_size : usize;
 
         let mut reply1_buf =  [0u8 ; 2048];
 
@@ -208,7 +208,7 @@ impl RaknetSocket {
                     return Err(RaknetError::NotSupportVersion);
                 }else{
                     raknet_log_debug!("incorrect reply1");
-                    return Err(RaknetError::IncorrectReply);
+                    continue;
                 }
             }
 
@@ -255,9 +255,15 @@ impl RaknetSocket {
                 }
             };
 
+            if buf[0] == PacketID::OpenConnectionReply1.to_u8(){
+                raknet_log_debug!("repeat receive reply1");
+                continue;
+            }
+
             if buf[0] != PacketID::OpenConnectionReply2.to_u8(){
                 raknet_log_debug!("incorrect reply2");
-                return Err(RaknetError::IncorrectReply);
+                continue;
+
             }
     
             let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]).await{
