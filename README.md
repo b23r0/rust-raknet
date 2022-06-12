@@ -73,11 +73,11 @@ async fn connect(){
 
 # Benchmark
 
-Use Tcp to compare with this project. Set the server packet loss rate to 50%（）, the client connects to the server, and the server sends an 800-byte packet every 30ms, a total of 100 times. The client counts the delay time of each received data, and calculates the average time of receiving 100 data. The following results are obtained.
+Use Tcp to compare with this project. Set the server packet loss rate to 50%, the client connects to the server, and the server sends an 800-byte packet every 30ms, a total of 100 times. The client counts the delay time of each received data, and calculates the average time of receiving 100 times. The following results are obtained.
 
 Test code: https://github.com/b23r0/rust-raknet/blob/main/example/test_benchmark/src/main.rs
 
-result:
+Result:
 
 ![image]( https://github.com/b23r0/rust-raknet/blob/main/images/benchmark20220612.jpg)
 
