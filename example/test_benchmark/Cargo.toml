@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rust-raknet = { path = "../rust-raknet"}
+rust-raknet = {path = "../.."}
 tokio = "1"
 getopts = "0.2"
