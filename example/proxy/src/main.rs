@@ -56,7 +56,7 @@ async fn main() {
         Ok(p) => p
     };
 
-    let mut listener = RaknetListener::bind(local_address.parse().unwrap()).await.unwrap();
+    let mut listener = RaknetListener::bind(&local_address.parse().unwrap()).await.unwrap();
     listener.listen().await;
     loop{
         let mut client1 = listener.accept().await.unwrap();
