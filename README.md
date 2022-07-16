@@ -3,7 +3,7 @@ RakNet Protocol implementation by Rust.
 
 Raknet is a reliable udp transport protocol that is generally used for communication between game clients and servers, and is used by Minecraft Bedrock Edtion for underlying communication.
 
-Raknet protocol supports multiple reliability, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol.
+Raknet protocol supports various reliability options, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol by reverse engineering.
 
 Reference : http://www.jenkinssoftware.com/raknet/manual/index.html
 
