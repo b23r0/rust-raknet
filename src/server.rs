@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use tokio::sync::mpsc::channel;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::sync::mpsc::{Receiver, Sender};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
@@ -16,13 +16,14 @@ const MAX_CONNECTION : u32 = 99999;
 /// Implementation of Raknet Server.
 pub struct RaknetListener {
     motd : String,
-    socket : Arc<UdpSocket>,
+    socket : Option<Arc<UdpSocket>>,
     guid : u64,
     listened : bool, 
     connection_receiver : Receiver<RaknetSocket>,
     connection_sender : Sender<RaknetSocket>,
     sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>,
-    close_notify : Arc<tokio::sync::Semaphore>
+    close_notifier : Arc<tokio::sync::Semaphore>,
+    all_session_closed_notifier : Arc<Notify>
 }
 
 impl RaknetListener {
@@ -48,13 +49,14 @@ impl RaknetListener {
 
         Ok(Self {
             motd : String::new(),
-            socket : Arc::new(s),
+            socket : Some(Arc::new(s)),
             guid : rand::random(),
             listened : false,
             connection_receiver,
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
-            close_notify : Arc::new(tokio::sync::Semaphore::new(0))
+            close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
+            all_session_closed_notifier: Arc::new(Notify::new())
         })
     }
     
@@ -80,20 +82,22 @@ impl RaknetListener {
         
         Ok(Self {
             motd : String::new(),
-            socket : Arc::new(s),
+            socket : Some(Arc::new(s)),
             guid : rand::random(),
             listened : false,
             connection_receiver,
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
-            close_notify : Arc::new(tokio::sync::Semaphore::new(0))
+            close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
+            all_session_closed_notifier : Arc::new(Notify::new())
         })
     }
 
     async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>> ,mut collect_receiver : Receiver<SocketAddr>) {
         let sessions = sessions.clone();
         let socket = socket.clone();
-        let close_notify = self.close_notify.clone();
+        let close_notifier = self.close_notifier.clone();
+        let all_session_closed_notifier = self.all_session_closed_notifier.clone();
         tokio::spawn(async move{
             loop{
                 let addr : SocketAddr;
@@ -108,7 +112,7 @@ impl RaknetListener {
                             },
                         };
                     },
-                    _ = close_notify.acquire() => {
+                    _ = close_notifier.acquire() => {
                         raknet_log_debug!("session collecter close notified");
                         break;
                     }
@@ -144,7 +148,29 @@ impl RaknetListener {
 
             }
 
+            while !sessions.is_empty(){
+                let addr = match collect_receiver.recv().await{
+                    Some(p) => p,
+                    None => {
+                        raknet_log_error!("clean session faild , maybe has session not close");
+                        break;
+                    },
+                };
+
+                if sessions.contains_key(&addr){
+                    match socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await{
+                        Ok(_) => {},
+                        Err(e) => {
+                            raknet_log_error!("udp socket send_to error : {}" ,e);
+                        },
+                    };
+                    sessions.remove(&addr);
+                    raknet_log_debug!("collect socket : {}" , addr);
+                }
+            }
+
             sessions.clear();
+            all_session_closed_notifier.notify_one();
 
             raknet_log_debug!("session collect closed");
         });
@@ -161,11 +187,15 @@ impl RaknetListener {
     /// ```
     pub async fn listen(&mut self) {
 
-        if self.motd.is_empty(){
-            self.set_motd(SERVER_NAME , MAX_CONNECTION, "486" , "1.18.11", "Survival" , self.socket.local_addr().unwrap().port()).await;
+        if self.close_notifier.is_closed(){
+            return;
         }
 
-        let socket = self.socket.clone();
+        if self.motd.is_empty(){
+            self.set_motd(SERVER_NAME , MAX_CONNECTION, "486" , "1.18.11", "Survival" , self.socket.as_ref().unwrap().local_addr().unwrap().port()).await;
+        }
+
+        let socket = self.socket.as_ref().unwrap().clone();
         let guid = self.guid;
         let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
@@ -178,7 +208,7 @@ impl RaknetListener {
         self.start_session_collect(&socket ,&sessions , collect_receiver).await;
 
         let local_addr = socket.local_addr().unwrap();
-        let close_notify = self.close_notify.clone();
+        let close_notify = self.close_notifier.clone();
         tokio::spawn(async move {
             let mut buf= [0u8;2048];
 
@@ -416,7 +446,7 @@ impl RaknetListener {
                         },
                     };
                 }, 
-                _ = self.close_notify.acquire() => {
+                _ = self.close_notifier.acquire() => {
                     raknet_log_debug!("accept close notified");
                     return Err(RaknetError::NotListen);
                 }
@@ -456,7 +486,7 @@ impl RaknetListener {
     /// assert_eq!(socket.local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     /// ```
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.socket.local_addr().unwrap())
+        Ok(self.socket.as_ref().unwrap().local_addr().unwrap())
     }
 
     /// Close Raknet Server and all connections.
@@ -466,8 +496,22 @@ impl RaknetListener {
     /// let mut socket = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.close().await;
     /// ```
-    pub fn close(&self) -> Result<()>{
-        self.close_notify.close();
+    pub async fn close(&mut self) -> Result<()>{
+        if self.close_notifier.is_closed(){
+            return Ok(());
+        }
+        self.close_notifier.close();
+        self.all_session_closed_notifier.notified().await;
+        
+        // wait all thread exit and drop socket pointer.
+        while Arc::strong_count(self.socket.as_ref().unwrap()) != 1{
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // drop socket and free bind port
+        self.socket = None;
+        self.listened = false;
+
         Ok(())
     }
 

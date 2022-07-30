@@ -2,7 +2,7 @@
 //! 
 //! Raknet is a reliable udp transport protocol that is generally used for communication between game clients and servers, and is used by Minecraft Bedrock Edtion for underlying communication.
 //! 
-//! Raknet protocol supports multiple reliability, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol.
+//! Raknet protocol supports various reliability options, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol by reverse engineering.
 //! 
 //! Reference : <http://www.jenkinssoftware.com/raknet/manual/index.html>
 //! 
@@ -400,25 +400,31 @@ async fn test_loss_packet_with_sequenced(){
     notify.notify_one();
 }
 
-/*
-#[tokio::test]
-async fn chore(){
-    enable_raknet_log(255);
-    let mut server = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    server.listen().await;
-    let mut client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    let mut a = vec![3u8;1000];
-    let mut b = vec![2u8;1000];
-    let mut c = vec![0xfe;1000];
-    b.append(&mut a);
-    c.append(&mut b);
-    client.send(&c, Reliability::ReliableOrdered).await.unwrap();
-    server.close().await.unwrap();
-    client.close().await.unwrap();
-    std::mem::drop(client);
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-}
 
+#[tokio::test]
+async fn test_raknet_server_close(){
+    for _ in 0..10{
+        let mut server = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+        server.listen().await;
+        let mut client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+        let mut a = vec![3u8;1000];
+        let mut b = vec![2u8;1000];
+        let mut c = vec![0xfe;1000];
+        b.append(&mut a);
+        c.append(&mut b);
+        client.send(&c, Reliability::ReliableOrdered).await.unwrap();
+        server.close().await.unwrap();
+        client.close().await.unwrap();
+    }
+
+    let mut server1 = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    server1.listen().await;
+    server1.close().await.unwrap();
+    let mut server2 = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    server2.listen().await;
+
+}
+/*
 #[tokio::test]
 async fn chore2(){
 

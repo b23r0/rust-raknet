@@ -12,15 +12,15 @@ use crate::{packet::*, utils::*, arq::*, raknet_log_debug};
 pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
-    s : Arc<UdpSocket>,
     user_data_receiver : Receiver<Vec<u8>>,
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
-    connected : Arc<AtomicBool>,
+    close_notifier : Arc<tokio::sync::Semaphore>,
     last_heartbeat_time : Arc<AtomicI64>,
     enable_loss : Arc<AtomicBool>,
     loss_rate : Arc<AtomicU8>,
-    incomming_notify : Arc<Notify>,
+    incomming_notifier : Arc<Notify>,
+    sender : Sender<(Vec<u8> , SocketAddr , bool , u8)>
 }
 
 impl RaknetSocket {
@@ -30,22 +30,24 @@ impl RaknetSocket {
     pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
+        let (sender_sender , sender_receiver) = channel::<(Vec<u8> , SocketAddr , bool , u8)>(10);
 
         let ret = RaknetSocket{
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
-            s: s.clone(),
             user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
-            connected : Arc::new(AtomicBool::new(true)),
+            close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
             last_heartbeat_time : Arc::new(AtomicI64::new(cur_timestamp_millis())),
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
-            incomming_notify : Arc::new(Notify::new()),
+            incomming_notifier : Arc::new(Notify::new()),
+            sender : sender_sender
         };
-        ret.start_receiver(receiver , user_data_sender);
-        ret.start_tick(Some(collecter));
+        ret.start_receiver(s , receiver , user_data_sender);
+        ret.start_tick(s, Some(collecter));
+        ret.start_sender(s, sender_receiver);
         ret
     }
 
@@ -118,11 +120,11 @@ impl RaknetSocket {
         Ok(true)
     }
     
-    async fn sendto(s : &UdpSocket , buf : &[u8] , target : &SocketAddr , enable_loss : &AtomicBool , loss_rate : &AtomicU8) -> tokio::io::Result<usize>{
-        if enable_loss.load(Ordering::Relaxed){
+    async fn sendto(s : &UdpSocket , buf : &[u8] , target : &SocketAddr , enable_loss : bool , loss_rate : u8) -> tokio::io::Result<usize>{
+        if enable_loss{
             let mut rng = rand::thread_rng();
             let i: u8 = rng.gen_range(0..11);
-            if i > loss_rate.load(Ordering::Relaxed) {
+            if i > loss_rate {
                 raknet_log_debug!("loss packet");
                 return Ok(0);
             }
@@ -292,13 +294,13 @@ impl RaknetSocket {
         let s = Arc::new(s);
 
         let recv_s = s.clone();
-        let connected = Arc::new(AtomicBool::new(true));
+        let connected = Arc::new(tokio::sync::Semaphore::new(0));
         let connected_s = connected.clone();
         let peer_addr = *addr;
         tokio::spawn(async move {
             let mut buf = [0u8;2048];
             loop{
-                if !connected_s.load(Ordering::Relaxed){
+                if connected_s.is_closed(){
                     break;
                 }
                 let (size , _) = match match timeout(std::time::Duration::from_secs(10), recv_s.recv_from(&mut buf)).await{
@@ -314,7 +316,7 @@ impl RaknetSocket {
                             continue;
                         }
                         raknet_log_debug!("recv_from error : {}" , e);
-                        connected_s.store(false, Ordering::Relaxed);
+                        connected_s.close();
                         break;
                     },
                 };
@@ -323,7 +325,7 @@ impl RaknetSocket {
                     Ok(_) => {},
                     Err(e) => {
                         raknet_log_debug!("channel send error : {}" , e);
-                        connected_s.store(false, Ordering::Relaxed);
+                        connected_s.close();
                         break;
                     },
                 };
@@ -331,43 +333,46 @@ impl RaknetSocket {
             raknet_log_debug!("{} , recv_from finished" , peer_addr );
         });
 
+        let (sender_sender , sender_receiver) = channel::<(Vec<u8> , SocketAddr , bool , u8)>(10);
+
         let ret = RaknetSocket{
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
-            s,
             user_data_receiver,
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq,
-            connected,
+            close_notifier: connected,
             last_heartbeat_time : Arc::new(AtomicI64::new(cur_timestamp_millis())),
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
-            incomming_notify : Arc::new(Notify::new()),
+            incomming_notifier : Arc::new(Notify::new()),
+            sender : sender_sender
         };
 
-        ret.start_receiver(receiver , user_data_sender);
-        ret.start_tick(None);
+        ret.start_receiver( &s, receiver , user_data_sender);
+        ret.start_tick(&s ,None);
+        ret.start_sender(&s, sender_receiver);
 
         raknet_log_debug!("wait incomming notify");
-        ret.incomming_notify.notified().await;
+        ret.incomming_notifier.notified().await;
         
         Ok(ret)
     }
 
-    fn start_receiver(&self , mut receiver : Receiver<Vec<u8>> , user_data_sender : Sender<Vec<u8>>) {
-        let connected = self.connected.clone();
+    fn start_receiver(&self ,s : &Arc<UdpSocket>, mut receiver : Receiver<Vec<u8>> , user_data_sender : Sender<Vec<u8>>) {
+        let connected = self.close_notifier.clone();
         let peer_addr = self.peer_addr;
         let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
-        let incomming_notify = self.incomming_notify.clone();
-        let s = self.s.clone();
+        let incomming_notify = self.incomming_notifier.clone();
+        let s = s.clone();
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
         tokio::spawn(async move {
             loop{
-                if !connected.load(Ordering::Relaxed){
+                if connected.is_closed(){
                     break;
                 }
 
@@ -375,7 +380,7 @@ impl RaknetSocket {
                     Some(buf) => buf,
                     None => {
                         raknet_log_debug!("channel receiver finished");
-                        connected.store(false, Ordering::Relaxed);
+                        connected.close();
                         break;
                     },
                 };
@@ -383,7 +388,7 @@ impl RaknetSocket {
                 last_heartbeat_time.store(cur_timestamp_millis(), Ordering::Relaxed);
 
                 if PacketID::from(buf[0]).unwrap() == PacketID::Disconnect{
-                    connected.store(false, Ordering::Relaxed);
+                    connected.close();
                     break;
                 }
 
@@ -436,7 +441,7 @@ impl RaknetSocket {
                         for f in recvq.flush(&peer_addr){
                             if !RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap(){
                                 raknet_log_info!("handle over");
-                                connected.store(false, Ordering::Relaxed);
+                                connected.close();
                                 is_break = true;
                                 break;
                             };
@@ -458,7 +463,7 @@ impl RaknetSocket {
                         };
     
                         let buf = write_packet_ack(&packet).await.unwrap();
-                        RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
+                        RaknetSocket::sendto(&s , &buf, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                     }
                 } else {
                     raknet_log_debug!("unknown packetid : {}", buf[0]);
@@ -469,9 +474,43 @@ impl RaknetSocket {
         });
     }
 
-    fn start_tick(&self , collecter : Option<Arc<Mutex<Sender<SocketAddr>>>>) {
-        let connected = self.connected.clone();
-        let s = self.s.clone();
+    fn start_sender(&self , s : &Arc<UdpSocket> , mut receiver : Receiver<(Vec<u8> , SocketAddr , bool , u8)>){
+        let connected = self.close_notifier.clone();
+        let s = s.clone();
+        tokio::spawn(async move {
+            loop{
+                tokio::select! {
+                    a = receiver.recv() => {
+                        match a {
+                            Some(p) => { 
+                                match RaknetSocket::sendto(&s, &p.0, &p.1, p.2, p.3).await{
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        raknet_log_debug!("sendto error : {}" , e);
+                                        break;
+                                    },
+                                }
+                            },
+                            None => {
+                                raknet_log_debug!("sender worker's receiver channel closed");
+                                break;
+                            },
+                        };
+                    },
+                    _ = connected.acquire() => {
+                        raknet_log_debug!("sender close notified");
+                        break;
+                    }
+                }
+            }
+
+            raknet_log_debug!("sender worker closed");
+        });
+    }
+
+    fn start_tick(&self , s : &Arc<UdpSocket>, collecter : Option<Arc<Mutex<Sender<SocketAddr>>>>) {
+        let connected = self.close_notifier.clone();
+        let s = s.clone();
         let peer_addr = self.peer_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
@@ -493,14 +532,14 @@ impl RaknetSocket {
                     };
 
                     let buf = write_packet_nack(&nack).await.unwrap();
-                    RaknetSocket::sendto(&s , &buf, &peer_addr , &enable_loss , &loss_rate).await.unwrap();
+                    RaknetSocket::sendto(&s , &buf, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                 }
                 
                 //flush sendq
                 let mut sendq = sendq.lock().await;
                 for f in sendq.flush(cur_timestamp_millis(), &peer_addr){
                     let data = f.serialize().await.unwrap();
-                    RaknetSocket::sendto(&s , &data, &peer_addr , &enable_loss  , &loss_rate).await.unwrap();
+                    RaknetSocket::sendto(&s , &data, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                 }
 
                 //monitor log
@@ -521,11 +560,11 @@ impl RaknetSocket {
                 // if exceed 60s not received any packet will close connection.
                 if cur_timestamp_millis() - last_heartbeat_time.load(Ordering::Relaxed) > RECEIVE_TIMEOUT{
                     raknet_log_debug!("recv timeout");
-                    connected.store(false, Ordering::Relaxed);
+                    connected.close();
                     break;
                 }
 
-                if !connected.load(Ordering::Relaxed){
+                if connected.is_closed(){
                     break;
                 }
                 
@@ -557,9 +596,9 @@ impl RaknetSocket {
     /// ```
     pub async fn close(&mut self) -> Result<()>{
 
-        if self.connected.load(Ordering::Relaxed){
+        if !self.close_notifier.is_closed(){
             self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
-            self.connected.store(false, Ordering::Relaxed);
+            self.close_notifier.close();
         }
         Ok(())
     }
@@ -643,16 +682,18 @@ impl RaknetSocket {
             return Err(RaknetError::PacketHeaderError);
         }
 
-        if !self.connected.load(Ordering::Relaxed){
+        if self.close_notifier.is_closed(){
             return Err(RaknetError::ConnectionClosed);
         }
 
         //flush sendq
         let mut sendq = self.sendq.lock().await;
         sendq.insert(r , buf)?;
+        let sender = self.sender.clone();
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().await.unwrap();
-            RaknetSocket::sendto(&self.s , &data, &self.peer_addr , &self.enable_loss , &self.loss_rate).await.unwrap();
+            sender.send((data, self.peer_addr.clone() , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed))).await.unwrap();
+            //RaknetSocket::sendto(&s , &data, &self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed)).await.unwrap();
         }
         Ok(())
     }
@@ -669,14 +710,14 @@ impl RaknetSocket {
     /// ```
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
 
-        if !self.connected.load(Ordering::Relaxed){
+        if self.close_notifier.is_closed(){
             return Err(RaknetError::ConnectionClosed);
         }
 
         match self.user_data_receiver.recv().await{
             Some(p) => Ok(p),
             None => {
-                if !self.connected.load(Ordering::Relaxed){
+                if self.close_notifier.is_closed(){
                     return Err(RaknetError::ConnectionClosed);
                 }
                 Err(RaknetError::SocketError)
