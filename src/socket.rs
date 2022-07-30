@@ -648,11 +648,8 @@ impl RaknetSocket {
                 Err(_) => return Err(RaknetError::SocketError),
             };
     
-            match read_packet_pong(&buf).await{
-                Ok(p) => {
+            if let Ok(p) = read_packet_pong(&buf).await{
                     return Ok((p.time - packet.time , p.motd))
-                },
-                Err(_) => {},
             };
 
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -674,7 +671,7 @@ impl RaknetSocket {
     /// ```
     pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
 
-        if buf.len() < 1 {
+        if buf.is_empty() {
             return Err(RaknetError::PacketHeaderError);
         }
 
@@ -692,7 +689,7 @@ impl RaknetSocket {
         let sender = self.sender.clone();
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().await.unwrap();
-            sender.send((data, self.peer_addr.clone() , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed))).await.unwrap();
+            sender.send((data, self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed))).await.unwrap();
             //RaknetSocket::sendto(&s , &data, &self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed)).await.unwrap();
         }
         Ok(())

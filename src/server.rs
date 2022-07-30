@@ -440,15 +440,15 @@ impl RaknetListener {
             tokio::select!{
                 a = self.connection_receiver.recv() => {
                     match a {
-                        Some(p) => return Ok(p),
+                        Some(p) => Ok(p),
                         None => {
-                            return Err(RaknetError::NotListen);
+                            Err(RaknetError::NotListen)
                         },
-                    };
+                    }
                 }, 
                 _ = self.close_notifier.acquire() => {
                     raknet_log_debug!("accept close notified");
-                    return Err(RaknetError::NotListen);
+                    Err(RaknetError::NotListen)
                 }
             }
         }
