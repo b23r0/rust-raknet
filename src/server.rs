@@ -143,10 +143,8 @@ impl RaknetListener {
             let mut sessions = sessions.lock().await;
 
             for i in sessions.iter(){
-                match i.1.1.send(vec![PacketID::Disconnect.to_u8()]).await{
-                    Ok(_) => {},
-                    Err(_) => {},
-                };
+                if let Ok(_) = i.1.1.send(vec![PacketID::Disconnect.to_u8()]).await{
+                }
 
                 match socket.send_to(&[PacketID::Disconnect.to_u8()], i.0).await{
                     Ok(_) => {},
