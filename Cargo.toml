@@ -16,4 +16,3 @@ keywords = ["raknet", "networking" , "game"]
 bytes = "1.1.0"
 rand = {version = "0.8.5", features = ["std"]}
 tokio = {version = "1.17.0", features = ["full"]}
-futures = "0.3"

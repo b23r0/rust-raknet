@@ -23,7 +23,8 @@ pub struct RaknetListener {
     connection_sender : Sender<RaknetSocket>,
     sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>,
     close_notifier : Arc<tokio::sync::Semaphore>,
-    all_session_closed_notifier : Arc<Notify>
+    all_session_closed_notifier : Arc<Notify>,
+    drop_notifier : Arc<Notify>
 }
 
 impl RaknetListener {
@@ -47,7 +48,7 @@ impl RaknetListener {
 
         let (connection_sender ,connection_receiver) = channel::<RaknetSocket>(10);
 
-        Ok(Self {
+        let ret = Self {
             motd : String::new(),
             socket : Some(Arc::new(s)),
             guid : rand::random(),
@@ -56,8 +57,12 @@ impl RaknetListener {
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
             close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
-            all_session_closed_notifier: Arc::new(Notify::new())
-        })
+            all_session_closed_notifier: Arc::new(Notify::new()),
+            drop_notifier : Arc::new(Notify::new())
+        };
+
+        ret.drop_watcher().await;
+        Ok(ret)
     }
     
     /// Creates a new RaknetListener from a UdpSocket.
@@ -80,7 +85,7 @@ impl RaknetListener {
 
         let (connection_sender ,connection_receiver) = channel::<RaknetSocket>(10);
         
-        Ok(Self {
+        let ret = Self {
             motd : String::new(),
             socket : Some(Arc::new(s)),
             guid : rand::random(),
@@ -89,8 +94,12 @@ impl RaknetListener {
             connection_sender,
             sessions : Arc::new(Mutex::new(HashMap::new())),
             close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
-            all_session_closed_notifier : Arc::new(Notify::new())
-        })
+            all_session_closed_notifier : Arc::new(Notify::new()),
+            drop_notifier : Arc::new(Notify::new())
+        };
+
+        ret.drop_watcher().await;
+        Ok(ret)
     }
 
     async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>> ,mut collect_receiver : Receiver<SocketAddr>) {
@@ -391,7 +400,7 @@ impl RaknetListener {
 
                         let (sender , receiver) = channel::<Vec<u8>>(10);
 
-                        let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu , collect_sender.clone());
+                        let s = RaknetSocket::from(&addr, &socket, receiver , req.mtu , collect_sender.clone()).await;
 
                         raknet_log_debug!("accept connection : {}", addr);
                         sessions.insert(addr, (cur_timestamp_millis() ,sender));
@@ -525,5 +534,35 @@ impl RaknetListener {
     pub fn set_full_motd(&mut self, motd : String ) -> Result<()>{
         self.motd = motd;
         Ok(())
+    }
+
+    async fn drop_watcher(&self){
+        
+        let close_notifier = self.close_notifier.clone();
+        let drop_notifier = self.drop_notifier.clone();
+        tokio::spawn(async move {
+            raknet_log_debug!("listener drop watcher start");
+            drop_notifier.notify_one();
+
+            drop_notifier.notified().await;
+
+            if close_notifier.is_closed(){
+                raknet_log_debug!("close notifier closed");
+                return;
+            }
+
+            close_notifier.close();
+
+            raknet_log_debug!("listener drop watcher closed");
+        });
+
+        self.drop_notifier.notified().await;
+
+    }
+}
+
+impl Drop for RaknetListener{
+    fn drop(&mut self) {
+        self.drop_notifier.notify_one();
     }
 }

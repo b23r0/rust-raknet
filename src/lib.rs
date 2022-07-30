@@ -112,7 +112,7 @@ async fn test_ping_pong(){
     let addr = format!("127.0.0.1:{}", port);
     let (latency , motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap()).await.unwrap();
     assert!(motd_str == motd);
-    assert!((0..100).contains(&latency));
+    assert!((0..200).contains(&latency));
 }
 
 #[tokio::test]

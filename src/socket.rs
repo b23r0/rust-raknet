@@ -20,14 +20,15 @@ pub struct RaknetSocket{
     enable_loss : Arc<AtomicBool>,
     loss_rate : Arc<AtomicU8>,
     incomming_notifier : Arc<Notify>,
-    sender : Sender<(Vec<u8> , SocketAddr , bool , u8)>
+    sender : Sender<(Vec<u8> , SocketAddr , bool , u8)>,
+    drop_notifier : Arc<Notify>
 }
 
 impl RaknetSocket {
     /// Create a Raknet Socket from a UDP socket with an established Raknet connection
     /// 
     /// This method is used for RaknetListener, users of the library should not care about it.
-    pub fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
+    pub async fn from(addr : &SocketAddr , s : &Arc<UdpSocket> ,receiver : Receiver<Vec<u8>> , mtu : u16 , collecter : Arc<Mutex<Sender<SocketAddr>>>) -> Self {
 
         let (user_data_sender , user_data_receiver) =  channel::<Vec<u8>>(100);
         let (sender_sender , sender_receiver) = channel::<(Vec<u8> , SocketAddr , bool , u8)>(10);
@@ -43,11 +44,13 @@ impl RaknetSocket {
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
             incomming_notifier : Arc::new(Notify::new()),
-            sender : sender_sender
+            sender : sender_sender,
+            drop_notifier : Arc::new(Notify::new())
         };
         ret.start_receiver(s , receiver , user_data_sender);
         ret.start_tick(s, Some(collecter));
         ret.start_sender(s, sender_receiver);
+        ret.drop_watcher().await;
         ret
     }
 
@@ -346,12 +349,14 @@ impl RaknetSocket {
             enable_loss : Arc::new(AtomicBool::new(false)),
             loss_rate : Arc::new(AtomicU8::new(0)),
             incomming_notifier : Arc::new(Notify::new()),
-            sender : sender_sender
+            sender : sender_sender,
+            drop_notifier : Arc::new(Notify::new())
         };
 
         ret.start_receiver( &s, receiver , user_data_sender);
         ret.start_tick(&s ,None);
         ret.start_sender(&s, sender_receiver);
+        ret.drop_watcher().await;
 
         raknet_log_debug!("wait incomming notify");
         ret.incomming_notifier.notified().await;
@@ -759,10 +764,34 @@ impl RaknetSocket {
         self.loss_rate.store(stage, Ordering::Relaxed);
 
     }
+
+    async fn drop_watcher(&self){
+        
+        let close_notifier = self.close_notifier.clone();
+        let drop_notifier = self.drop_notifier.clone();
+        tokio::spawn(async move {
+            raknet_log_debug!("socket drop watcher start");
+            drop_notifier.notify_one();
+
+            drop_notifier.notified().await;
+
+            if close_notifier.is_closed(){
+                raknet_log_debug!("socket close notifier closed");
+                return;
+            }
+
+            close_notifier.close();
+
+            raknet_log_debug!("socket drop watcher closed");
+        });
+
+        self.drop_notifier.notified().await;
+
+    }
 }
 
 impl Drop for RaknetSocket{
     fn drop(&mut self) {
-        futures::executor::block_on(self.close()).unwrap();
+        self.drop_notifier.notify_one();
     }
 }
