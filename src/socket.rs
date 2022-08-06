@@ -397,7 +397,7 @@ impl RaknetSocket {
                     break;
                 }
 
-                if buf[0] == PacketID::ACK.to_u8(){
+                if buf[0] == PacketID::Ack.to_u8(){
                     //handle ack
                     let mut sendq = sendq.lock().await;
                     let ack = read_packet_ack(&buf).await.unwrap();
@@ -414,7 +414,7 @@ impl RaknetSocket {
                     continue;
                 }
 
-                if buf[0] == PacketID::NACK.to_u8(){
+                if buf[0] == PacketID::Nack.to_u8(){
                     //handle nack
                     let nack  = read_packet_nack(&buf).await.unwrap();
 

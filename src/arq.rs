@@ -192,31 +192,25 @@ impl FrameSetPacket {
 
     pub fn is_reliable(&self) -> Result<bool> {
         let r = Reliability::from((self.flags & 224) >> 5)?;
-        Ok(match r{
-            Reliability::Reliable => true,
-            Reliability::ReliableOrdered => true, 
-            Reliability::ReliableSequenced => true,
-            _ => false
-        })
+        Ok(matches!(r, 
+            Reliability::Reliable | 
+            Reliability::ReliableOrdered | 
+            Reliability::ReliableSequenced)
+        )
     }
 
     pub fn is_ordered(&self) -> Result<bool> {
         let r = Reliability::from((self.flags & 224) >> 5)?;
-        Ok(match r{
-            Reliability::UnreliableSequenced => true,
-            Reliability::ReliableOrdered => true, 
-            Reliability::ReliableSequenced => true,
-            _ => false
-        })
+        Ok(matches!(r, 
+            Reliability::UnreliableSequenced | 
+            Reliability::ReliableOrdered | 
+            Reliability::ReliableSequenced)
+        )
     }
     
     pub fn is_sequenced(&self) -> Result<bool> {
         let r = Reliability::from((self.flags & 224) >> 5)?;
-        Ok(match r{
-            Reliability::UnreliableSequenced => true,
-            Reliability::ReliableSequenced => true, 
-            _ => false
-        })
+        Ok(matches!(r, Reliability::UnreliableSequenced | Reliability::ReliableSequenced))
     }
     pub fn reliability(&self) -> Result<Reliability>{
         Reliability::from((self.flags & 224) >> 5)

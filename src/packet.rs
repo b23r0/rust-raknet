@@ -24,13 +24,13 @@ pub enum PacketID {
     IncompatibleProtocolVersion = 0x19,
     FrameSetPacketBegin = 0x80,
     FrameSetPacketEnd = 0x8d,
-    NACK = 0xa0,
-    ACK = 0xc0,
+    Nack = 0xa0,
+    Ack = 0xc0,
     Game = 0xfe,
 }
 
 impl PacketID{
-    pub fn to_u8(&self) -> u8{
+    pub fn to_u8(self) -> u8{
         match self{
             PacketID::ConnectedPing => 0x00,
             PacketID::UnconnectedPing1 => 0x01,
@@ -49,8 +49,8 @@ impl PacketID{
             PacketID::IncompatibleProtocolVersion => 0x19,
             PacketID::FrameSetPacketBegin => 0x80,
             PacketID::FrameSetPacketEnd => 0x8d,
-            PacketID::NACK => 0xa0,
-            PacketID::ACK => 0xc0,
+            PacketID::Nack => 0xa0,
+            PacketID::Ack => 0xc0,
             PacketID::Game => 0xfe,
         }
     }
@@ -79,8 +79,8 @@ impl PacketID{
             0x19 => Ok(PacketID::IncompatibleProtocolVersion),
             0x80 => Ok(PacketID::FrameSetPacketBegin),
             0x8d => Ok(PacketID::FrameSetPacketEnd),
-            0xa0 => Ok(PacketID::NACK),
-            0xc0 => Ok(PacketID::ACK),
+            0xa0 => Ok(PacketID::Nack),
+            0xc0 => Ok(PacketID::Ack),
             0xfe => Ok(PacketID::Game),
             _ => Err(RaknetError::IncorrectPacketID)
         }
@@ -399,7 +399,7 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
 
 pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(PacketID::NACK.to_u8()));
+    unwrap_or_return!(cursor.write_u8(PacketID::Nack.to_u8()));
     cursor.write_u16(packet.record_count, Endian::Big).await?;
 
     for i in 0..packet.record_count{
@@ -440,7 +440,7 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
 
 pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
-    unwrap_or_return!(cursor.write_u8(PacketID::ACK.to_u8()));
+    unwrap_or_return!(cursor.write_u8(PacketID::Ack.to_u8()));
     unwrap_or_return!(cursor.write_u16(packet.record_count, Endian::Big));
 
     for i in 0..packet.record_count{
