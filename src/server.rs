@@ -13,6 +13,8 @@ use crate::error::{Result, RaknetError};
 const SERVER_NAME : &str = "Rust Raknet Server";
 const MAX_CONNECTION : u32 = 99999;
 
+type SessionSender = (i64 ,Sender<Vec<u8>>);
+
 /// Implementation of Raknet Server.
 pub struct RaknetListener {
     motd : String,
@@ -21,7 +23,7 @@ pub struct RaknetListener {
     listened : bool, 
     connection_receiver : Receiver<RaknetSocket>,
     connection_sender : Sender<RaknetSocket>,
-    sessions : Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>>,
+    sessions : Arc<Mutex<HashMap<SocketAddr , SessionSender>>>,
     close_notifier : Arc<tokio::sync::Semaphore>,
     all_session_closed_notifier : Arc<Notify>,
     drop_notifier : Arc<Notify>
@@ -102,7 +104,7 @@ impl RaknetListener {
         Ok(ret)
     }
 
-    async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , (i64 ,Sender<Vec<u8>>)>>> ,mut collect_receiver : Receiver<SocketAddr>) {
+    async fn start_session_collect(&self ,socket : &Arc<UdpSocket> , sessions : &Arc<Mutex<HashMap<SocketAddr , SessionSender>>> ,mut collect_receiver : Receiver<SocketAddr>) {
         let sessions = sessions.clone();
         let socket = socket.clone();
         let close_notifier = self.close_notifier.clone();
