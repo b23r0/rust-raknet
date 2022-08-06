@@ -462,7 +462,7 @@ impl RaknetSocket {
 
                     if !acks.is_empty() {
     
-                        let packet = ACK{
+                        let packet = Ack{
                             record_count: acks.len() as u16,
                             sequences: acks,
                         };
@@ -531,7 +531,7 @@ impl RaknetSocket {
                 let mut recvq = recvq.lock().await;
                 let nacks = recvq.get_nack();
                 if !nacks.is_empty(){
-                    let nack = NACK{
+                    let nack = Nack{
                         record_count: nacks.len() as u16,
                         sequences: nacks,
                     };

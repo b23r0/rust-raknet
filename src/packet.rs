@@ -192,13 +192,13 @@ pub struct AlreadyConnected {
 }
 
 #[derive(Clone)]
-pub struct NACK {
+pub struct Nack {
     pub record_count: u16,
     pub sequences: Vec<(u32, u32)>,
 }
 
 #[derive(Clone)]
-pub struct ACK {
+pub struct Ack {
     pub record_count: u16,
     pub sequences: Vec<(u32, u32)>,
 }
@@ -372,7 +372,7 @@ pub async fn write_packet_incompatible_protocol_version(packet : &IncompatiblePr
     Ok(cursor.get_raw_payload())
 }
 
-pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
+pub async fn read_packet_nack(buf : &[u8]) -> Result<Nack>{
     let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
@@ -391,13 +391,13 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<NACK>{
         s
     };
 
-    Ok(NACK {
+    Ok(Nack {
         record_count,
         sequences,
     })
 }
 
-pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
+pub async fn write_packet_nack(packet : &Nack) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::Nack.to_u8()));
     cursor.write_u16(packet.record_count, Endian::Big).await?;
@@ -414,7 +414,7 @@ pub async fn write_packet_nack(packet : &NACK) -> Result<Vec<u8>>{
     Ok(cursor.get_raw_payload())
 }
 
-pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
+pub async fn read_packet_ack(buf : &[u8]) -> Result<Ack>{
     let mut cursor = RaknetReader::new(buf.to_vec());
     unwrap_or_return!(cursor.read_u8());
     let record_count = unwrap_or_return!(cursor.read_u16(Endian::Big));
@@ -432,13 +432,13 @@ pub async fn read_packet_ack(buf : &[u8]) -> Result<ACK>{
         }
         s
     };
-    Ok(ACK {
+    Ok(Ack {
         record_count,
         sequences,
     })
 }
 
-pub async fn write_packet_ack(packet : &ACK) -> Result<Vec<u8>>{
+pub async fn write_packet_ack(packet : &Ack) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::Ack.to_u8()));
     unwrap_or_return!(cursor.write_u16(packet.record_count, Endian::Big));
