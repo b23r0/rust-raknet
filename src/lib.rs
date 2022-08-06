@@ -36,38 +36,6 @@
 //! - [x] reliable ordered
 //! - [x] reliable sequenced
 
-//! # Example
-
-//! ```ignore
-//! //server
-//! 
-//! async fn serve(){
-//!     let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-//!     listener.listen().await;
-//!     loop{
-//!         let mut socket = listener.accept().await.unwrap();
-//!         let buf = socket.recv().await.unwrap();
-//!         if buf[0] == 0xfe{
-//!             //do something
-//!         }
-//!     }
-//! }
-//! 
-//! ```
-//! 
-//! ```ignore
-//! //client
-//! 
-//! async fn connect(){
-//!     let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-//!     socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
-//!     let buf = socket.recv().await.unwrap();
-//!     if buf[0] == 0xfe{
-//!         //do something
-//!     }
-//! }
-//! ```
-
 mod socket;
 mod packet;
 mod utils;

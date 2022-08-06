@@ -54,6 +54,7 @@ async fn serve(){
             //do something
         }
     }
+	listener.close().await.unwrap();
 }
 
 ```
@@ -62,12 +63,13 @@ async fn serve(){
 //client
 
 async fn connect(){
-    let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     let buf = socket.recv().await.unwrap();
     if buf[0] == 0xfe{
         //do something
     }
+    socket.close().await.unwrap();
 }
 ```
 
