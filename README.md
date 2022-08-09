@@ -5,6 +5,8 @@ Raknet is a reliable udp transport protocol that is generally used for communica
 
 Raknet protocol supports various reliability options, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol by reverse engineering.
 
+Requires >= *Tokio 1.x* asynchronous runtime support.
+
 Reference : http://www.jenkinssoftware.com/raknet/manual/index.html
 
 _This project is not affiliated with Jenkins Software LLC nor RakNet._
