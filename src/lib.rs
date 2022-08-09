@@ -383,6 +383,14 @@ async fn test_raknet_server_close(){
         b.append(&mut a);
         c.append(&mut b);
         client.send(&c, Reliability::ReliableOrdered).await.unwrap();
+
+        let mut client2 = server.accept().await.unwrap();
+        let buf = client2.recv().await.unwrap();
+        assert!(buf.len() == 3000);
+        assert!(buf[0..1000] == vec![0xfe;1000]);
+        assert!(buf[1000..2000] == vec![2u8;1000]);
+        assert!(buf[2000..3000] == vec![3u8;1000]);
+
         server.close().await.unwrap();
         client.close().await.unwrap();
     }
