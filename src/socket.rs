@@ -570,6 +570,7 @@ impl RaknetSocket {
                 }
 
                 if connected.is_closed(){
+                    RaknetSocket::sendto(&s , &[PacketID::Disconnect.to_u8()], &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                     break;
                 }
                 

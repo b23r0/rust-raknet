@@ -196,7 +196,7 @@ impl RaknetListener {
     /// ```
     pub async fn listen(&mut self) {
 
-        if self.close_notifier.is_closed(){
+        if self.close_notifier.is_closed() || self.listened{
             return;
         }
 
