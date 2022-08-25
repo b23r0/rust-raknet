@@ -108,37 +108,37 @@ impl FrameSetPacket {
             data: vec![]
         };
 
-        ret.id = reader.read_u8().await.unwrap();
-        ret.sequence_number = reader.read_u24(Endian::Little).await.unwrap();
+        ret.id = reader.read_u8().unwrap();
+        ret.sequence_number = reader.read_u24(Endian::Little).unwrap();
 
         //Top 3 bits are reliability type
         //224 = 1110 0000(b)
-        ret.flags = reader.read_u8().await.unwrap();
+        ret.flags = reader.read_u8().unwrap();
 
-        ret.length_in_bytes = reader.read_u16(Endian::Big).await.unwrap()/8;
+        ret.length_in_bytes = reader.read_u16(Endian::Big).unwrap()/8;
     
         if ret.is_reliable()?{
-            ret.reliable_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+            ret.reliable_frame_index = reader.read_u24(Endian::Little).unwrap();
         }
         
         if ret.is_sequenced()? {
-            ret.sequenced_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+            ret.sequenced_frame_index = reader.read_u24(Endian::Little).unwrap();
         }
         if ret.is_ordered()?{
-            ret.ordered_frame_index = reader.read_u24(Endian::Little).await.unwrap();
-            ret.order_channel = reader.read_u8().await.unwrap();
+            ret.ordered_frame_index = reader.read_u24(Endian::Little).unwrap();
+            ret.order_channel = reader.read_u8().unwrap();
         }
     
         //fourth bit is 1 when the frame is fragmented and part of a compound.
         //flags and 16 [0001 0000(b)] == if fragmented
         if (ret.flags & 16) != 0 {
-            ret.compound_size = reader.read_u32(Endian::Big).await.unwrap();
-            ret.compound_id = reader.read_u16(Endian::Big).await.unwrap();
-            ret.fragment_index = reader.read_u32(Endian::Big).await.unwrap();
+            ret.compound_size = reader.read_u32(Endian::Big).unwrap();
+            ret.compound_id = reader.read_u16(Endian::Big).unwrap();
+            ret.fragment_index = reader.read_u32(Endian::Big).unwrap();
         }
     
         let mut buf = vec![0u8 ; ret.length_in_bytes as usize].into_boxed_slice();
-        reader.read(&mut buf).await.unwrap();
+        reader.read(&mut buf).unwrap();
         ret.data.append(&mut buf.to_vec());
 
         Ok((ret , reader.pos() == buf.len() as u64))
@@ -154,34 +154,34 @@ impl FrameSetPacket {
             id |= CONTINUOUS_SEND_FLAG;
         }
 
-        writer.write_u8(id).await.unwrap();
-        writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
+        writer.write_u8(id).unwrap();
+        writer.write_u24(self.sequence_number , Endian::Little).unwrap();
         
         //Top 3 bits are reliability type
         //224 = 1110 0000(b)
-        writer.write_u8(self.flags).await.unwrap();
-        writer.write_u16(self.length_in_bytes*8 ,Endian::Big).await.unwrap();
+        writer.write_u8(self.flags).unwrap();
+        writer.write_u16(self.length_in_bytes*8 ,Endian::Big).unwrap();
     
         if self.is_reliable()?{
-            writer.write_u24(self.reliable_frame_index, Endian::Little).await.unwrap();
+            writer.write_u24(self.reliable_frame_index, Endian::Little).unwrap();
         }
         
         if self.is_sequenced()? {
-            writer.write_u24(self.sequenced_frame_index ,Endian::Little).await.unwrap();
+            writer.write_u24(self.sequenced_frame_index ,Endian::Little).unwrap();
         }
         if self.is_ordered()?{
-            writer.write_u24(self.ordered_frame_index , Endian::Little).await.unwrap();
-            writer.write_u8(self.order_channel).await.unwrap();
+            writer.write_u24(self.ordered_frame_index , Endian::Little).unwrap();
+            writer.write_u8(self.order_channel).unwrap();
         }
     
         //fourth bit is 1 when the frame is fragmented and part of a compound.
         //flags and 16 [0001 0000(b)] == if fragmented
         if (self.flags & 16) != 0 {
-            writer.write_u32(self.compound_size , Endian::Big).await.unwrap();
-            writer.write_u16(self.compound_id , Endian::Big).await.unwrap();
-            writer.write_u32(self.fragment_index , Endian::Big).await.unwrap();
+            writer.write_u32(self.compound_size , Endian::Big).unwrap();
+            writer.write_u16(self.compound_id , Endian::Big).unwrap();
+            writer.write_u32(self.fragment_index , Endian::Big).unwrap();
         }
-        writer.write(self.data.as_slice()).await.unwrap();
+        writer.write(self.data.as_slice()).unwrap();
 
         Ok(writer.get_raw_payload())
     }
@@ -268,8 +268,8 @@ impl FrameVec {
 
         let mut reader = RaknetReader::new(buf);
 
-        ret.id = reader.read_u8().await.unwrap();
-        ret.sequence_number = reader.read_u24(Endian::Little).await.unwrap();
+        ret.id = reader.read_u8().unwrap();
+        ret.sequence_number = reader.read_u24(Endian::Little).unwrap();
 
         while reader.pos() < size.try_into().unwrap(){
             let mut frame = FrameSetPacket{
@@ -289,32 +289,32 @@ impl FrameVec {
     
             //Top 3 bits are reliability type
             //224 = 1110 0000(b)
-            frame.flags = reader.read_u8().await.unwrap();
+            frame.flags = reader.read_u8().unwrap();
 
-            frame.length_in_bytes = reader.read_u16(Endian::Big).await.unwrap()/8;
+            frame.length_in_bytes = reader.read_u16(Endian::Big).unwrap()/8;
         
             if frame.is_reliable()?{
-                frame.reliable_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+                frame.reliable_frame_index = reader.read_u24(Endian::Little).unwrap();
             }
             
             if frame.is_sequenced()? {
-                frame.sequenced_frame_index = reader.read_u24(Endian::Little).await.unwrap();
+                frame.sequenced_frame_index = reader.read_u24(Endian::Little).unwrap();
             }
             if frame.is_ordered()?{
-                frame.ordered_frame_index = reader.read_u24(Endian::Little).await.unwrap();
-                frame.order_channel = reader.read_u8().await.unwrap();
+                frame.ordered_frame_index = reader.read_u24(Endian::Little).unwrap();
+                frame.order_channel = reader.read_u8().unwrap();
             }
         
             //fourth bit is 1 when the frame is fragmented and part of a compound.
             //flags and 16 [0001 0000(b)] == if fragmented
             if (frame.flags & 16) != 0 {
-                frame.compound_size = reader.read_u32(Endian::Big).await.unwrap();
-                frame.compound_id = reader.read_u16(Endian::Big).await.unwrap();
-                frame.fragment_index = reader.read_u32(Endian::Big).await.unwrap();
+                frame.compound_size = reader.read_u32(Endian::Big).unwrap();
+                frame.compound_id = reader.read_u16(Endian::Big).unwrap();
+                frame.fragment_index = reader.read_u32(Endian::Big).unwrap();
             }
         
             let mut buf = vec![0u8 ; frame.length_in_bytes as usize].into_boxed_slice();
-            reader.read(&mut buf).await.unwrap();
+            reader.read(&mut buf).unwrap();
             frame.data.append(&mut buf.to_vec());
             ret.frames.push(frame);
         }
@@ -327,36 +327,36 @@ impl FrameVec {
 
         let id = 0x80 | 4 | 8;
 
-        writer.write_u8(id).await.unwrap();
-        writer.write_u24(self.sequence_number , Endian::Little).await.unwrap();
+        writer.write_u8(id).unwrap();
+        writer.write_u24(self.sequence_number , Endian::Little).unwrap();
         
         for frame in &self.frames{
 
             //Top 3 bits are reliability type
             //224 = 1110 0000(b)
-            writer.write_u8(frame.flags).await.unwrap();
-            writer.write_u16(frame.length_in_bytes*8 ,Endian::Big).await.unwrap();
+            writer.write_u8(frame.flags).unwrap();
+            writer.write_u16(frame.length_in_bytes*8 ,Endian::Big).unwrap();
         
             if frame.is_reliable()?{
-                writer.write_u24(frame.reliable_frame_index, Endian::Little).await.unwrap();
+                writer.write_u24(frame.reliable_frame_index, Endian::Little).unwrap();
             }
             
             if frame.is_sequenced()? {
-                writer.write_u24(frame.sequenced_frame_index ,Endian::Little).await.unwrap();
+                writer.write_u24(frame.sequenced_frame_index ,Endian::Little).unwrap();
             }
             if frame.is_ordered()?{
-                writer.write_u24(frame.ordered_frame_index , Endian::Little).await.unwrap();
-                writer.write_u8(frame.order_channel).await.unwrap();
+                writer.write_u24(frame.ordered_frame_index , Endian::Little).unwrap();
+                writer.write_u8(frame.order_channel).unwrap();
             }
         
             //fourth bit is 1 when the frame is fragmented and part of a compound.
             //flags and 8 [0000 1000(b)] == if fragmented
             if (frame.flags & 0x08) != 0 {
-                writer.write_u32(frame.compound_size , Endian::Big).await.unwrap();
-                writer.write_u16(frame.compound_id , Endian::Big).await.unwrap();
-                writer.write_u32(frame.fragment_index , Endian::Big).await.unwrap();
+                writer.write_u32(frame.compound_size , Endian::Big).unwrap();
+                writer.write_u16(frame.compound_id , Endian::Big).unwrap();
+                writer.write_u32(frame.fragment_index , Endian::Big).unwrap();
             }
-            writer.write(frame.data.as_slice()).await.unwrap();
+            writer.write(frame.data.as_slice()).unwrap();
         }
 
 

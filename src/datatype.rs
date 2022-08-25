@@ -20,17 +20,17 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write(&mut self, v: &[u8]) -> Result<()> {
+    pub fn write(&mut self, v: &[u8]) -> Result<()> {
         self.buf.put_slice(v);
         Ok(())
     }
 
-    pub async fn write_u8(&mut self, v: u8) -> Result<()> {
+    pub fn write_u8(&mut self, v: u8) -> Result<()> {
         self.buf.put_u8(v);
         Ok(())
     }
 
-    pub async fn write_i16(&mut self, v: i16, n: Endian) -> Result<()> {
+    pub fn write_i16(&mut self, v: i16, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_i16(v);
@@ -43,7 +43,7 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_u16(&mut self, v: u16, n: Endian) -> Result<()> {
+    pub fn write_u16(&mut self, v: u16, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_u16(v);
@@ -56,7 +56,7 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_u24(&mut self, v: u32, n: Endian) -> Result<()> {
+    pub fn write_u24(&mut self, v: u32, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 let a = v.to_be_bytes();
@@ -74,7 +74,7 @@ impl RaknetWriter {
         Ok(())
     }
 
-    pub async fn write_u32(&mut self, v: u32, n: Endian) -> Result<()> {
+    pub fn write_u32(&mut self, v: u32, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_u32(v);
@@ -87,7 +87,7 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_i32(&mut self, v: i32, n: Endian) -> Result<()> {
+    pub fn write_i32(&mut self, v: i32, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_i32(v);
@@ -100,7 +100,7 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_i64(&mut self, v: i64, n: Endian) -> Result<()> {
+    pub fn write_i64(&mut self, v: i64, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_i64(v);
@@ -113,7 +113,7 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_magic(&mut self) -> Result<usize> {
+    pub fn write_magic(&mut self) -> Result<usize> {
         let magic: [u8;16] = [
             0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34,
             0x56, 0x78,
@@ -122,7 +122,7 @@ impl RaknetWriter {
         Ok(magic.len())
     }
 
-    pub async fn write_u64(&mut self, v: u64, n: Endian) -> Result<()> {
+    pub fn write_u64(&mut self, v: u64, n: Endian) -> Result<()> {
         match n {
             Endian::Big => {
                 self.buf.put_u64(v);
@@ -135,37 +135,37 @@ impl RaknetWriter {
         }
     }
 
-    pub async fn write_string(&mut self, body: &str) -> Result<()> {
+    pub fn write_string(&mut self, body: &str) -> Result<()> {
         let raw = body.as_bytes();
         self.buf.put_u16(raw.len() as u16);
         self.buf.put_slice(raw);
         Ok(())
     }
 
-    pub async fn write_address(&mut self, address: SocketAddr) -> Result<()> {
+    pub fn write_address(&mut self, address: SocketAddr) -> Result<()> {
         if address.is_ipv4() {
-            self.write_u8(0x4).await?;
+            self.write_u8(0x4)?;
             let ip_bytes = match address.ip() {
                 IpAddr::V4(ip) => ip.octets().to_vec(),
                 _ => vec![0; 4],
             };
 
-            self.write_u8(0xff - ip_bytes[0]).await?;
-            self.write_u8(0xff - ip_bytes[1]).await?;
-            self.write_u8(0xff - ip_bytes[2]).await?;
-            self.write_u8(0xff - ip_bytes[3]).await?;
-            self.write_u16(address.port() , Endian::Big).await?;
+            self.write_u8(0xff - ip_bytes[0])?;
+            self.write_u8(0xff - ip_bytes[1])?;
+            self.write_u8(0xff - ip_bytes[2])?;
+            self.write_u8(0xff - ip_bytes[3])?;
+            self.write_u16(address.port() , Endian::Big)?;
             Ok(())
         } else {
-            self.write_i16(23 , Endian::Little).await?;
-            self.write_u16(address.port() , Endian::Big).await?;
-            self.write_i32(0, Endian::Big).await?;
+            self.write_i16(23 , Endian::Little)?;
+            self.write_u16(address.port() , Endian::Big)?;
+            self.write_i32(0, Endian::Big)?;
             let ip_bytes = match address.ip() {
                 IpAddr::V6(ip) => ip.octets().to_vec(),
                 _ => vec![0; 16],
             };
-            self.write(&ip_bytes).await?;
-            self.write_i32(0 , Endian::Big).await?;
+            self.write(&ip_bytes)?;
+            self.write_i32(0 , Endian::Big)?;
             Ok(())
         }
     }
@@ -189,17 +189,17 @@ impl RaknetReader {
             buf: Cursor::new(buf)
         }
     }
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
         match self.buf.read_exact(buf){
             Ok(p) => Ok(p),
             Err(_) => Err(RaknetError::ReadPacketBufferError),
         }
     }
-    pub async fn read_u8(&mut self) -> Result<u8> {
+    pub fn read_u8(&mut self) -> Result<u8> {
         Ok(self.buf.get_u8())
     }
 
-    pub async fn read_u16(&mut self, n: Endian) -> Result<u16> {
+    pub fn read_u16(&mut self, n: Endian) -> Result<u16> {
 
         if self.buf.remaining() < 2{
             return Err(RaknetError::ReadPacketBufferError);
@@ -211,7 +211,7 @@ impl RaknetReader {
         }
     }
 
-    pub async fn read_u24(&mut self , n : Endian) -> Result<u32>{
+    pub fn read_u24(&mut self , n : Endian) -> Result<u32>{
 
         if self.buf.remaining() < 3{
             return Err(RaknetError::ReadPacketBufferError);
@@ -238,7 +238,7 @@ impl RaknetReader {
         }
     }
 
-    pub async fn read_u32(&mut self, n: Endian) -> Result<u32> {
+    pub fn read_u32(&mut self, n: Endian) -> Result<u32> {
 
         if self.buf.remaining() < 4{
             return Err(RaknetError::ReadPacketBufferError);
@@ -250,7 +250,7 @@ impl RaknetReader {
         }
     }
 
-    pub async fn read_u64(&mut self, n: Endian) -> Result<u64> {
+    pub fn read_u64(&mut self, n: Endian) -> Result<u64> {
 
         if self.buf.remaining() < 8{
             return Err(RaknetError::ReadPacketBufferError);
@@ -261,7 +261,7 @@ impl RaknetReader {
             Endian::Little => Ok(self.buf.get_u64_le()),
         }
     }
-    pub async fn read_i64(&mut self, n: Endian) -> Result<i64> {
+    pub fn read_i64(&mut self, n: Endian) -> Result<i64> {
 
         if self.buf.remaining() < 8{
             return Err(RaknetError::ReadPacketBufferError);
@@ -273,31 +273,31 @@ impl RaknetReader {
         }
     }
 
-    pub async fn read_string(&mut self) -> Result<String> {
+    pub fn read_string(&mut self) -> Result<String> {
 
         if self.buf.remaining() < 2{
             return Err(RaknetError::ReadPacketBufferError);
         }
 
-        let size = self.read_u16(Endian::Big).await?;
+        let size = self.read_u16(Endian::Big)?;
         let mut buf = vec![0u8 ; size as usize].into_boxed_slice();
 
         if self.buf.remaining() < size as usize{
             return Err(RaknetError::ReadPacketBufferError);
         }
 
-        self.read(&mut buf).await?;
+        self.read(&mut buf)?;
         Ok(String::from_utf8(buf.to_vec()).unwrap())
     }
 
-    pub async fn read_magic(&mut self) -> Result<bool> {
+    pub fn read_magic(&mut self) -> Result<bool> {
 
         if self.buf.remaining() < 16{
             return Err(RaknetError::ReadPacketBufferError);
         }
 
         let mut magic = [0; 16];
-        self.read(&mut magic).await?;
+        self.read(&mut magic)?;
         let offline_magic = [
             0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34,
             0x56, 0x78,
@@ -305,9 +305,9 @@ impl RaknetReader {
         Ok(magic == offline_magic)
     }
     
-    pub async fn read_address(&mut self) -> Result<SocketAddr> {
+    pub fn read_address(&mut self) -> Result<SocketAddr> {
 
-        let ip_ver = self.read_u8().await?;
+        let ip_ver = self.read_u8()?;
 
         if ip_ver == 4 {
 
@@ -316,12 +316,12 @@ impl RaknetReader {
             }
 
             let ip = Ipv4Addr::new(
-                0xff - self.read_u8().await?,
-                0xff - self.read_u8().await?,
-                0xff - self.read_u8().await?,
-                0xff - self.read_u8().await?,
+                0xff - self.read_u8()?,
+                0xff - self.read_u8()?,
+                0xff - self.read_u8()?,
+                0xff - self.read_u8()?,
             );
-            let port = self.read_u16(Endian::Big).await?;
+            let port = self.read_u16(Endian::Big)?;
             Ok(SocketAddr::new(IpAddr::V4(ip), port))
         } else {
 
@@ -330,23 +330,23 @@ impl RaknetReader {
             }
 
             self.next(2);
-            let port = self.read_u16(Endian::Big).await?;
+            let port = self.read_u16(Endian::Big)?;
             self.next(4);
             let mut addr_buf = [0; 16];
-            self.read(&mut addr_buf).await?;
+            self.read(&mut addr_buf)?;
 
             let mut address_cursor = RaknetReader::new(addr_buf.to_vec());
             self.next(4);
             Ok(SocketAddr::new(
                 IpAddr::V6(Ipv6Addr::new(
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
-                    address_cursor.read_u16(Endian::Big).await?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
+                    address_cursor.read_u16(Endian::Big)?,
                 )),
                 port,
             ))
@@ -370,17 +370,17 @@ async fn test_u24_encode_decode(){
     let b = a.to_le_bytes();
     let mut reader = RaknetReader::new(b.to_vec());
 
-    let c = reader.read_u24(Endian::Little).await.unwrap();
+    let c = reader.read_u24(Endian::Little).unwrap();
 
     assert!(a == c);
 
     let mut writer = RaknetWriter::new();
-    writer.write_u24(a, Endian::Little).await.unwrap();
+    writer.write_u24(a, Endian::Little).unwrap();
 
     let buf = writer.get_raw_payload();
     let mut reader = RaknetReader::new(buf);
 
-    let c = reader.read_u24(Endian::Little).await.unwrap();
+    let c = reader.read_u24(Endian::Little).unwrap();
 
     assert!(a == c);
 }

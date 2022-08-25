@@ -89,7 +89,7 @@ impl PacketID{
 
 macro_rules! unwrap_or_return {
     ($res:expr) => {
-        match $res.await {
+        match $res {
             Ok(val) => val,
             Err(e) => {
                 return Err(e);
@@ -400,14 +400,14 @@ pub async fn read_packet_nack(buf : &[u8]) -> Result<Nack>{
 pub async fn write_packet_nack(packet : &Nack) -> Result<Vec<u8>>{
     let mut cursor = RaknetWriter::new();
     unwrap_or_return!(cursor.write_u8(PacketID::Nack.to_u8()));
-    cursor.write_u16(packet.record_count, Endian::Big).await?;
+    cursor.write_u16(packet.record_count, Endian::Big)?;
 
     for i in 0..packet.record_count{
         let single_sequence_number = if packet.sequences[i as usize].0 == packet.sequences[i as usize].1 { 1u8 } else { 0u8 };
-        cursor.write_u8(single_sequence_number).await?;
-        cursor.write_u24(packet.sequences[i as usize].0, Endian::Little).await?;
+        cursor.write_u8(single_sequence_number)?;
+        cursor.write_u24(packet.sequences[i as usize].0, Endian::Little)?;
         if single_sequence_number == 0x00 {
-            cursor.write_u24(packet.sequences[i as usize].1, Endian::Little).await?;
+            cursor.write_u24(packet.sequences[i as usize].1, Endian::Little)?;
         }
     }
 
