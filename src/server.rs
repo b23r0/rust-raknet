@@ -257,7 +257,7 @@ impl RaknetListener {
                 
                 match cur_status{
                     PacketID::UnconnectedPing1 => {
-                        let _ping = match read_packet_ping(&buf[..size]).await{
+                        let _ping = match read_packet_ping(&buf[..size]){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -269,7 +269,7 @@ impl RaknetListener {
                             motd 
                         };
                         
-                        let pong = match write_packet_pong(&packet).await{
+                        let pong = match write_packet_pong(&packet){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -283,7 +283,7 @@ impl RaknetListener {
                         continue;
                     },
                     PacketID::UnconnectedPing2 => {
-                        match read_packet_ping(&buf[..size]).await{
+                        match read_packet_ping(&buf[..size]){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -295,7 +295,7 @@ impl RaknetListener {
                             motd
                         };
                         
-                        let pong = match write_packet_pong(&packet).await{
+                        let pong = match write_packet_pong(&packet){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -309,7 +309,7 @@ impl RaknetListener {
                         continue;
                     },
                     PacketID::OpenConnectionRequest1 => {
-                        let req = match read_packet_connection_open_request_1(&buf[..size]).await{
+                        let req = match read_packet_connection_open_request_1(&buf[..size]){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -320,7 +320,7 @@ impl RaknetListener {
                                 magic: true,
                                 server_guid: guid,
                             };
-                            let buf = write_packet_incompatible_protocol_version(&packet).await.unwrap();
+                            let buf = write_packet_incompatible_protocol_version(&packet).unwrap();
 
                             match socket.send_to(&buf, addr).await{
                                 Ok(_) => {},
@@ -340,7 +340,7 @@ impl RaknetListener {
                             mtu_size: RAKNET_CLIENT_MTU, 
                         };
                         
-                        let reply = match write_packet_connection_open_reply_1(&packet).await{
+                        let reply = match write_packet_connection_open_reply_1(&packet){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -354,7 +354,7 @@ impl RaknetListener {
                         continue;
                     },
                     PacketID::OpenConnectionRequest2 => {
-                        let req = match read_packet_connection_open_request_2(&buf[..size]).await{
+                        let req = match read_packet_connection_open_request_2(&buf[..size]){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -367,7 +367,7 @@ impl RaknetListener {
                             encryption_enabled: 0x00,
                         };
                         
-                        let reply = match write_packet_connection_open_reply_2(&packet).await{
+                        let reply = match write_packet_connection_open_reply_2(&packet){
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -379,7 +379,7 @@ impl RaknetListener {
                             let packet = write_packet_already_connected(&AlreadyConnected{
                                 magic: true,
                                 guid,
-                            }).await.unwrap();
+                            }).unwrap();
 
                             match socket.send_to(&packet, addr).await{
                                 Ok(_) => {},

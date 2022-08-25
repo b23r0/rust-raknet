@@ -12,7 +12,7 @@ use crate::{packet::*, utils::*, arq::*, raknet_log_debug};
 pub struct RaknetSocket{
     local_addr : SocketAddr,
     peer_addr : SocketAddr,
-    user_data_receiver : Receiver<Vec<u8>>,
+    user_data_receiver : Arc<Mutex<Receiver<Vec<u8>>>>,
     recvq : Arc<Mutex<RecvQ>>,
     sendq : Arc<Mutex<SendQ>>,
     close_notifier : Arc<tokio::sync::Semaphore>,
@@ -36,7 +36,7 @@ impl RaknetSocket {
         let ret = RaknetSocket{
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
-            user_data_receiver,
+            user_data_receiver : Arc::new(Mutex::new(user_data_receiver)),
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
             close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
@@ -57,7 +57,7 @@ impl RaknetSocket {
     async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Sender<Vec<u8>> , incomming_notify : &Notify) -> Result<bool> {
         match PacketID::from(frame.data[0])? {
             PacketID::ConnectionRequest => {
-                let packet = read_packet_connection_request(frame.data.as_slice()).await?;
+                let packet = read_packet_connection_request(frame.data.as_slice())?;
                 
                 let packet_reply = ConnectionRequestAccepted{
                     client_address: *peer_addr,
@@ -66,11 +66,11 @@ impl RaknetSocket {
                     accepted_timestamp: cur_timestamp_millis(),
                 };
 
-                let buf = write_packet_connection_request_accepted(&packet_reply).await?;
+                let buf = write_packet_connection_request_accepted(&packet_reply)?;
                 sendq.lock().await.insert(Reliability::ReliableOrdered,&buf)?;
             },
             PacketID::ConnectionRequestAccepted => {
-                let packet = read_packet_connection_request_accepted(frame.data.as_slice()).await?;
+                let packet = read_packet_connection_request_accepted(frame.data.as_slice())?;
                 
                 let packet_reply = NewIncomingConnection{
                     server_address: *local_addr,
@@ -80,7 +80,7 @@ impl RaknetSocket {
 
                 let mut sendq = sendq.lock().await;
 
-                let buf = write_packet_new_incomming_connection(&packet_reply).await?;
+                let buf = write_packet_new_incomming_connection(&packet_reply)?;
                 sendq.insert(Reliability::ReliableOrdered ,&buf)?;
 
                 let ping = ConnectedPing{
@@ -88,23 +88,23 @@ impl RaknetSocket {
                 };
 
                 //i dont know why incomming packet after always follow a connected ping packet in minecraft bedrock 1.18.12.
-                let buf = write_packet_connected_ping(&ping).await?;
+                let buf = write_packet_connected_ping(&ping)?;
                 sendq.insert(Reliability::Unreliable ,&buf)?;
                 raknet_log_debug!("incomming notified");
                 incomming_notify.notify_one();
             }
             PacketID::NewIncomingConnection => {
-                let _packet = read_packet_new_incomming_connection(frame.data.as_slice()).await?;
+                let _packet = read_packet_new_incomming_connection(frame.data.as_slice())?;
             }
             PacketID::ConnectedPing => {
-                let packet = read_packet_connected_ping(frame.data.as_slice()).await?;
+                let packet = read_packet_connected_ping(frame.data.as_slice())?;
                 
                 let packet_reply = ConnectedPong{
                     client_timestamp: packet.client_timestamp,
                     server_timestamp: cur_timestamp_millis(),
                 };
 
-                let buf = write_packet_connected_pong(&packet_reply).await?;
+                let buf = write_packet_connected_pong(&packet_reply)?;
                 sendq.lock().await.insert(Reliability::Unreliable ,&buf)?;
             }
             PacketID::ConnectedPong => {}
@@ -167,7 +167,7 @@ impl RaknetSocket {
             mtu_size: RAKNET_CLIENT_MTU,
         };
 
-        let buf = write_packet_connection_open_request_1(&packet).await.unwrap();
+        let buf = write_packet_connection_open_request_1(&packet).unwrap();
 
         let mut remote_addr : SocketAddr;
         let mut reply1_size : usize;
@@ -202,7 +202,7 @@ impl RaknetSocket {
 
             if reply1_buf[0] != PacketID::OpenConnectionReply1.to_u8(){
                 if reply1_buf[0] == PacketID::IncompatibleProtocolVersion.to_u8(){
-                    let _packet = match read_packet_incompatible_protocol_version(&buf[..size]).await{
+                    let _packet = match read_packet_incompatible_protocol_version(&buf[..size]){
                         Ok(p) => p,
                         Err(_) => return Err(RaknetError::NotSupportVersion),
                     };
@@ -218,7 +218,7 @@ impl RaknetSocket {
         }
 
 
-        let reply1 = match read_packet_connection_open_reply_1(&reply1_buf[..reply1_size]).await{
+        let reply1 = match read_packet_connection_open_reply_1(&reply1_buf[..reply1_size]){
             Ok(p) => p,
             Err(_) => return Err(RaknetError::PacketParseError),
         };
@@ -230,7 +230,7 @@ impl RaknetSocket {
             guid,
         };
 
-        let buf = write_packet_connection_open_request_2(&packet).await.unwrap();
+        let buf = write_packet_connection_open_request_2(&packet).unwrap();
 
         loop{
             match s.send_to(&buf, addr).await{
@@ -268,7 +268,7 @@ impl RaknetSocket {
 
             }
     
-            let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]).await{
+            let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]){
                 Ok(p) => p,
                 Err(_) => return Err(RaknetError::PacketParseError),
             };
@@ -284,7 +284,7 @@ impl RaknetSocket {
             use_encryption: 0x00,
         };
 
-        let buf = write_packet_connection_request(&packet).await.unwrap();
+        let buf = write_packet_connection_request(&packet).unwrap();
 
         let mut sendq1 = sendq.lock().await;
         sendq1.insert(Reliability::ReliableOrdered, &buf)?;
@@ -341,7 +341,7 @@ impl RaknetSocket {
         let ret = RaknetSocket{
             peer_addr : *addr,
             local_addr : s.local_addr().unwrap(),
-            user_data_receiver,
+            user_data_receiver : Arc::new(Mutex::new(user_data_receiver)),
             recvq : Arc::new(Mutex::new(RecvQ::new())),
             sendq,
             close_notifier: connected,
@@ -400,7 +400,7 @@ impl RaknetSocket {
                 if buf[0] == PacketID::Ack.to_u8(){
                     //handle ack
                     let mut sendq = sendq.lock().await;
-                    let ack = read_packet_ack(&buf).await.unwrap();
+                    let ack = read_packet_ack(&buf).unwrap();
                     for i in 0..ack.record_count{
                         if ack.sequences[i as usize].0 == ack.sequences[i as usize].1{
                             sendq.ack(ack.sequences[i as usize].0 , cur_timestamp_millis());
@@ -416,7 +416,7 @@ impl RaknetSocket {
 
                 if buf[0] == PacketID::Nack.to_u8(){
                     //handle nack
-                    let nack  = read_packet_nack(&buf).await.unwrap();
+                    let nack  = read_packet_nack(&buf).unwrap();
 
                     let mut sendq = sendq.lock().await;
 
@@ -436,7 +436,7 @@ impl RaknetSocket {
                 if buf[0] >= PacketID::FrameSetPacketBegin.to_u8() && 
                    buf[0] <= PacketID::FrameSetPacketEnd.to_u8() {
 
-                    let frames = FrameVec::new(buf.clone()).await.unwrap();
+                    let frames = FrameVec::new(buf.clone()).unwrap();
 
                     let mut recvq = recvq.lock().await;
                     let mut is_break = false;
@@ -467,7 +467,7 @@ impl RaknetSocket {
                             sequences: acks,
                         };
     
-                        let buf = write_packet_ack(&packet).await.unwrap();
+                        let buf = write_packet_ack(&packet).unwrap();
                         RaknetSocket::sendto(&s , &buf, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                     }
                 } else {
@@ -536,14 +536,14 @@ impl RaknetSocket {
                         sequences: nacks,
                     };
 
-                    let buf = write_packet_nack(&nack).await.unwrap();
+                    let buf = write_packet_nack(&nack).unwrap();
                     RaknetSocket::sendto(&s , &buf, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                 }
                 
                 //flush sendq
                 let mut sendq = sendq.lock().await;
                 for f in sendq.flush(cur_timestamp_millis(), &peer_addr){
-                    let data = f.serialize().await.unwrap();
+                    let data = f.serialize().unwrap();
                     RaknetSocket::sendto(&s , &data, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
                 }
 
@@ -600,7 +600,7 @@ impl RaknetSocket {
     /// let (latency, motd) = socket::RaknetSocket::ping("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// assert!((0..10).contains(&latency));
     /// ```
-    pub async fn close(&mut self) -> Result<()>{
+    pub async fn close(&self) -> Result<()>{
 
         if !self.close_notifier.is_closed(){
             self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
@@ -632,7 +632,7 @@ impl RaknetSocket {
                 guid: rand::random(),
             };
 
-            let buf = write_packet_ping(&packet).await?;
+            let buf = write_packet_ping(&packet)?;
 
             match s.send_to(buf.as_slice(), addr).await{
                 Ok(_) => {},
@@ -654,7 +654,7 @@ impl RaknetSocket {
                 Err(_) => return Err(RaknetError::SocketError),
             };
     
-            if let Ok(p) = read_packet_pong(&buf).await{
+            if let Ok(p) = read_packet_pong(&buf){
                     return Ok((p.time - packet.time , p.motd))
             };
 
@@ -675,7 +675,7 @@ impl RaknetSocket {
     /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// ```
-    pub async fn send(&mut self , buf : &[u8] , r : Reliability) ->Result<()> {
+    pub async fn send(&self , buf : &[u8] , r : Reliability) ->Result<()> {
 
         if buf.is_empty() {
             return Err(RaknetError::PacketHeaderError);
@@ -694,7 +694,7 @@ impl RaknetSocket {
         sendq.insert(r , buf)?;
         let sender = self.sender.clone();
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
-            let data = f.serialize().await.unwrap();
+            let data = f.serialize().unwrap();
             sender.send((data, self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed))).await.unwrap();
             //RaknetSocket::sendto(&s , &data, &self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed)).await.unwrap();
         }
@@ -711,13 +711,13 @@ impl RaknetSocket {
     ///    //do something
     /// }
     /// ```
-    pub async fn recv(&mut self) -> Result<Vec<u8>> {
+    pub async fn recv(&self) -> Result<Vec<u8>> {
 
         if self.close_notifier.is_closed(){
             return Err(RaknetError::ConnectionClosed);
         }
 
-        match self.user_data_receiver.recv().await{
+        match self.user_data_receiver.lock().await.recv().await{
             Some(p) => Ok(p),
             None => {
                 if self.close_notifier.is_closed(){

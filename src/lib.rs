@@ -72,9 +72,9 @@ async fn test_ping_pong(){
         let mut buf = [0u8 ; 1024];
         let (size , addr ) = s.recv_from(&mut buf).await.unwrap();
 
-        let _pong = packet::read_packet_ping(&buf[..size]).await.unwrap();
+        let _pong = packet::read_packet_ping(&buf[..size]).unwrap();
 
-        let buf = packet::write_packet_pong(&packet).await.unwrap();
+        let buf = packet::write_packet_pong(&packet).unwrap();
 
         s.send_to(buf.as_slice(), addr).await.unwrap();
     });
@@ -95,12 +95,12 @@ async fn test_connect(){
     let notify2 = notify.clone();
 
     tokio::spawn(async move {
-        let mut client1 = server.accept().await.unwrap();
+        let client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
         client1.send(&[0xfe,2,3] , Reliability::Reliable).await.unwrap();
         notify2.notified().await;
     });
-    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    let client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
     let buf = client2.recv().await.unwrap();
     assert!(buf == vec![0xfe,2,3]);
@@ -118,7 +118,7 @@ async fn test_send_recv_fragment_data(){
     let notify2 = notify.clone();
 
     tokio::spawn(async move {
-        let mut client1 = server.accept().await.unwrap();
+        let client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
 
         let mut a = vec![3u8;1000];
@@ -131,7 +131,7 @@ async fn test_send_recv_fragment_data(){
 
         notify2.notified().await;
     });
-    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    let client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
     let buf = client2.recv().await.unwrap();
     assert!(buf.len() == 3000);
@@ -152,7 +152,7 @@ async fn test_send_recv_more_reliability_type_packet(){
     let notify2 = notify.clone();
 
     tokio::spawn(async move {
-        let mut client1 = server.accept().await.unwrap();
+        let client1 = server.accept().await.unwrap();
         assert!(client1.local_addr().unwrap() == local_addr);
 
         client1.send(&[0xfe,1,2,3], Reliability::Unreliable).await.unwrap();
@@ -187,7 +187,7 @@ async fn test_send_recv_more_reliability_type_packet(){
 
         notify2.notified().await;
     });
-    let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
+    let client2 = RaknetSocket::connect(&local_addr).await.unwrap();
     assert!(client2.peer_addr().unwrap() == local_addr);
     
     let buf = client2.recv().await.unwrap();
@@ -376,7 +376,7 @@ async fn test_raknet_server_close(){
     for _ in 0..10{
         let mut server = RaknetListener::bind(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
         server.listen().await;
-        let mut client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
+        let client = RaknetSocket::connect(&"127.0.0.1:19132".parse().unwrap()).await.unwrap();
         let mut a = vec![3u8;1000];
         let mut b = vec![2u8;1000];
         let mut c = vec![0xfe;1000];
@@ -384,7 +384,7 @@ async fn test_raknet_server_close(){
         c.append(&mut b);
         client.send(&c, Reliability::ReliableOrdered).await.unwrap();
 
-        let mut client2 = server.accept().await.unwrap();
+        let client2 = server.accept().await.unwrap();
         let buf = client2.recv().await.unwrap();
         assert!(buf.len() == 3000);
         assert!(buf[0..1000] == vec![0xfe;1000]);
