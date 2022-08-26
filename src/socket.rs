@@ -378,6 +378,10 @@ impl RaknetSocket {
         tokio::spawn(async move {
             loop{
                 if connected.is_closed(){
+                    let mut recvq = recvq.lock().await;
+                    for f in recvq.flush(&peer_addr){
+                        RaknetSocket::handle(&f , &peer_addr ,&local_addr, &sendq, &user_data_sender , &incomming_notify).await.unwrap();
+                    }
                     break;
                 }
 
@@ -448,7 +452,6 @@ impl RaknetSocket {
                                 raknet_log_info!("handle over");
                                 connected.close();
                                 is_break = true;
-                                break;
                             };
                         }
 
@@ -570,7 +573,9 @@ impl RaknetSocket {
                 }
 
                 if connected.is_closed(){
-                    RaknetSocket::sendto(&s , &[PacketID::Disconnect.to_u8()], &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
+                    for _ in 0..10{
+                        RaknetSocket::sendto(&s , &[PacketID::Disconnect.to_u8()], &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
+                    }
                     break;
                 }
                 
@@ -720,18 +725,13 @@ impl RaknetSocket {
     /// 
     /// # Example
     /// ```ignore
-    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// let buf = socket.recv().await.unwrap();
     /// if buf[0] == 0xfe{
     ///    //do something
     /// }
     /// ```
     pub async fn recv(&self) -> Result<Vec<u8>> {
-
-        if self.close_notifier.is_closed(){
-            return Err(RaknetError::ConnectionClosed);
-        }
-
         match self.user_data_receiver.lock().await.recv().await{
             Some(p) => Ok(p),
             None => {
