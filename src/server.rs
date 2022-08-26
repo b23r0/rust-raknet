@@ -480,7 +480,7 @@ impl RaknetListener {
     /// 
     /// # Example
     /// ```ignore
-    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// let motd = listener.get_motd().await;
     /// ```
     pub async fn get_motd(&self) -> String{

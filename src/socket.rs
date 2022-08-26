@@ -145,7 +145,7 @@ impl RaknetSocket {
     /// 
     /// # Example
     /// ```ignore
-    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// let buf = socket.recv().await.unwrap();
     /// if buf[0] == 0xfe{
@@ -672,7 +672,7 @@ impl RaknetSocket {
     /// 
     /// # Example
     /// ```ignore
-    /// let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// ```
     pub async fn send(&self , buf : &[u8] , r : Reliability) ->Result<()> {
