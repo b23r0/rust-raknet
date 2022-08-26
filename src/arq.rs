@@ -806,6 +806,10 @@ impl SendQ{
         ret
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty() && self.sent_packet.is_empty()
+    }
+
     pub fn get_reliable_queue_size(&self) -> usize{
         self.packets.len()
     }

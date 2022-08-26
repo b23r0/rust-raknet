@@ -1,6 +1,6 @@
 use std::{net::{SocketAddr}, sync::{Arc, atomic::{AtomicU8, AtomicI64}}};
 use rand::Rng;
-use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify}, time::{sleep, timeout}};
+use tokio::{net::UdpSocket, sync::{Mutex, mpsc::channel, Notify, RwLock}, time::{sleep, timeout}};
 
 use tokio::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ pub struct RaknetSocket{
     peer_addr : SocketAddr,
     user_data_receiver : Arc<Mutex<Receiver<Vec<u8>>>>,
     recvq : Arc<Mutex<RecvQ>>,
-    sendq : Arc<Mutex<SendQ>>,
+    sendq : Arc<RwLock<SendQ>>,
     close_notifier : Arc<tokio::sync::Semaphore>,
     last_heartbeat_time : Arc<AtomicI64>,
     enable_loss : Arc<AtomicBool>,
@@ -38,7 +38,7 @@ impl RaknetSocket {
             local_addr : s.local_addr().unwrap(),
             user_data_receiver : Arc::new(Mutex::new(user_data_receiver)),
             recvq : Arc::new(Mutex::new(RecvQ::new())),
-            sendq : Arc::new(Mutex::new(SendQ::new(mtu))),
+            sendq : Arc::new(RwLock::new(SendQ::new(mtu))),
             close_notifier : Arc::new(tokio::sync::Semaphore::new(0)),
             last_heartbeat_time : Arc::new(AtomicI64::new(cur_timestamp_millis())),
             enable_loss : Arc::new(AtomicBool::new(false)),
@@ -54,7 +54,7 @@ impl RaknetSocket {
         ret
     }
 
-    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &Mutex<SendQ> , user_data_sender : &Sender<Vec<u8>> , incomming_notify : &Notify) -> Result<bool> {
+    async fn handle (frame : &FrameSetPacket , peer_addr : &SocketAddr , local_addr : &SocketAddr , sendq : &RwLock<SendQ> , user_data_sender : &Sender<Vec<u8>> , incomming_notify : &Notify) -> Result<bool> {
         match PacketID::from(frame.data[0])? {
             PacketID::ConnectionRequest => {
                 let packet = read_packet_connection_request(frame.data.as_slice())?;
@@ -67,7 +67,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connection_request_accepted(&packet_reply)?;
-                sendq.lock().await.insert(Reliability::ReliableOrdered,&buf)?;
+                sendq.write().await.insert(Reliability::ReliableOrdered,&buf)?;
             },
             PacketID::ConnectionRequestAccepted => {
                 let packet = read_packet_connection_request_accepted(frame.data.as_slice())?;
@@ -78,7 +78,7 @@ impl RaknetSocket {
                     accepted_timestamp: cur_timestamp_millis(),
                 };
 
-                let mut sendq = sendq.lock().await;
+                let mut sendq = sendq.write().await;
 
                 let buf = write_packet_new_incomming_connection(&packet_reply)?;
                 sendq.insert(Reliability::ReliableOrdered ,&buf)?;
@@ -105,7 +105,7 @@ impl RaknetSocket {
                 };
 
                 let buf = write_packet_connected_pong(&packet_reply)?;
-                sendq.lock().await.insert(Reliability::Unreliable ,&buf)?;
+                sendq.write().await.insert(Reliability::Unreliable ,&buf)?;
             }
             PacketID::ConnectedPong => {}
             PacketID::Disconnect => {
@@ -276,7 +276,7 @@ impl RaknetSocket {
             break;
         }
 
-        let sendq = Arc::new(Mutex::new(SendQ::new(reply1.mtu_size)));
+        let sendq = Arc::new(RwLock::new(SendQ::new(reply1.mtu_size)));
 
         let packet = ConnectionRequest{
             guid,
@@ -286,7 +286,7 @@ impl RaknetSocket {
 
         let buf = write_packet_connection_request(&packet).unwrap();
 
-        let mut sendq1 = sendq.lock().await;
+        let mut sendq1 = sendq.write().await;
         sendq1.insert(Reliability::ReliableOrdered, &buf)?;
         std::mem::drop(sendq1);
 
@@ -399,7 +399,7 @@ impl RaknetSocket {
 
                 if buf[0] == PacketID::Ack.to_u8(){
                     //handle ack
-                    let mut sendq = sendq.lock().await;
+                    let mut sendq = sendq.write().await;
                     let ack = read_packet_ack(&buf).unwrap();
                     for i in 0..ack.record_count{
                         if ack.sequences[i as usize].0 == ack.sequences[i as usize].1{
@@ -418,7 +418,7 @@ impl RaknetSocket {
                     //handle nack
                     let nack  = read_packet_nack(&buf).unwrap();
 
-                    let mut sendq = sendq.lock().await;
+                    let mut sendq = sendq.write().await;
 
                     for i in 0..nack.record_count{
                         if nack.sequences[i as usize].0 == nack.sequences[i as usize].1 {
@@ -541,7 +541,7 @@ impl RaknetSocket {
                 }
                 
                 //flush sendq
-                let mut sendq = sendq.lock().await;
+                let mut sendq = sendq.write().await;
                 for f in sendq.flush(cur_timestamp_millis(), &peer_addr){
                     let data = f.serialize().unwrap();
                     RaknetSocket::sendto(&s , &data, &peer_addr , enable_loss.load(Ordering::Relaxed) , loss_rate.load(Ordering::Relaxed)).await.unwrap();
@@ -603,7 +603,7 @@ impl RaknetSocket {
     pub async fn close(&self) -> Result<()>{
 
         if !self.close_notifier.is_closed(){
-            self.sendq.lock().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
+            self.sendq.write().await.insert(Reliability::Reliable, &[PacketID::Disconnect.to_u8()])?;
             self.close_notifier.close();
         }
         Ok(())
@@ -690,14 +690,29 @@ impl RaknetSocket {
         }
 
         //flush sendq
-        let mut sendq = self.sendq.lock().await;
+        let mut sendq = self.sendq.write().await;
         sendq.insert(r , buf)?;
         let sender = self.sender.clone();
         for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr){
             let data = f.serialize().unwrap();
             sender.send((data, self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed))).await.unwrap();
-            //RaknetSocket::sendto(&s , &data, &self.peer_addr , self.enable_loss.load(Ordering::Relaxed) , self.loss_rate.load(Ordering::Relaxed)).await.unwrap();
+
         }
+
+        drop(sendq);
+
+        loop{
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let sendq = self.sendq.read().await;
+            if sendq.is_empty(){
+                break;
+            } else {
+                if self.close_notifier.is_closed(){
+                    return Err(RaknetError::ConnectionClosed); 
+                }
+            }
+        }
+
         Ok(())
     }
 
