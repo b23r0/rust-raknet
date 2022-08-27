@@ -402,6 +402,31 @@ async fn test_raknet_server_close(){
     server2.listen().await;
 
 }
+
+#[tokio::test]
+async fn test_send_recv_full_packet(){
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let remote_addr = format!("127.0.0.1:{}", server.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        server.listen().await;
+        let client = server.accept().await.unwrap();
+
+        for _ in 0..50{
+            client.send(&vec![0xfe;1000], Reliability::ReliableSequenced).await.unwrap();
+        }
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    });
+
+    let client = RaknetSocket::connect(&remote_addr.parse().unwrap()).await.unwrap();
+
+    for _ in 0..50{
+        let buf = client.recv().await.unwrap();
+        assert!(buf == [0xfe;1000]);
+    }
+}
+
 /*
 #[tokio::test]
 async fn chore2(){

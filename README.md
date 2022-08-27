@@ -50,7 +50,7 @@ async fn serve(){
     let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     listener.listen().await;
     loop{
-        let mut socket = listener.accept().await.unwrap();
+        let socket = listener.accept().await.unwrap();
         let buf = socket.recv().await.unwrap();
         if buf[0] == 0xfe{
             //do something
@@ -65,7 +65,7 @@ async fn serve(){
 //client
 
 async fn connect(){
-    let mut socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     let buf = socket.recv().await.unwrap();
     if buf[0] == 0xfe{
@@ -99,4 +99,4 @@ Options :
 * Add an example of using rust-raknet
 * Supplement the documentation on using rust-raknet
 
-This project exists thanks to all the people who contribute. 
+Everyone for me, I for everyone.
