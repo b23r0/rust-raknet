@@ -97,6 +97,6 @@ Options :
 * Submit an ISSUE about suggestion
 * Submit a improved PR
 * Add an example of using rust-raknet
-* Supplement the documentation on using rust-raknet
+* Supplement the documentation about using rust-raknet
 
 Everyone for me, I for everyone.
