@@ -1,5 +1,5 @@
 #[derive(Debug)]
-pub enum RaknetError{
+pub enum RaknetError {
     SetRaknetRawSocketError,
     NotListen,
     BindAdreesError,
@@ -15,4 +15,4 @@ pub enum RaknetError{
     PacketHeaderError,
 }
 
-pub type Result<T> = std::result::Result<T , RaknetError>;
+pub type Result<T> = std::result::Result<T, RaknetError>;
