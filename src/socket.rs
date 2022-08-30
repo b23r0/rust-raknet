@@ -825,10 +825,8 @@ impl RaknetSocket {
             let sendq = self.sendq.read().await;
             if sendq.is_empty() {
                 break;
-            } else {
-                if self.close_notifier.is_closed() {
-                    return Err(RaknetError::ConnectionClosed);
-                }
+            } else if self.close_notifier.is_closed() {
+                return Err(RaknetError::ConnectionClosed);
             }
         }
 
