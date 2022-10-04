@@ -35,6 +35,7 @@ pub struct RaknetSocket {
     incomming_notifier: Arc<Notify>,
     sender: Sender<(Vec<u8>, SocketAddr, bool, u8)>,
     drop_notifier: Arc<Notify>,
+    raknet_version :u8,
 }
 
 impl RaknetSocket {
@@ -47,6 +48,7 @@ impl RaknetSocket {
         receiver: Receiver<Vec<u8>>,
         mtu: u16,
         collecter: Arc<Mutex<Sender<SocketAddr>>>,
+        raknet_version :u8,
     ) -> Self {
         let (user_data_sender, user_data_receiver) = channel::<Vec<u8>>(100);
         let (sender_sender, sender_receiver) = channel::<(Vec<u8>, SocketAddr, bool, u8)>(10);
@@ -64,6 +66,7 @@ impl RaknetSocket {
             incomming_notifier: Arc::new(Notify::new()),
             sender: sender_sender,
             drop_notifier: Arc::new(Notify::new()),
+            raknet_version : raknet_version,
         };
         ret.start_receiver(s, receiver, user_data_sender);
         ret.start_tick(s, Some(collecter));
@@ -186,7 +189,12 @@ impl RaknetSocket {
     ///    //do something
     /// }
     /// ```
-    pub async fn connect(addr: &SocketAddr) -> Result<Self> {
+    
+    pub async fn connect(addr : &SocketAddr) -> Result<Self>{
+        Self::connect_with_version(addr,RAKNET_PROTOCOL_VERSION).await
+    }
+    
+    pub async fn connect_with_version(addr : &SocketAddr, raknet_version :u8) -> Result<Self>{
         let guid: u64 = rand::random();
 
         let s = match UdpSocket::bind("0.0.0.0:0").await {
@@ -196,7 +204,7 @@ impl RaknetSocket {
 
         let packet = OpenConnectionRequest1 {
             magic: true,
-            protocol_version: RAKNET_PROTOCOL_VERSION,
+            protocol_version: raknet_version,
             mtu_size: RAKNET_CLIENT_MTU,
         };
 
@@ -394,6 +402,7 @@ impl RaknetSocket {
             incomming_notifier: Arc::new(Notify::new()),
             sender: sender_sender,
             drop_notifier: Arc::new(Notify::new()),
+            raknet_version : raknet_version,
         };
 
         ret.start_receiver(&s, receiver, user_data_sender);
@@ -817,20 +826,30 @@ impl RaknetSocket {
                 .await
                 .unwrap();
         }
-
-        drop(sendq);
-
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            let sendq = self.sendq.read().await;
-            if sendq.is_empty() {
-                break;
-            } else if self.close_notifier.is_closed() {
-                return Err(RaknetError::ConnectionClosed);
-            }
-        }
-
         Ok(())
+    }
+    
+    /// Wait all packet acked
+    ///
+    /// # Example
+    /// ```ignore
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
+    /// socket.flush().await.unwrap();
+    /// ```
+    pub async fn flush(&self) -> Result<()> {
+        loop {
+           {
+               if self.close_notifier.is_closed() {
+                   return Err(RaknetError::ConnectionClosed);
+               }
+               let sendq = self.sendq.read().await;
+               if sendq.is_empty() {
+                   return Ok(());
+               }
+           }
+           tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+       }
     }
 
     /// Recv a packet
@@ -875,6 +894,11 @@ impl RaknetSocket {
     /// ```
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+    
+    /// return the raknet version used by this connection.
+    pub fn raknet_version(&self) -> Result<u8>{
+        Ok(self.raknet_version)
     }
 
     /// Set the packet loss rate and use it for testing
