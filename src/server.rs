@@ -27,6 +27,7 @@ pub struct RaknetListener {
     close_notifier: Arc<tokio::sync::Semaphore>,
     all_session_closed_notifier: Arc<Notify>,
     drop_notifier: Arc<Notify>,
+    version_map : Arc<Mutex<HashMap<String , u8>>>,
 }
 
 impl RaknetListener {
@@ -59,6 +60,7 @@ impl RaknetListener {
             close_notifier: Arc::new(tokio::sync::Semaphore::new(0)),
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
+            version_map : Arc::new(Mutex::new(HashMap::new())),
         };
 
         ret.drop_watcher().await;
@@ -96,6 +98,7 @@ impl RaknetListener {
             close_notifier: Arc::new(tokio::sync::Semaphore::new(0)),
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
+            version_map : Arc::new(Mutex::new(HashMap::new())),
         };
 
         ret.drop_watcher().await;
@@ -232,6 +235,7 @@ impl RaknetListener {
 
         let local_addr = socket.local_addr().unwrap();
         let close_notify = self.close_notifier.clone();
+        let version_map = self.version_map.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
 
@@ -328,7 +332,7 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        if req.protocol_version != RAKNET_PROTOCOL_VERSION {
+                        if !RAKNET_PROTOCOL_VERSION_LIST.as_slice().contains(&req.protocol_version){
                             let packet = crate::packet::IncompatibleProtocolVersion {
                                 server_protocol: RAKNET_PROTOCOL_VERSION,
                                 magic: true,
@@ -343,6 +347,10 @@ impl RaknetListener {
                                 }
                             };
                             continue;
+                        }
+                        {
+                            let mut version_map = version_map.lock().await;
+                            version_map.insert(addr.to_string(),req.protocol_version);
                         }
 
                         let packet = crate::packet::OpenConnectionReply1 {
@@ -413,13 +421,20 @@ impl RaknetListener {
                         };
 
                         let (sender, receiver) = channel::<Vec<u8>>(10);
-
+                        
+                        let raknet_version :u8;
+                        {
+                            let version_map = version_map.lock().await;
+                            raknet_version = *version_map.get(&addr.to_string()).unwrap_or_else(|| &RAKNET_PROTOCOL_VERSION);
+                        }
+                        
                         let s = RaknetSocket::from(
                             &addr,
                             &socket,
                             receiver,
                             req.mtu,
                             collect_sender.clone(),
+                            raknet_version,
                         )
                         .await;
 
@@ -574,7 +589,13 @@ impl RaknetListener {
         Ok(())
     }
 
-    async fn drop_watcher(&self) {
+    pub async fn get_peer_raknet_version(&self, peer :&SocketAddr)-> Result<u8>{
+        let version_map = self.version_map.lock().await;
+        let ver = version_map.get(&peer.to_string());
+        Ok(*ver.unwrap_or_else(|| &RAKNET_PROTOCOL_VERSION))
+    }
+    
+    async fn drop_watcher(&self){
         let close_notifier = self.close_notifier.clone();
         let drop_notifier = self.drop_notifier.clone();
         tokio::spawn(async move {
