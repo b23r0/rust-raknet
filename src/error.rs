@@ -2,7 +2,7 @@
 pub enum RaknetError {
     SetRaknetRawSocketError,
     NotListen,
-    BindAdreesError,
+    BindAdressError,
     ConnectionClosed,
     NotSupportVersion,
     IncorrectReply,

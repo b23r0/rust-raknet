@@ -42,7 +42,7 @@ impl RaknetListener {
         let s = match UdpSocket::bind(sockaddr).await {
             Ok(p) => p,
             Err(_) => {
-                return Err(RaknetError::BindAdreesError);
+                return Err(RaknetError::BindAdressError);
             }
         };
 
