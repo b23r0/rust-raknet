@@ -819,6 +819,18 @@ impl RaknetSocket {
         }
         Ok(())
     }
+    
+    pub async fn flush(&self) -> Result<()> {
+        loop {
+           {
+               let sendq = self.sendq.read().await;
+               if sendq.is_empty() {
+                   return Ok(());
+               }
+           }
+           tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+       }
+    }
 
     /// Recv a packet
     ///
