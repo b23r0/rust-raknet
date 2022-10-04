@@ -510,6 +510,55 @@ async fn test_send_recv_full_packet() {
     }
 }
 
+#[tokio::test]
+async fn test_send_recv_with_flush() {
+    let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let remote_addr = format!("127.0.0.1:{}", server.local_addr().unwrap().port());
+    let s1 = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let s2 = s1.clone();
+    tokio::spawn(async move {
+        server.listen().await;
+        let client = server.accept().await.unwrap();
+
+        for _ in 0..50 {
+            s1.acquire().await.unwrap();
+            client
+                .send(&vec![0xfe; 1000], Reliability::ReliableSequenced)
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+        }
+
+        client.close().await.unwrap();
+        for _ in 0..5 {
+            client
+                .send(&vec![0xfe; 1000], Reliability::ReliableSequenced)
+                .await
+                .unwrap();
+            match match client.flush().await {
+                Ok(_) => panic!("incorrect return"),
+                Err(e) => e,
+            }{
+                error::RaknetError::ConnectionClosed => {},
+                _ => panic!("incorrect return"),
+            };
+        }
+        server.close().await.unwrap();
+    });
+
+    let client = RaknetSocket::connect(&remote_addr.parse().unwrap())
+        .await
+        .unwrap();
+
+    for _ in 0..50 {
+        let buf = client.recv().await.unwrap();
+        assert!(buf == [0xfe; 1000]);
+        s2.add_permits(1);
+    }
+}
+
 /*
 #[tokio::test]
 async fn chore2(){

@@ -820,9 +820,20 @@ impl RaknetSocket {
         Ok(())
     }
     
+    /// Wait all packet acked
+    ///
+    /// # Example
+    /// ```ignore
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
+    /// socket.flush().await.unwrap();
+    /// ```
     pub async fn flush(&self) -> Result<()> {
         loop {
            {
+               if self.close_notifier.is_closed() {
+                   return Err(RaknetError::ConnectionClosed);
+               }
                let sendq = self.sendq.read().await;
                if sendq.is_empty() {
                    return Ok(());
