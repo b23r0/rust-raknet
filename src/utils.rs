@@ -1,5 +1,5 @@
-pub const RAKNET_PROTOCOL_VERSION : u8 = 10;
-pub const RAKNET_PROTOCOL_VERSION_LIST : [u8;2] = [10,11];
+pub const RAKNET_PROTOCOL_VERSION: u8 = 10;
+pub const RAKNET_PROTOCOL_VERSION_LIST: [u8; 2] = [10, 11];
 //the MTU is minecraft bedrock 1.18.2 give me
 pub const RAKNET_CLIENT_MTU: u16 = 1400;
 

@@ -57,30 +57,30 @@ pub use crate::socket::*;
 // async fn test_ping_pong() {
 //     let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 //     let port = s.local_addr().unwrap().port();
-// 
+//
 //     let motd_str = format!(
 //         "MCPE;Dedicated Server;486;1.18.11;0;10;12322747879247233720;Bedrock level;Survival;1;{};",
 //         s.local_addr().unwrap().port()
 //     );
-// 
+//
 //     let packet = packet::PacketUnconnectedPong {
 //         time: utils::cur_timestamp_millis(),
 //         magic: true,
 //         guid: rand::random(),
 //         motd: motd_str.clone(),
 //     };
-// 
+//
 //     tokio::spawn(async move {
 //         let mut buf = [0u8; 1024];
 //         let (size, addr) = s.recv_from(&mut buf).await.unwrap();
-// 
+//
 //         let _pong = packet::read_packet_ping(&buf[..size]).unwrap();
-// 
+//
 //         let buf = packet::write_packet_pong(&packet).unwrap();
-// 
+//
 //         s.send_to(buf.as_slice(), addr).await.unwrap();
 //     });
-// 
+//
 //     let addr = format!("127.0.0.1:{}", port);
 //     let (latency, motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap())
 //         .await
@@ -523,7 +523,8 @@ async fn test_send_recv_with_flush() {
         let client = server.accept().await.unwrap();
 
         for _ in 0..50 {
-            #[allow(unused_must_use)]{
+            #[allow(unused_must_use)]
+            {
                 s1.acquire().await.unwrap();
             }
             client
@@ -542,8 +543,8 @@ async fn test_send_recv_with_flush() {
             match match client.flush().await {
                 Ok(_) => panic!("incorrect return"),
                 Err(e) => e,
-            }{
-                error::RaknetError::ConnectionClosed => {},
+            } {
+                error::RaknetError::ConnectionClosed => {}
                 _ => panic!("incorrect return"),
             };
         }
