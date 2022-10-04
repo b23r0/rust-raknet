@@ -523,7 +523,9 @@ async fn test_send_recv_with_flush() {
         let client = server.accept().await.unwrap();
 
         for _ in 0..50 {
-            s1.acquire().await.unwrap();
+            #[allow(unused_must_use)]{
+                s1.acquire().await.unwrap();
+            }
             client
                 .send(&vec![0xfe; 1000], Reliability::ReliableSequenced)
                 .await
