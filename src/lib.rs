@@ -494,6 +494,7 @@ async fn test_send_recv_full_packet() {
                 .await
                 .unwrap();
         }
+        client.flush().await.unwrap();
 
         client.close().await.unwrap();
         server.close().await.unwrap();
