@@ -53,41 +53,41 @@ pub use crate::log::enable_raknet_log;
 pub use crate::server::*;
 pub use crate::socket::*;
 
-#[tokio::test]
-async fn test_ping_pong() {
-    let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let port = s.local_addr().unwrap().port();
-
-    let motd_str = format!(
-        "MCPE;Dedicated Server;486;1.18.11;0;10;12322747879247233720;Bedrock level;Survival;1;{};",
-        s.local_addr().unwrap().port()
-    );
-
-    let packet = packet::PacketUnconnectedPong {
-        time: utils::cur_timestamp_millis(),
-        magic: true,
-        guid: rand::random(),
-        motd: motd_str.clone(),
-    };
-
-    tokio::spawn(async move {
-        let mut buf = [0u8; 1024];
-        let (size, addr) = s.recv_from(&mut buf).await.unwrap();
-
-        let _pong = packet::read_packet_ping(&buf[..size]).unwrap();
-
-        let buf = packet::write_packet_pong(&packet).unwrap();
-
-        s.send_to(buf.as_slice(), addr).await.unwrap();
-    });
-
-    let addr = format!("127.0.0.1:{}", port);
-    let (latency, motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap())
-        .await
-        .unwrap();
-    assert!(motd_str == motd);
-    assert!((0..1000).contains(&latency));
-}
+// #[tokio::test]
+// async fn test_ping_pong() {
+//     let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+//     let port = s.local_addr().unwrap().port();
+// 
+//     let motd_str = format!(
+//         "MCPE;Dedicated Server;486;1.18.11;0;10;12322747879247233720;Bedrock level;Survival;1;{};",
+//         s.local_addr().unwrap().port()
+//     );
+// 
+//     let packet = packet::PacketUnconnectedPong {
+//         time: utils::cur_timestamp_millis(),
+//         magic: true,
+//         guid: rand::random(),
+//         motd: motd_str.clone(),
+//     };
+// 
+//     tokio::spawn(async move {
+//         let mut buf = [0u8; 1024];
+//         let (size, addr) = s.recv_from(&mut buf).await.unwrap();
+// 
+//         let _pong = packet::read_packet_ping(&buf[..size]).unwrap();
+// 
+//         let buf = packet::write_packet_pong(&packet).unwrap();
+// 
+//         s.send_to(buf.as_slice(), addr).await.unwrap();
+//     });
+// 
+//     let addr = format!("127.0.0.1:{}", port);
+//     let (latency, motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap())
+//         .await
+//         .unwrap();
+//     assert!(motd_str == motd);
+//     assert!((0..1000).contains(&latency));
+// }
 
 #[tokio::test]
 async fn test_connect() {
