@@ -425,7 +425,7 @@ impl RaknetListener {
                         let raknet_version :u8;
                         {
                             let version_map = version_map.lock().await;
-                            raknet_version = *version_map.get(&addr.to_string()).unwrap_or_else(|| &RAKNET_PROTOCOL_VERSION);
+                            raknet_version = *version_map.get(&addr.to_string()).unwrap_or(&RAKNET_PROTOCOL_VERSION);
                         }
                         
                         let s = RaknetSocket::from(
@@ -592,7 +592,7 @@ impl RaknetListener {
     pub async fn get_peer_raknet_version(&self, peer :&SocketAddr)-> Result<u8>{
         let version_map = self.version_map.lock().await;
         let ver = version_map.get(&peer.to_string());
-        Ok(*ver.unwrap_or_else(|| &RAKNET_PROTOCOL_VERSION))
+        Ok(*ver.unwrap_or(&RAKNET_PROTOCOL_VERSION))
     }
     
     async fn drop_watcher(&self){

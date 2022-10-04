@@ -66,7 +66,7 @@ impl RaknetSocket {
             incomming_notifier: Arc::new(Notify::new()),
             sender: sender_sender,
             drop_notifier: Arc::new(Notify::new()),
-            raknet_version : raknet_version,
+            raknet_version,
         };
         ret.start_receiver(s, receiver, user_data_sender);
         ret.start_tick(s, Some(collecter));
@@ -402,7 +402,7 @@ impl RaknetSocket {
             incomming_notifier: Arc::new(Notify::new()),
             sender: sender_sender,
             drop_notifier: Arc::new(Notify::new()),
-            raknet_version : raknet_version,
+            raknet_version,
         };
 
         ret.start_receiver(&s, receiver, user_data_sender);
