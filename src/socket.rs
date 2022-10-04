@@ -826,20 +826,30 @@ impl RaknetSocket {
                 .await
                 .unwrap();
         }
-
-        drop(sendq);
-
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            let sendq = self.sendq.read().await;
-            if sendq.is_empty() {
-                break;
-            } else if self.close_notifier.is_closed() {
-                return Err(RaknetError::ConnectionClosed);
-            }
-        }
-
         Ok(())
+    }
+    
+    /// Wait all packet acked
+    ///
+    /// # Example
+    /// ```ignore
+    /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
+    /// socket.flush().await.unwrap();
+    /// ```
+    pub async fn flush(&self) -> Result<()> {
+        loop {
+           {
+               if self.close_notifier.is_closed() {
+                   return Err(RaknetError::ConnectionClosed);
+               }
+               let sendq = self.sendq.read().await;
+               if sendq.is_empty() {
+                   return Ok(());
+               }
+           }
+           tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+       }
     }
 
     /// Recv a packet
