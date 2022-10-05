@@ -89,7 +89,7 @@ Result:
 
 In the network environment with high packet loss rate, this project can reduce the delay time by about 50% compared with TCP.
 
-# Contribution
+# Contributing
 
 Options :
 
@@ -99,4 +99,15 @@ Options :
 * Add an example of using rust-raknet
 * Supplement the documentation about using rust-raknet
 
-Everyone for me, I for everyone.
+Thanks go to these wonderful people.
+
+<table>
+  <tbody>
+    <tr>
+      <td align="center"><a href="https://github.com/b23r0"><img src="https://avatars.githubusercontent.com/u/35518985?v=3?s=100" width="50px;" alt=""/><br /><sub><b>b23r0</b></sub></a></td>
+      <td align="center"><a href="https://github.com/nounfve"><img src="https://avatars.githubusercontent.com/u/73693057?v=3?s=100" width="50px;" alt=""/><br /><sub><b>nounfve</b></sub></a></td>
+    </tr>
+  </tbody>
+</table>
+
+Contributions of any kind are welcome! If you've ever wanted to contribute to open source, and a great cause, now is your chance!
