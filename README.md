@@ -21,7 +21,7 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 * Non-delayed ACK (TCP/Delayed ACK)
 * RTO Not Doubled (TCP/RTO Doubled)
 * Linux/Windows/Mac/BSD support
-* Compatible with Minecraft 1.18.x
+* Compatible with Minecraft
 
 # Get Started
 
