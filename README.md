@@ -111,3 +111,9 @@ Thanks go to these wonderful people.
 </table>
 
 Contributions of any kind are welcome! If you've ever wanted to contribute to open source, and a great cause, now is your chance!
+
+# Donation
+
+BTC : 1HeroYcNYMhjsq8RYCx1stSaRZnQd9B9Eq
+
+ETH : 0x9999997B3deF7b69c09D7a9CA65E5242fb04a764
