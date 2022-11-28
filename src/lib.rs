@@ -40,7 +40,7 @@
 
 mod arq;
 mod datatype;
-mod error;
+pub mod error;
 mod fragment;
 mod log;
 mod packet;
