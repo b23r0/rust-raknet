@@ -504,6 +504,11 @@ impl RaknetListener {
         }
     }
 
+    /// Get the GUID, a random number that uniquely identifies the listener instance.
+    pub fn get_guid(&self) -> u64 {
+        self.guid
+    }
+
     /// Set the current motd, this motd will be provided to the client in the unconnected pong.
     ///
     /// Call this method must be after calling RaknetListener::listen()
