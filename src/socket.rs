@@ -199,7 +199,7 @@ impl RaknetSocket {
 
         let s = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(p) => p,
-            Err(_) => return Err(RaknetError::BindAdressError),
+            Err(_) => return Err(RaknetError::BindAddressError),
         };
 
         let packet = OpenConnectionRequest1 {
@@ -741,7 +741,7 @@ impl RaknetSocket {
     pub async fn ping(addr: &SocketAddr) -> Result<(i64, String)> {
         let s = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(p) => p,
-            Err(_) => return Err(RaknetError::BindAdressError),
+            Err(_) => return Err(RaknetError::BindAddressError),
         };
 
         loop {

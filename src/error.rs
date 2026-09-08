@@ -2,7 +2,7 @@
 pub enum RaknetError {
     SetRaknetRawSocketError,
     NotListen,
-    BindAdressError,
+    BindAddressError,
     ConnectionClosed,
     NotSupportVersion,
     IncorrectReply,
@@ -13,6 +13,7 @@ pub enum RaknetError {
     ReadPacketBufferError,
     PacketSizeExceedMTU,
     PacketHeaderError,
+    SetMotdError,
 }
 
 pub type Result<T> = std::result::Result<T, RaknetError>;

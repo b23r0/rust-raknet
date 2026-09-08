@@ -28,6 +28,8 @@ pub struct RaknetListener {
     all_session_closed_notifier: Arc<Notify>,
     drop_notifier: Arc<Notify>,
     version_map: Arc<Mutex<HashMap<String, u8>>>,
+    motd_receiver: Arc<Mutex<Receiver<String>>>,
+    motd_sender: Sender<String>,
 }
 
 impl RaknetListener {
@@ -43,11 +45,12 @@ impl RaknetListener {
         let s = match UdpSocket::bind(sockaddr).await {
             Ok(p) => p,
             Err(_) => {
-                return Err(RaknetError::BindAdressError);
+                return Err(RaknetError::BindAddressError);
             }
         };
 
         let (connection_sender, connection_receiver) = channel::<RaknetSocket>(10);
+        let (motd_sender, motd_receiver) = channel::<String>(10);
 
         let ret = Self {
             motd: String::new(),
@@ -61,6 +64,8 @@ impl RaknetListener {
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
             version_map: Arc::new(Mutex::new(HashMap::new())),
+            motd_receiver: Arc::new(Mutex::new(motd_receiver)),
+            motd_sender,
         };
 
         ret.drop_watcher().await;
@@ -86,6 +91,7 @@ impl RaknetListener {
         };
 
         let (connection_sender, connection_receiver) = channel::<RaknetSocket>(10);
+        let (motd_sender, motd_receiver) = channel::<String>(10);
 
         let ret = Self {
             motd: String::new(),
@@ -99,6 +105,8 @@ impl RaknetListener {
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
             version_map: Arc::new(Mutex::new(HashMap::new())),
+            motd_receiver: Arc::new(Mutex::new(motd_receiver)),
+            motd_sender,
         };
 
         ret.drop_watcher().await;
@@ -209,7 +217,7 @@ impl RaknetListener {
         }
 
         if self.motd.is_empty() {
-            self.set_motd(
+            let _ = self.set_motd(
                 SERVER_NAME,
                 MAX_CONNECTION,
                 "486",
@@ -236,13 +244,22 @@ impl RaknetListener {
         let local_addr = socket.local_addr().unwrap();
         let close_notify = self.close_notifier.clone();
         let version_map = self.version_map.clone();
+        let motd_receiver =  self.motd_receiver.clone();
+
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
 
             raknet_log_debug!("start listen worker : {}", local_addr);
 
+            let mut motd = motd.clone();
             loop {
-                let motd = motd.clone();
+                let new_motd = match motd_receiver.lock().await.try_recv() {
+                    Ok(m) => {
+                        motd = m.clone();
+                        m
+                    }
+                    Err(_) => motd.clone()
+                };
                 let size: usize;
                 let addr: SocketAddr;
 
@@ -284,7 +301,7 @@ impl RaknetListener {
                             time: cur_timestamp_millis(),
                             guid,
                             magic: true,
-                            motd,
+                            motd: new_motd,
                         };
 
                         let pong = match write_packet_pong(&packet) {
@@ -310,7 +327,7 @@ impl RaknetListener {
                             time: cur_timestamp_millis(),
                             guid,
                             magic: true,
-                            motd,
+                            motd: new_motd,
                         };
 
                         let pong = match write_packet_pong(&packet) {
@@ -508,10 +525,12 @@ impl RaknetListener {
     ///
     /// Call this method must be after calling RaknetListener::listen()
     ///
+    /// Returns a result with RaknetError::SetMotdError if failed to send new motd to motd_receiver (so it doesn't update) or with () if everything went smooth.
+    /// 
     /// # Example
     /// ```ignore
     /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    /// listener.set_motd("Another Minecraft Server" , 999999 , "486" , "1.18.11", "Survival" , 19132).await;
+    /// listener.set_motd("Another Minecraft Server" , 999999 , "486" , "1.18.11", "Survival" , 19132).await.unwrap();
     /// ```
     pub async fn set_motd(
         &mut self,
@@ -521,8 +540,8 @@ impl RaknetListener {
         mc_version: &str,
         game_type: &str,
         port: u16,
-    ) {
-        self.motd = format!(
+    ) -> Result<()> {
+        let motd = format!(
             "MCPE;{};{};{};0;{};{};Bedrock level;{};1;{};",
             server_name,
             mc_protocol_version,
@@ -532,6 +551,14 @@ impl RaknetListener {
             game_type,
             port
         );
+
+        match self.motd_sender.send(motd.clone()).await {
+            Ok(_) => {
+                self.motd = motd;
+                Ok(())
+            }
+            Err(_) => Err(RaknetError::SetMotdError)
+        }        
     }
 
     /// Get the current motd, this motd will be provided to the client in the unconnected pong.
@@ -583,15 +610,22 @@ impl RaknetListener {
     }
 
     /// Set full motd string.
-    ///
+    /// 
+    /// Returns a result with RaknetError::SetMotdError if failed to send new motd to motd_receiver (so it doesn't update) or with () if everything went smooth.
+    /// 
     /// # Example
     /// ```ignore
-    /// let mut socket = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
-    /// socket.set_full_motd("motd").await;
+    /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
+    /// listener.set_full_motd(String::from("motd")).await.unwrap();
     /// ```
-    pub fn set_full_motd(&mut self, motd: String) -> Result<()> {
-        self.motd = motd;
-        Ok(())
+    pub async fn set_full_motd(&mut self, motd: String) -> Result<()>{
+        match self.motd_sender.send(motd.clone()).await {
+            Ok(_) => {
+                self.motd = motd;
+                Ok(())
+            },
+            Err(_) => Err(RaknetError::SetMotdError), 
+        }
     }
 
     pub async fn get_peer_raknet_version(&self, peer: &SocketAddr) -> Result<u8> {
