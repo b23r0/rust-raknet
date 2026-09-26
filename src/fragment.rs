@@ -6,15 +6,17 @@ struct Fragment {
     pub flags: u8,
     pub compound_size: u32,
     pub ordered_frame_index: u32,
+    pub order_channel: u8,
     pub frames: HashMap<u32, FrameSetPacket>,
 }
 
 impl Fragment {
-    pub fn new(flags: u8, compound_size: u32, ordered_frame_index: u32) -> Self {
+    pub fn new(flags: u8, compound_size: u32, ordered_frame_index: u32, order_channel: u8) -> Self {
         Self {
             flags,
             compound_size,
             ordered_frame_index,
+            order_channel,
             frames: HashMap::new(),
         }
     }
@@ -51,6 +53,7 @@ impl Fragment {
         let mut ret = FrameSetPacket::new(Reliability::from((self.flags & 224) >> 5)?, buf);
 
         ret.ordered_frame_index = self.ordered_frame_index;
+        ret.order_channel = self.order_channel;
         ret.sequence_number = sequence_number;
         Ok(ret)
     }
@@ -74,7 +77,12 @@ impl FragmentQ {
                 .unwrap()
                 .insert(frame);
         } else {
-            let mut v = Fragment::new(frame.flags, frame.compound_size, frame.ordered_frame_index);
+            let mut v = Fragment::new(
+                frame.flags,
+                frame.compound_size,
+                frame.ordered_frame_index,
+                frame.order_channel,
+            );
             let k = frame.compound_id;
             v.insert(frame);
             self.fragments.insert(k, v);

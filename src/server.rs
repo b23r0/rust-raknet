@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 
 use crate::error::{RaknetError, Result};
 use crate::packet::*;
@@ -28,8 +28,8 @@ pub struct RaknetListener {
     all_session_closed_notifier: Arc<Notify>,
     drop_notifier: Arc<Notify>,
     version_map: Arc<Mutex<HashMap<String, u8>>>,
-    motd_receiver: Arc<Mutex<Receiver<String>>>,
-    motd_sender: Sender<String>,
+    motd_receiver: watch::Receiver<String>,
+    motd_sender: watch::Sender<String>,
 }
 
 impl RaknetListener {
@@ -50,7 +50,7 @@ impl RaknetListener {
         };
 
         let (connection_sender, connection_receiver) = channel::<RaknetSocket>(10);
-        let (motd_sender, motd_receiver) = channel::<String>(10);
+        let (motd_sender, motd_receiver) = watch::channel(String::new());
 
         let ret = Self {
             motd: String::new(),
@@ -64,7 +64,7 @@ impl RaknetListener {
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
             version_map: Arc::new(Mutex::new(HashMap::new())),
-            motd_receiver: Arc::new(Mutex::new(motd_receiver)),
+            motd_receiver,
             motd_sender,
         };
 
@@ -91,7 +91,7 @@ impl RaknetListener {
         };
 
         let (connection_sender, connection_receiver) = channel::<RaknetSocket>(10);
-        let (motd_sender, motd_receiver) = channel::<String>(10);
+        let (motd_sender, motd_receiver) = watch::channel(String::new());
 
         let ret = Self {
             motd: String::new(),
@@ -105,7 +105,7 @@ impl RaknetListener {
             all_session_closed_notifier: Arc::new(Notify::new()),
             drop_notifier: Arc::new(Notify::new()),
             version_map: Arc::new(Mutex::new(HashMap::new())),
-            motd_receiver: Arc::new(Mutex::new(motd_receiver)),
+            motd_receiver,
             motd_sender,
         };
 
@@ -159,12 +159,7 @@ impl RaknetListener {
             let mut sessions = sessions.lock().await;
 
             for i in sessions.iter() {
-                if i.1
-                     .1
-                    .send(vec![PacketID::Disconnect.to_u8()])
-                    .await
-                    .is_ok()
-                {}
+                if i.1.1.send(vec![PacketID::Disconnect.to_u8()]).await.is_ok() {}
 
                 match socket.send_to(&[PacketID::Disconnect.to_u8()], i.0).await {
                     Ok(_) => {}
@@ -217,22 +212,22 @@ impl RaknetListener {
         }
 
         if self.motd.is_empty() {
-            let _ = self.set_motd(
-                SERVER_NAME,
-                MAX_CONNECTION,
-                "486",
-                "1.18.11",
-                "Survival",
-                self.socket.as_ref().unwrap().local_addr().unwrap().port(),
-            )
-            .await;
+            let _ = self
+                .set_motd(
+                    SERVER_NAME,
+                    MAX_CONNECTION,
+                    "486",
+                    "1.18.11",
+                    "Survival",
+                    self.socket.as_ref().unwrap().local_addr().unwrap().port(),
+                )
+                .await;
         }
 
         let socket = self.socket.as_ref().unwrap().clone();
         let guid = self.guid;
         let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
-        let motd = self.get_motd().await;
 
         self.listened = true;
 
@@ -244,22 +239,14 @@ impl RaknetListener {
         let local_addr = socket.local_addr().unwrap();
         let close_notify = self.close_notifier.clone();
         let version_map = self.version_map.clone();
-        let motd_receiver =  self.motd_receiver.clone();
+        let mut motd_receiver = self.motd_receiver.clone();
 
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
 
             raknet_log_debug!("start listen worker : {}", local_addr);
 
-            let mut motd = motd.clone();
             loop {
-                let new_motd = match motd_receiver.lock().await.try_recv() {
-                    Ok(m) => {
-                        motd = m.clone();
-                        m
-                    }
-                    Err(_) => motd.clone()
-                };
                 let size: usize;
                 let addr: SocketAddr;
 
@@ -276,12 +263,20 @@ impl RaknetListener {
                             },
                         };
                     },
+                    changed = motd_receiver.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let _ = motd_receiver.borrow_and_update();
+                        continue;
+                    },
                     _ = close_notify.acquire() => {
                         raknet_log_debug!("listen close notified");
                         break;
                     }
                 }
 
+                let new_motd = motd_receiver.borrow_and_update().clone();
                 let cur_status = match PacketID::from(buf[0]) {
                     Ok(p) => p,
                     Err(e) => {
@@ -401,6 +396,17 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
+                        let already_connected = { sessions.lock().await.contains_key(&addr) };
+                        if already_connected {
+                            if let Ok(packet) = write_packet_already_connected(&AlreadyConnected {
+                                magic: true,
+                                guid,
+                            }) {
+                                let _ = socket.send_to(&packet, addr).await;
+                            }
+                            continue;
+                        }
+
                         let packet = crate::packet::OpenConnectionReply2 {
                             magic: true,
                             guid,
@@ -414,43 +420,20 @@ impl RaknetListener {
                             Err(_) => continue,
                         };
 
-                        let mut sessions = sessions.lock().await;
-
-                        if sessions.contains_key(&addr) {
-                            let packet = write_packet_already_connected(&AlreadyConnected {
-                                magic: true,
-                                guid,
-                            })
-                            .unwrap();
-
-                            match socket.send_to(&packet, addr).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    raknet_log_error!("udp socket send_to error : {}", e);
-                                }
-                            };
-
+                        if let Err(e) = socket.send_to(&reply, addr).await {
+                            raknet_log_error!("udp socket send_to error : {}", e);
                             continue;
                         }
 
-                        match socket.send_to(&reply, addr).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                raknet_log_error!("udp socket send_to error : {}", e);
-                            }
+                        let (sender, receiver) = channel::<Vec<u8>>(10);
+                        let raknet_version = {
+                            let version_map = version_map.lock().await;
+                            *version_map
+                                .get(&addr.to_string())
+                                .unwrap_or(&RAKNET_PROTOCOL_VERSION)
                         };
 
-                        let (sender, receiver) = channel::<Vec<u8>>(10);
-
-                        let raknet_version: u8;
-                        {
-                            let version_map = version_map.lock().await;
-                            raknet_version = *version_map
-                                .get(&addr.to_string())
-                                .unwrap_or(&RAKNET_PROTOCOL_VERSION);
-                        }
-
-                        let s = RaknetSocket::from(
+                        let raknet_socket = RaknetSocket::from(
                             &addr,
                             &socket,
                             receiver,
@@ -460,28 +443,50 @@ impl RaknetListener {
                         )
                         .await;
 
+                        sessions
+                            .lock()
+                            .await
+                            .insert(addr, (cur_timestamp_millis(), sender));
+
                         raknet_log_debug!("accept connection : {}", addr);
-                        sessions.insert(addr, (cur_timestamp_millis(), sender));
-                        let _ = connection_sender.send(s).await;
+                        if connection_sender.try_send(raknet_socket).is_err() {
+                            sessions.lock().await.remove(&addr);
+                            let _ = socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await;
+                            raknet_log_debug!(
+                                "pending accept queue is full; disconnected {}",
+                                addr
+                            );
+                        }
                     }
                     PacketID::Disconnect => {
-                        let mut sessions = sessions.lock().await;
-                        if sessions.contains_key(&addr) {
-                            sessions[&addr].1.send(buf[..size].to_vec()).await.unwrap();
-                            sessions.remove(&addr);
+                        let session_sender = sessions
+                            .lock()
+                            .await
+                            .remove(&addr)
+                            .map(|(_, sender)| sender);
+                        if let Some(session_sender) = session_sender {
+                            let _ = session_sender.try_send(buf[..size].to_vec());
                         }
                     }
                     _ => {
-                        let mut sessions = sessions.lock().await;
-                        if sessions.contains_key(&addr) {
-                            match sessions[&addr].1.send(buf[..size].to_vec()).await {
-                                Ok(_) => {}
-                                Err(_) => {
-                                    sessions.remove(&addr);
-                                    continue;
+                        let session_sender = {
+                            let mut sessions = sessions.lock().await;
+                            sessions.get_mut(&addr).map(|(last_seen, sender)| {
+                                *last_seen = cur_timestamp_millis();
+                                sender.clone()
+                            })
+                        };
+
+                        if let Some(session_sender) = session_sender {
+                            match session_sender.try_send(buf[..size].to_vec()) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    raknet_log_debug!("session receive queue full for {}", addr);
                                 }
-                            };
-                            sessions.get_mut(&addr).unwrap().0 = cur_timestamp_millis();
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    sessions.lock().await.remove(&addr);
+                                }
+                            }
                         }
                     }
                 }
@@ -530,8 +535,8 @@ impl RaknetListener {
     ///
     /// Call this method must be after calling RaknetListener::listen()
     ///
-    /// Returns a result with RaknetError::SetMotdError if failed to send new motd to motd_receiver (so it doesn't update) or with () if everything went smooth.
-    /// 
+    /// Future unconnected pong responses use the updated MOTD.
+    ///
     /// # Example
     /// ```ignore
     /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
@@ -557,13 +562,9 @@ impl RaknetListener {
             port
         );
 
-        match self.motd_sender.send(motd.clone()).await {
-            Ok(_) => {
-                self.motd = motd;
-                Ok(())
-            }
-            Err(_) => Err(RaknetError::SetMotdError)
-        }        
+        self.motd = motd.clone();
+        self.motd_sender.send_replace(motd);
+        Ok(())
     }
 
     /// Get the current motd, this motd will be provided to the client in the unconnected pong.
@@ -615,22 +616,18 @@ impl RaknetListener {
     }
 
     /// Set full motd string.
-    /// 
-    /// Returns a result with RaknetError::SetMotdError if failed to send new motd to motd_receiver (so it doesn't update) or with () if everything went smooth.
-    /// 
+    ///
+    /// Future unconnected pong responses use the updated MOTD.
+    ///
     /// # Example
     /// ```ignore
     /// let mut listener = RaknetListener::bind("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// listener.set_full_motd(String::from("motd")).await.unwrap();
     /// ```
-    pub async fn set_full_motd(&mut self, motd: String) -> Result<()>{
-        match self.motd_sender.send(motd.clone()).await {
-            Ok(_) => {
-                self.motd = motd;
-                Ok(())
-            },
-            Err(_) => Err(RaknetError::SetMotdError), 
-        }
+    pub async fn set_full_motd(&mut self, motd: String) -> Result<()> {
+        self.motd = motd.clone();
+        self.motd_sender.send_replace(motd);
+        Ok(())
     }
 
     pub async fn get_peer_raknet_version(&self, peer: &SocketAddr) -> Result<u8> {

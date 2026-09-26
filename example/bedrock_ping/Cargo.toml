@@ -1,0 +1,9 @@
+[package]
+name = "bedrock_ping"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+rust-raknet = { path = "../.." }
+tokio = { version = "1", features = ["full"] }

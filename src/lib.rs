@@ -89,6 +89,91 @@ pub use crate::socket::*;
 //     assert!((0..1000).contains(&latency));
 // }
 
+#[test]
+fn test_raknet_error_implements_std_error() {
+    fn assert_error<T: std::error::Error>() {}
+    assert_error::<error::RaknetError>();
+    assert_eq!(
+        error::RaknetError::NotListen.to_string(),
+        "the RakNet listener is not listening"
+    );
+}
+
+#[tokio::test]
+async fn test_listener_updates_motd_after_listen() {
+    let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    listener.listen().await;
+
+    let motd = "MCPE;Updated MOTD;486;1.20.0;0;20;123;World;Survival;1;19132;";
+    listener.set_full_motd(motd.to_owned()).await.unwrap();
+
+    let (_, received_motd) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        RaknetSocket::ping(&local_addr),
+    )
+    .await
+    .expect("server did not answer the unconnected ping")
+    .unwrap();
+    assert_eq!(received_motd, motd);
+
+    listener.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_listener_accepts_more_than_one_queue_of_connections() {
+    const CONNECTIONS: usize = 12;
+
+    let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    listener.listen().await;
+
+    let accept_task = tokio::spawn(async move {
+        let mut accepted = Vec::with_capacity(CONNECTIONS);
+        for _ in 0..CONNECTIONS {
+            accepted.push(
+                tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("listener stopped accepting connections")
+                    .unwrap(),
+            );
+        }
+        (accepted, listener)
+    });
+
+    let mut clients = Vec::with_capacity(CONNECTIONS);
+    for _ in 0..CONNECTIONS {
+        clients.push(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                RaknetSocket::connect(&local_addr),
+            )
+            .await
+            .expect("client connection timed out")
+            .unwrap(),
+        );
+    }
+
+    let (accepted, mut listener) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), accept_task)
+            .await
+            .expect("listener accept loop timed out")
+            .unwrap();
+    assert_eq!(accepted.len(), CONNECTIONS);
+
+    for socket in clients {
+        socket.close().await.unwrap();
+    }
+    for socket in accepted {
+        socket.close().await.unwrap();
+    }
+    listener.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_connect() {
     let mut server = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())

@@ -2,13 +2,13 @@ use rand::Rng;
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicI64, AtomicU8},
         Arc,
+        atomic::{AtomicI64, AtomicU8},
     },
 };
 use tokio::{
     net::UdpSocket,
-    sync::{mpsc::channel, Mutex, Notify, RwLock},
+    sync::{Mutex, Notify, RwLock, mpsc::channel},
     time::{sleep, timeout},
 };
 
@@ -658,7 +658,8 @@ impl RaknetSocket {
 
                 //monitor log
                 if cur_timestamp_millis() - last_monitor_tick > 10000 {
-                    raknet_log_debug!("peer addr : {} , sendq size : {} , sentq size : {} , rto : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}" , 
+                    raknet_log_debug!(
+                        "peer addr : {} , sendq size : {} , sentq size : {} , rto : {} , recvq size : {} ,  recvq fragment size : {} , ordered queue size : {} - {:?}",
                         peer_addr,
                         sendq.get_reliable_queue_size(),
                         sendq.get_sent_queue_size(),
@@ -797,7 +798,21 @@ impl RaknetSocket {
     /// let socket = RaknetSocket::connect("127.0.0.1:19132".parse().unwrap()).await.unwrap();
     /// socket.send(&[0xfe], Reliability::ReliableOrdered).await.unwrap();
     /// ```
-    pub async fn send(&self, buf: &[u8], r: Reliability) -> Result<()> {
+    pub async fn send(&self, buf: &[u8], reliability: Reliability) -> Result<()> {
+        self.send_with_order_channel(buf, reliability, 0).await
+    }
+
+    /// Send a packet on a specific RakNet ordering channel.
+    ///
+    /// Each ordering channel has an independent reliable-ordered sequence.
+    /// The channel is relevant to ordered and sequenced reliability modes;
+    /// unordered modes do not carry an ordering channel on the wire.
+    pub async fn send_with_order_channel(
+        &self,
+        buf: &[u8],
+        reliability: Reliability,
+        order_channel: u8,
+    ) -> Result<()> {
         if buf.is_empty() {
             return Err(RaknetError::PacketHeaderError);
         }
@@ -810,12 +825,11 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        //flush sendq
         let mut sendq = self.sendq.write().await;
-        sendq.insert(r, buf)?;
+        sendq.insert_with_order_channel(reliability, buf, order_channel)?;
         let sender = self.sender.clone();
-        for f in sendq.flush(cur_timestamp_millis(), &self.peer_addr) {
-            let data = f.serialize().unwrap();
+        for frame in sendq.flush(cur_timestamp_millis(), &self.peer_addr) {
+            let data = frame.serialize().unwrap();
             sender
                 .send((
                     data,

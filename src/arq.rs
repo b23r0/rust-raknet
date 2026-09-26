@@ -434,11 +434,11 @@ impl ACKSet {
 }
 
 pub struct RecvQ {
-    sequenced_frame_index: u32,
-    last_ordered_index: u32,
+    sequenced_frame_indexes: HashMap<u8, u32>,
+    last_ordered_indexes: HashMap<u8, u32>,
     sequence_number_ackset: ACKSet,
     packets: HashMap<u32, FrameSetPacket>,
-    ordered_packets: HashMap<u32, FrameSetPacket>,
+    ordered_packets: HashMap<(u8, u32), FrameSetPacket>,
     fragment_queue: FragmentQ,
 }
 
@@ -449,8 +449,8 @@ impl RecvQ {
             packets: HashMap::new(),
             fragment_queue: FragmentQ::new(),
             ordered_packets: HashMap::new(),
-            sequenced_frame_index: 0,
-            last_ordered_index: 0,
+            sequenced_frame_indexes: HashMap::new(),
+            last_ordered_indexes: HashMap::new(),
         }
     }
 
@@ -461,61 +461,54 @@ impl RecvQ {
 
         self.sequence_number_ackset.insert(frame.sequence_number);
 
-        //The fourth parameter takes one of five major values. Lets say you send data 1,2,3,4,5,6. Here's the order and substance of what you might get back:
         match frame.reliability()? {
-            // UNRELIABLE - 5, 1, 6
             Reliability::Unreliable => {
                 self.packets.entry(frame.sequence_number).or_insert(frame);
             }
-            // UNRELIABLE_SEQUENCED - 5 (6 was lost in transit, 1,2,3,4 arrived later than 5)
-            // With the UNRELIABLE_SEQUENCED transmission method, the game data does not need to arrive in every packet to avoid packet loss and retransmission,
-            // because the new packet represents the new state, and the new state can be used directly, without waiting for the old packet to arrive.
             Reliability::UnreliableSequenced => {
-                let sequenced_frame_index = frame.sequenced_frame_index;
-                if sequenced_frame_index >= self.sequenced_frame_index {
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.packets.entry(frame.sequence_number)
-                    {
-                        e.insert(frame);
-                        self.sequenced_frame_index = sequenced_frame_index + 1;
-                    }
+                let channel = frame.order_channel;
+                let sequence_index = frame.sequenced_frame_index;
+                let sequence_number = frame.sequence_number;
+                let last_index = self.sequenced_frame_indexes.entry(channel).or_default();
+                if sequence_index >= *last_index {
+                    self.packets.entry(sequence_number).or_insert(frame);
+                    *last_index = sequence_index + 1;
                 }
             }
-            // RELIABLE - 5, 1, 4, 6, 2, 3
             Reliability::Reliable => {
                 self.packets.insert(frame.sequence_number, frame);
             }
-            // RELIABLE_ORDERED - 1, 2, 3, 4, 5, 6
             Reliability::ReliableOrdered => {
-                // if remote host not received ack , and local program has flush ordered packet. recvq will insert old packet caused memory leak.
-                if frame.ordered_frame_index < self.last_ordered_index {
+                let expected_index = self
+                    .last_ordered_indexes
+                    .get(&frame.order_channel)
+                    .copied()
+                    .unwrap_or(0);
+                if frame.ordered_frame_index < expected_index {
                     return Ok(());
                 }
 
                 if frame.is_fragment() {
                     self.fragment_queue.insert(frame);
-
-                    for i in self.fragment_queue.flush()? {
+                    for fragment in self.fragment_queue.flush()? {
                         self.ordered_packets
-                            .entry(i.ordered_frame_index)
-                            .or_insert(i);
+                            .entry((fragment.order_channel, fragment.ordered_frame_index))
+                            .or_insert(fragment);
                     }
                 } else {
                     self.ordered_packets
-                        .entry(frame.ordered_frame_index)
+                        .entry((frame.order_channel, frame.ordered_frame_index))
                         .or_insert(frame);
                 }
             }
-            // RELIABLE_SEQUENCED - 5, 6 (1,2,3,4 arrived later than 5)
             Reliability::ReliableSequenced => {
-                let sequenced_frame_index = frame.sequenced_frame_index;
-                if sequenced_frame_index >= self.sequenced_frame_index {
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.packets.entry(frame.sequence_number)
-                    {
-                        e.insert(frame);
-                        self.sequenced_frame_index = sequenced_frame_index + 1;
-                    }
+                let channel = frame.order_channel;
+                let sequence_index = frame.sequenced_frame_index;
+                let sequence_number = frame.sequence_number;
+                let last_index = self.sequenced_frame_indexes.entry(channel).or_default();
+                if sequence_index >= *last_index {
+                    self.packets.entry(sequence_number).or_insert(frame);
+                    *last_index = sequence_index + 1;
                 }
             }
         }
@@ -532,17 +525,16 @@ impl RecvQ {
 
     pub fn flush(&mut self, _peer_addr: &SocketAddr) -> Vec<FrameSetPacket> {
         let mut ret = vec![];
-        let mut ordered_keys: Vec<u32> = self.ordered_packets.keys().cloned().collect();
-
+        let mut ordered_keys: Vec<(u8, u32)> = self.ordered_packets.keys().copied().collect();
         ordered_keys.sort_unstable();
 
-        for i in ordered_keys {
-            if i == self.last_ordered_index {
-                let frame = self.ordered_packets[&i].clone();
+        for (channel, index) in ordered_keys {
+            let expected_index = self.last_ordered_indexes.entry(channel).or_default();
+            if index == *expected_index {
+                let frame = self.ordered_packets[&(channel, index)].clone();
                 ret.push(frame);
-                self.ordered_packets.remove(&i);
-                //raknet_log!("{} : received ordered [{}]" , peer_addr ,self.last_ordered_index);
-                self.last_ordered_index = i + 1;
+                self.ordered_packets.remove(&(channel, index));
+                *expected_index = index + 1;
             }
         }
 
@@ -565,8 +557,8 @@ impl RecvQ {
         self.fragment_queue.size()
     }
 
-    pub fn get_ordered_keys(&self) -> Vec<u32> {
-        self.ordered_packets.keys().cloned().collect()
+    pub fn get_ordered_keys(&self) -> Vec<(u8, u32)> {
+        self.ordered_packets.keys().copied().collect()
     }
 
     pub fn get_size(&self) -> usize {
@@ -579,8 +571,8 @@ pub struct SendQ {
     ack_sequence_number: u32,
     sequence_number: u32,
     reliable_frame_index: u32,
-    sequenced_frame_index: u32,
-    ordered_frame_index: u32,
+    sequenced_frame_indexes: HashMap<u8, u32>,
+    ordered_frame_indexes: HashMap<u8, u32>,
     compound_id: u16,
     //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
     packets: Vec<FrameSetPacket>,
@@ -603,8 +595,8 @@ impl SendQ {
             packets: vec![],
             sent_packet: vec![],
             reliable_frame_index: 0,
-            sequenced_frame_index: 0,
-            ordered_frame_index: 0,
+            sequenced_frame_indexes: HashMap::new(),
+            ordered_frame_indexes: HashMap::new(),
             compound_id: 0,
 
             rto: SendQ::DEFAULT_TIMEOUT_MILLS,
@@ -613,9 +605,17 @@ impl SendQ {
     }
 
     pub fn insert(&mut self, reliability: Reliability, buf: &[u8]) -> Result<()> {
+        self.insert_with_order_channel(reliability, buf, 0)
+    }
+
+    pub fn insert_with_order_channel(
+        &mut self,
+        reliability: Reliability,
+        buf: &[u8],
+        order_channel: u8,
+    ) -> Result<()> {
         match reliability {
             Reliability::Unreliable => {
-                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
@@ -624,21 +624,31 @@ impl SendQ {
                 self.packets.push(frame);
             }
             Reliability::UnreliableSequenced => {
-                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
+                let sequenced_frame_index = {
+                    let index = self
+                        .sequenced_frame_indexes
+                        .entry(order_channel)
+                        .or_default();
+                    let current = *index;
+                    *index += 1;
+                    current
+                };
+                let ordered_frame_index = self
+                    .ordered_frame_indexes
+                    .get(&order_channel)
+                    .copied()
+                    .unwrap_or(0);
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
-                // I dont know why Sequenced packet need Ordered
-                // https://wiki.vg/Raknet_Protocol
-                frame.ordered_frame_index = self.ordered_frame_index;
-                frame.sequenced_frame_index = self.sequenced_frame_index;
+                frame.order_channel = order_channel;
+                frame.ordered_frame_index = ordered_frame_index;
+                frame.sequenced_frame_index = sequenced_frame_index;
                 self.packets.push(frame);
-                self.sequenced_frame_index += 1;
             }
             Reliability::Reliable => {
-                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
@@ -649,60 +659,73 @@ impl SendQ {
                 self.reliable_frame_index += 1;
             }
             Reliability::ReliableOrdered => {
-                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() < (self.mtu - 60).into() {
                     let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                    frame.order_channel = order_channel;
                     frame.reliable_frame_index = self.reliable_frame_index;
-                    frame.ordered_frame_index = self.ordered_frame_index;
+                    frame.ordered_frame_index =
+                        *self.ordered_frame_indexes.entry(order_channel).or_default();
                     self.packets.push(frame);
                     self.reliable_frame_index += 1;
-                    self.ordered_frame_index += 1;
                 } else {
                     let max = (self.mtu - 60) as usize;
                     let mut compound_size = buf.len() / max;
                     if buf.len() % max != 0 {
                         compound_size += 1;
                     }
+                    let ordered_frame_index =
+                        *self.ordered_frame_indexes.entry(order_channel).or_default();
 
                     for i in 0..compound_size {
-                        let begin = (max * i) as usize;
+                        let begin = max * i;
                         let end = if i == compound_size - 1 {
                             buf.len()
                         } else {
-                            (max * (i + 1)) as usize
+                            max * (i + 1)
                         };
 
                         let mut frame =
                             FrameSetPacket::new(reliability.clone(), buf[begin..end].to_vec());
-                        // set fragment flag
                         frame.flags |= 16;
                         frame.compound_size = compound_size as u32;
                         frame.compound_id = self.compound_id;
                         frame.fragment_index = i as u32;
+                        frame.order_channel = order_channel;
                         frame.reliable_frame_index = self.reliable_frame_index;
-                        frame.ordered_frame_index = self.ordered_frame_index;
+                        frame.ordered_frame_index = ordered_frame_index;
                         self.packets.push(frame);
                         self.reliable_frame_index += 1;
                     }
                     self.compound_id += 1;
-                    self.ordered_frame_index += 1;
                 }
+                *self.ordered_frame_indexes.entry(order_channel).or_default() += 1;
             }
             Reliability::ReliableSequenced => {
-                // 60 = max framesetpacket length(27) + udp overhead(28) + 5 ext
                 if buf.len() > (self.mtu - 60).into() {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
+                let sequenced_frame_index = {
+                    let index = self
+                        .sequenced_frame_indexes
+                        .entry(order_channel)
+                        .or_default();
+                    let current = *index;
+                    *index += 1;
+                    current
+                };
+                let ordered_frame_index = self
+                    .ordered_frame_indexes
+                    .get(&order_channel)
+                    .copied()
+                    .unwrap_or(0);
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                frame.order_channel = order_channel;
                 frame.reliable_frame_index = self.reliable_frame_index;
-                frame.sequenced_frame_index = self.sequenced_frame_index;
-                // I dont know why Sequenced packet need Ordered
-                // https://wiki.vg/Raknet_Protocol
-                frame.ordered_frame_index = self.ordered_frame_index;
+                frame.sequenced_frame_index = sequenced_frame_index;
+                frame.ordered_frame_index = ordered_frame_index;
                 self.packets.push(frame);
                 self.reliable_frame_index += 1;
-                self.sequenced_frame_index += 1;
             }
         };
         Ok(())
@@ -862,6 +885,57 @@ impl SendQ {
 }
 
 #[tokio::test]
+async fn test_recvq_orders_channels_independently() {
+    let mut recvq = RecvQ::new();
+
+    let mut later_on_channel_one = FrameSetPacket::new(Reliability::ReliableOrdered, vec![1]);
+    later_on_channel_one.sequence_number = 0;
+    later_on_channel_one.order_channel = 1;
+    later_on_channel_one.ordered_frame_index = 1;
+    recvq.insert(later_on_channel_one).unwrap();
+
+    let mut first_on_channel_two = FrameSetPacket::new(Reliability::ReliableOrdered, vec![2]);
+    first_on_channel_two.sequence_number = 1;
+    first_on_channel_two.order_channel = 2;
+    first_on_channel_two.ordered_frame_index = 0;
+    recvq.insert(first_on_channel_two).unwrap();
+
+    let ready = recvq.flush(&"127.0.0.1:0".parse().unwrap());
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].order_channel, 2);
+
+    let mut first_on_channel_one = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0]);
+    first_on_channel_one.sequence_number = 2;
+    first_on_channel_one.order_channel = 1;
+    first_on_channel_one.ordered_frame_index = 0;
+    recvq.insert(first_on_channel_one).unwrap();
+
+    let ready = recvq.flush(&"127.0.0.1:0".parse().unwrap());
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[0].ordered_frame_index, 0);
+    assert_eq!(ready[1].ordered_frame_index, 1);
+    assert!(ready.iter().all(|frame| frame.order_channel == 1));
+}
+
+#[tokio::test]
+async fn test_sendq_maintains_ordered_indexes_per_channel() {
+    let mut sendq = SendQ::new(1500);
+    sendq
+        .insert_with_order_channel(Reliability::ReliableOrdered, &[0xfe, 1], 3)
+        .unwrap();
+    sendq
+        .insert_with_order_channel(Reliability::ReliableOrdered, &[0xfe, 2], 9)
+        .unwrap();
+
+    let sent = sendq.flush(0, &"127.0.0.1:0".parse().unwrap());
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].order_channel, 3);
+    assert_eq!(sent[0].ordered_frame_index, 0);
+    assert_eq!(sent[1].order_channel, 9);
+    assert_eq!(sent[1].ordered_frame_index, 0);
+}
+
+#[tokio::test]
 async fn test_ackset() {
     let mut ackset = ACKSet::new();
 
@@ -937,6 +1011,7 @@ async fn test_recvq_fragment() {
     p.compound_id = 1;
     p.compound_size = 3;
     p.fragment_index = 1;
+    p.order_channel = 7;
     r.insert(p).unwrap();
 
     let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![2]);
@@ -946,6 +1021,7 @@ async fn test_recvq_fragment() {
     p.compound_id = 1;
     p.compound_size = 3;
     p.fragment_index = 2;
+    p.order_channel = 7;
     r.insert(p).unwrap();
 
     let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![3]);
@@ -955,11 +1031,13 @@ async fn test_recvq_fragment() {
     p.compound_id = 1;
     p.compound_size = 3;
     p.fragment_index = 3;
+    p.order_channel = 7;
     r.insert(p).unwrap();
 
     let ret = r.flush(&"0.0.0.0:0".parse().unwrap());
     assert!(ret.len() == 1);
     assert!(ret[0].data == vec![1, 2, 3]);
+    assert_eq!(ret[0].order_channel, 7);
 }
 
 #[tokio::test]

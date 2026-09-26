@@ -28,7 +28,7 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 ```toml
 # Cargo.toml
 [dependencies]
-rust-raknet = "*"
+rust-raknet = "0.13"
 ```
 
 Documentation : https://docs.rs/rust-raknet/latest/rust_raknet/
@@ -74,6 +74,18 @@ async fn connect(){
     socket.close().await.unwrap();
 }
 ```
+
+# Bedrock server discovery
+
+The example/bedrock_ping program sends an unconnected RakNet ping and prints the Bedrock server name, game version, player counts, and MOTD:
+
+    cargo run --manifest-path example/bedrock_ping/Cargo.toml -- play.example.com:19132
+
+This example covers server-list status discovery. Game login and gameplay packets are outside the crate's current APIs.
+
+# Publishing
+
+Bump the version in Cargo.toml, configure the repository secret CARGO_REGISTRY_TOKEN with a crates.io token, and publish a GitHub release to run the Cargo publish workflow.
 
 # Benchmark
 
