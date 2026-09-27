@@ -22,7 +22,7 @@ impl Fragment {
     }
 
     pub fn full(&self) -> bool {
-        self.frames.len() == self.compound_size as usize
+        self.compound_size != 0 && self.frames.len() == self.compound_size as usize
     }
 
     pub fn insert(&mut self, frame: FrameSetPacket) {
@@ -30,27 +30,40 @@ impl Fragment {
             return;
         }
 
-        if self.frames.contains_key(&frame.fragment_index) {
+        if frame.fragment_index >= self.compound_size
+            || frame.compound_size != self.compound_size
+            || frame.order_channel != self.order_channel
+            || frame.ordered_frame_index != self.ordered_frame_index
+            || (frame.flags & 0xe0) != (self.flags & 0xe0)
+        {
             return;
         }
 
-        self.frames.insert(frame.fragment_index, frame);
+        self.frames.entry(frame.fragment_index).or_insert(frame);
     }
 
-    pub fn merge(&mut self) -> Result<FrameSetPacket> {
-        let mut buf = vec![];
-
-        let mut keys: Vec<u32> = self.frames.keys().cloned().collect();
-
-        keys.sort_unstable();
-
-        let sequence_number = self.frames[keys.last().unwrap()].sequence_number;
-
-        for i in keys {
-            buf.append(&mut self.frames[&i].data.clone());
+    pub fn merge(&self) -> Result<FrameSetPacket> {
+        if !self.full() {
+            return Err(RaknetError::PacketParseError);
         }
 
-        let mut ret = FrameSetPacket::new(Reliability::from((self.flags & 224) >> 5)?, buf);
+        let mut keys: Vec<u32> = self.frames.keys().copied().collect();
+        keys.sort_unstable();
+
+        let last_key = keys.last().ok_or(RaknetError::PacketParseError)?;
+        let sequence_number = self.frames[last_key].sequence_number;
+        let capacity = keys
+            .iter()
+            .try_fold(0usize, |total, index| {
+                total.checked_add(self.frames[index].data.len())
+            })
+            .ok_or(RaknetError::PacketSizeExceedMTU)?;
+        let mut data = Vec::with_capacity(capacity);
+        for index in keys {
+            data.extend_from_slice(&self.frames[&index].data);
+        }
+
+        let mut ret = FrameSetPacket::new(Reliability::from((self.flags & 224) >> 5)?, data);
 
         ret.ordered_frame_index = self.ordered_frame_index;
         ret.order_channel = self.order_channel;
@@ -59,46 +72,36 @@ impl Fragment {
     }
 }
 
+#[derive(Default)]
 pub struct FragmentQ {
     fragments: HashMap<u16, Fragment>,
 }
 
 impl FragmentQ {
-    pub fn new() -> Self {
-        Self {
-            fragments: HashMap::new(),
-        }
-    }
-
     pub fn insert(&mut self, frame: FrameSetPacket) {
-        if self.fragments.contains_key(&frame.compound_id) {
-            self.fragments
-                .get_mut(&frame.compound_id)
-                .unwrap()
-                .insert(frame);
-        } else {
-            let mut v = Fragment::new(
+        let fragment = self.fragments.entry(frame.compound_id).or_insert_with(|| {
+            Fragment::new(
                 frame.flags,
                 frame.compound_size,
                 frame.ordered_frame_index,
                 frame.order_channel,
-            );
-            let k = frame.compound_id;
-            v.insert(frame);
-            self.fragments.insert(k, v);
-        }
+            )
+        });
+        fragment.insert(frame);
     }
 
     pub fn flush(&mut self) -> Result<Vec<FrameSetPacket>> {
         let mut ret = vec![];
 
-        let keys: Vec<u16> = self.fragments.keys().cloned().collect();
+        let completed: Vec<u16> = self
+            .fragments
+            .iter()
+            .filter_map(|(&compound_id, fragment)| fragment.full().then_some(compound_id))
+            .collect();
 
-        for i in keys {
-            let a = self.fragments.get_mut(&i).unwrap();
-            if a.full() {
-                ret.push(a.merge()?);
-                self.fragments.remove(&i);
+        for compound_id in completed {
+            if let Some(fragment) = self.fragments.remove(&compound_id) {
+                ret.push(fragment.merge()?);
             }
         }
 

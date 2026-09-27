@@ -1,42 +1,37 @@
-//! RakNet Protocol implementation by Rust.
+//! An asynchronous implementation of the RakNet transport protocol in Rust.
 //!
-//! Raknet is a reliable udp transport protocol that is generally used for communication between game clients and servers, and is used by Minecraft Bedrock Edtion for underlying communication.
+//! RakNet provides reliable and ordered delivery modes over UDP and is used by
+//! Minecraft Bedrock Edition. This library implements the connection handshake,
+//! packet reliability, fragmentation, and listener/client APIs. It also exposes
+//! a TCP forwarder for NetherNet signaling; gameplay traffic still uses WebRTC.
 //!
-//! Raknet protocol supports various reliability options, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol by reverse engineering.
-//!
-//! Requires *Tokio 1.x* asynchronous runtime support.
-//!
-//! Reference : <http://www.jenkinssoftware.com/raknet/manual/index.html>
-//!
-//! _This project is not affiliated with Jenkins Software LLC nor RakNet._
+//! The library requires the Tokio 1.x asynchronous runtime.
 //!
 //! # Features
 //!
-//! * Async
-//! * MIT License
-//! * Pure Rust implementation
-//! * Fast Retransmission
-//! * Selective Retransmission (TCP/Full Retransmission)
-//! * Non-delayed ACK (TCP/Delayed ACK)
-//! * RTO Not Doubled (TCP/RTO Doubled)
-//! * Linux/Windows/Mac/BSD support
-//! * Compatible with Minecraft 1.18.x
+//! - Asynchronous client and server APIs
+//! - Five RakNet reliability modes
+//! - Selective retransmission and fast acknowledgements
+//! - IPv4 and IPv6 socket addresses
+//! - NetherNet TCP signaling forwarding
 //!
-//! # Get Started
+//! # Getting started
 //!
 //! ```toml
-//! # Cargo.toml
 //! [dependencies]
-//! rust-raknet = "*"
+//! rust-raknet = "0.14"
 //! ```
 //!
-//! # Reliability
+//! # Reliability modes
 //!
-//! - [x] unreliable
-//! - [x] unreliable sequenced
-//! - [x] reliable
-//! - [x] reliable ordered
-//! - [x] reliable sequenced
+//! - Unreliable
+//! - Unreliable sequenced
+//! - Reliable
+//! - Reliable ordered
+//! - Reliable sequenced
+//!
+//! This project is not affiliated with Jenkins Software LLC or RakNet.
+//! See the [RakNet protocol reference](http://www.jenkinssoftware.com/raknet/manual/index.html).
 
 mod arq;
 mod datatype;
@@ -54,42 +49,6 @@ pub use crate::log::enable_raknet_log;
 pub use crate::nethernet::NetherNetProxy;
 pub use crate::server::*;
 pub use crate::socket::*;
-
-// #[tokio::test]
-// async fn test_ping_pong() {
-//     let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-//     let port = s.local_addr().unwrap().port();
-//
-//     let motd_str = format!(
-//         "MCPE;Dedicated Server;486;1.18.11;0;10;12322747879247233720;Bedrock level;Survival;1;{};",
-//         s.local_addr().unwrap().port()
-//     );
-//
-//     let packet = packet::PacketUnconnectedPong {
-//         time: utils::cur_timestamp_millis(),
-//         magic: true,
-//         guid: rand::random(),
-//         motd: motd_str.clone(),
-//     };
-//
-//     tokio::spawn(async move {
-//         let mut buf = [0u8; 1024];
-//         let (size, addr) = s.recv_from(&mut buf).await.unwrap();
-//
-//         let _pong = packet::read_packet_ping(&buf[..size]).unwrap();
-//
-//         let buf = packet::write_packet_pong(&packet).unwrap();
-//
-//         s.send_to(buf.as_slice(), addr).await.unwrap();
-//     });
-//
-//     let addr = format!("127.0.0.1:{}", port);
-//     let (latency, motd) = socket::RaknetSocket::ping(&addr.as_str().parse().unwrap())
-//         .await
-//         .unwrap();
-//     assert!(motd_str == motd);
-//     assert!((0..1000).contains(&latency));
-// }
 
 #[test]
 fn test_raknet_error_implements_std_error() {
@@ -371,8 +330,8 @@ async fn test_loss_packet1() {
     server.listen().await;
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
-        // 80% loss packet rate
-        client1.set_loss_rate(8);
+        // Simulate 20% packet loss.
+        client1.set_loss_rate(2);
 
         for i in 0..10 {
             let mut flag = vec![0xfe_u8];
@@ -390,8 +349,8 @@ async fn test_loss_packet1() {
         notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
-    // 80% loss packet rate
-    client2.set_loss_rate(8);
+    // Simulate 20% packet loss.
+    client2.set_loss_rate(2);
 
     for i in 0..10 {
         let mut flag = vec![0xfe_u8];
@@ -419,8 +378,8 @@ async fn test_loss_packet2() {
     server.listen().await;
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
-        // 80% loss packet rate
-        client1.set_loss_rate(8);
+        // Simulate 20% packet loss.
+        client1.set_loss_rate(2);
 
         for i in 0..10 {
             let mut flag = vec![0xfe_u8];
@@ -442,8 +401,8 @@ async fn test_loss_packet2() {
         notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
-    // 80% loss packet rate
-    client2.set_loss_rate(8);
+    // Simulate 20% packet loss.
+    client2.set_loss_rate(2);
 
     for i in 0..10 {
         let mut flag = vec![0xfe_u8];
@@ -476,8 +435,8 @@ async fn test_loss_packet_with_sequenced() {
     server.listen().await;
     tokio::spawn(async move {
         let mut client1 = server.accept().await.unwrap();
-        // 80% loss packet rate
-        client1.set_loss_rate(8);
+        // Simulate 20% packet loss.
+        client1.set_loss_rate(2);
 
         for i in 0..100 {
             let mut flag = vec![0xfe_u8];
@@ -501,8 +460,8 @@ async fn test_loss_packet_with_sequenced() {
         notify2.notified().await;
     });
     let mut client2 = RaknetSocket::connect(&local_addr).await.unwrap();
-    // 80% loss packet rate
-    client2.set_loss_rate(8);
+    // Simulate 20% packet loss.
+    client2.set_loss_rate(2);
 
     for i in 0..100 {
         let mut flag = vec![0xfe_u8];

@@ -1,125 +1,163 @@
-use rust_raknet::*;
-use getopts::Options;
-use tokio::{net::{TcpStream, TcpListener}, io::{AsyncWriteExt, AsyncReadExt}, time::sleep};
+use std::{
+    error::Error,
+    io::{self, ErrorKind},
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
-pub fn cur_timestamp_millis() -> i64{
-    std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis()
-    .try_into()
-    .unwrap_or(0)
+use rust_raknet::{RaknetListener, RaknetSocket, Reliability};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::sleep,
+};
+
+const PACKET_COUNT: usize = 100;
+const PAYLOAD_SIZE: usize = 800;
+
+#[derive(Clone, Copy)]
+enum Protocol {
+    Tcp,
+    RakNet,
 }
 
-fn usage(program: &str, opts: &Options) {
-    let program_path = std::path::PathBuf::from(program);
-    let program_name = program_path.file_stem().unwrap().to_str().unwrap();
-    let brief = format!("Usage: {} [-p] [tcp|raknet] [-t] [server|client] [-a] [IP_ADDRESS]",
-                        program_name);
-    print!("{}", opts.usage(&brief));
+#[derive(Clone, Copy)]
+enum Mode {
+    Client,
+    Server,
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, message.into())
+}
+
+fn parse_args() -> Result<(Protocol, Mode, String), Box<dyn Error>> {
+    let mut protocol = None;
+    let mut mode = None;
+    let mut address = None;
+    let mut args = std::env::args().skip(1);
+
+    while let Some(option) = args.next() {
+        if option == "-h" || option == "--help" {
+            println!("Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT>");
+            std::process::exit(0);
+        }
+
+        let value = args
+            .next()
+            .ok_or_else(|| invalid_input(format!("missing value for {option}")))?;
+        let destination = match option.as_str() {
+            "-p" | "--protocol" => &mut protocol,
+            "-t" | "--type" => &mut mode,
+            "-a" | "--address" => &mut address,
+            _ => return Err(invalid_input(format!("unknown option: {option}")).into()),
+        };
+        if destination.replace(value).is_some() {
+            return Err(invalid_input(format!("{option} may only be specified once")).into());
+        }
+    }
+
+    let protocol = match protocol.as_deref() {
+        Some("tcp") => Protocol::Tcp,
+        Some("raknet") => Protocol::RakNet,
+        Some(value) => return Err(invalid_input(format!("unsupported protocol: {value}")).into()),
+        None => return Err(invalid_input("--protocol is required").into()),
+    };
+    let mode = match mode.as_deref() {
+        Some("client") => Mode::Client,
+        Some("server") => Mode::Server,
+        Some(value) => return Err(invalid_input(format!("unsupported type: {value}")).into()),
+        None => return Err(invalid_input("--type is required").into()),
+    };
+    let address = address.ok_or_else(|| invalid_input("--address is required"))?;
+
+    Ok((protocol, mode, address))
+}
+
+fn print_latency_summary(latencies: &[u128]) {
+    let total: u128 = latencies.iter().sum();
+    for latency in latencies {
+        println!("latency: {latency} ms");
+    }
+    println!("average: {} ms", total / latencies.len() as u128);
+}
+
+async fn run_tcp_client(address: &str) -> Result<(), Box<dyn Error>> {
+    let mut client = TcpStream::connect(address).await?;
+    let mut latencies = Vec::with_capacity(PACKET_COUNT);
+    let mut buffer = [0; PAYLOAD_SIZE];
+
+    for _ in 0..PACKET_COUNT {
+        let started = Instant::now();
+        client.read_exact(&mut buffer).await?;
+        latencies.push(started.elapsed().as_millis());
+    }
+
+    print_latency_summary(&latencies);
+    Ok(())
+}
+
+async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind(address).await?;
+    loop {
+        let (mut client, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let payload = [0; PAYLOAD_SIZE];
+            for _ in 0..PACKET_COUNT {
+                sleep(Duration::from_millis(30)).await;
+                if client.write_all(&payload).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+async fn run_raknet_client(address: &str) -> Result<(), Box<dyn Error>> {
+    let address: SocketAddr = address.parse()?;
+    let client = RaknetSocket::connect(&address).await?;
+    let mut latencies = Vec::with_capacity(PACKET_COUNT);
+
+    for _ in 0..PACKET_COUNT {
+        let started = Instant::now();
+        client.recv().await?;
+        latencies.push(started.elapsed().as_millis());
+    }
+
+    print_latency_summary(&latencies);
+    Ok(())
+}
+
+async fn run_raknet_server(address: &str) -> Result<(), Box<dyn Error>> {
+    let address: SocketAddr = address.parse()?;
+    let mut listener = RaknetListener::bind(&address).await?;
+    listener.listen().await;
+
+    loop {
+        let client = listener.accept().await?;
+        tokio::spawn(async move {
+            let payload = [0xfe; PAYLOAD_SIZE];
+            for _ in 0..PACKET_COUNT {
+                sleep(Duration::from_millis(30)).await;
+                if client
+                    .send(&payload, Reliability::ReliableOrdered)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
 }
 
 #[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let program = args[0].clone();
-
-    let mut opts = Options::new();
-
-    opts.reqopt("p",
-                "protocol",
-                "benchmark test protocol",
-                "PROTOCOL");
-
-	opts.reqopt("t",
-                "type",
-                "server or client",
-                "TYPE");
-
-	opts.reqopt("a",
-                "address",
-                "bind or connect connection address",
-                "ADDRESS");
-
-    let matches = opts.parse(&args[1..]).unwrap_or_else(|_| {
-        usage(&program, &opts);
-        std::process::exit(-1);
-    });
-
-    let proto = matches.opt_str("p").unwrap();
-    let ctype = matches.opt_str("t").unwrap();
-    let address = matches.opt_str("a").unwrap();
-
-    if proto == "tcp"{
-        if ctype == "client"{
-            let mut client = TcpStream::connect(address).await.unwrap();
-            let mut ts : Vec<i64> = Vec::new();
-            let mut buf = [0u8;800];
-            for _ in 0..100{
-                let t1 = cur_timestamp_millis();
-                client.read_exact(&mut buf).await.unwrap();
-                let t = cur_timestamp_millis() - t1;
-                println!("latency : {}" , t);
-                ts.push(t);
-            }
-
-            let mut sum : i64 = 0;
-            for i in ts.iter(){
-                sum += i;
-            }
-            println!("avg : {}" , sum / ts.len() as i64)
-
-
-        }else if ctype == "server"{
-            let server = TcpListener::bind(address).await.unwrap();
-            loop{
-                let (mut client, _) = server.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let mut buf = [0u8;800];
-                    for _ in 0..100{
-                        sleep(std::time::Duration::from_millis(30)).await;
-                        client.write_all(&mut buf).await.unwrap();
-                    }
-
-                    //avoid connection closed
-                    sleep(std::time::Duration::from_secs(100)).await;
-                });
-            }
-        }
-    }else if proto == "raknet" {
-        if ctype == "client"{
-            let mut client = RaknetSocket::connect(&address.parse().unwrap()).await.unwrap();
-            let mut ts : Vec<i64> = Vec::new();
-            for _ in 0..100{
-                let t1 = cur_timestamp_millis();
-                let _ = client.recv().await.unwrap();
-                let t = cur_timestamp_millis() - t1;
-                println!("latency : {}" , t);
-                ts.push(t);
-            }
-
-            let mut sum : i64 = 0;
-            for i in ts.iter(){
-                sum += i;
-            }
-            println!("avg : {}" , sum / ts.len() as i64)
-
-        }else if ctype == "server"{
-            let mut server = RaknetListener::bind(&address.parse().unwrap()).await.unwrap();
-            server.listen().await;
-            loop{
-                let mut client = server.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let mut buf = [0xfe;800];
-                    for _ in 0..100{
-                        sleep(std::time::Duration::from_millis(30)).await;
-                        client.send(&mut buf, Reliability::ReliableOrdered).await.unwrap();
-                    }
-
-                    //avoid connection closed
-                    sleep(std::time::Duration::from_secs(100)).await;
-                });
-            }
-        }
+async fn main() -> Result<(), Box<dyn Error>> {
+    let (protocol, mode, address) = parse_args()?;
+    match (protocol, mode) {
+        (Protocol::Tcp, Mode::Client) => run_tcp_client(&address).await,
+        (Protocol::Tcp, Mode::Server) => run_tcp_server(&address).await,
+        (Protocol::RakNet, Mode::Client) => run_raknet_client(&address).await,
+        (Protocol::RakNet, Mode::Server) => run_raknet_server(&address).await,
     }
 }

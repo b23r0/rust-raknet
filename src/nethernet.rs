@@ -55,32 +55,26 @@ impl NetherNetProxy {
             let (client, peer) = self.listener.accept().await?;
             let upstream = self.upstream;
             tokio::spawn(async move {
-                forward(client, peer, upstream).await;
+                if let Err(error) = forward(client, upstream).await {
+                    crate::raknet_log_error!(
+                        "NetherNet signaling relay for {peer} failed: {error}"
+                    );
+                }
             });
         }
     }
 }
 
-async fn forward(mut client: TcpStream, peer: SocketAddr, upstream: SocketAddr) {
-    let mut server = match TcpStream::connect(upstream).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            crate::raknet_log_error!(
-                "NetherNet signaling connection from {peer} to {upstream} failed: {error}"
-            );
-            return;
-        }
-    };
-
-    if let Err(error) = copy_bidirectional(&mut client, &mut server).await {
-        crate::raknet_log_error!("NetherNet signaling relay for {peer} failed: {error}");
-    }
+async fn forward(mut client: TcpStream, upstream: SocketAddr) -> io::Result<()> {
+    let mut upstream_stream = TcpStream::connect(upstream).await?;
+    copy_bidirectional(&mut client, &mut upstream_stream).await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::NetherNetProxy;
-    use std::{net::SocketAddr, time::Duration};
+    use std::time::Duration;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -113,6 +107,7 @@ mod tests {
 
         assert!(result.is_err() || result.as_ref().is_ok_and(Vec::is_empty));
         proxy_task.abort();
+        let _ = proxy_task.await;
     }
 
     #[tokio::test]
@@ -143,7 +138,7 @@ mod tests {
         let proxy = NetherNetProxy::bind("127.0.0.1:0".parse().unwrap(), upstream_addr)
             .await
             .unwrap();
-        let proxy_addr: SocketAddr = proxy.local_addr().unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
         let proxy_task = tokio::spawn(async move { proxy.run().await });
 
         let result = timeout(Duration::from_secs(3), async {
@@ -164,5 +159,6 @@ mod tests {
         assert!(result.ends_with(b"\r\nok"));
         upstream_task.await.unwrap();
         proxy_task.abort();
+        let _ = proxy_task.await;
     }
 }

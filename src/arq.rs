@@ -2,47 +2,42 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use crate::{datatype::*, error::*, fragment::FragmentQ, raknet_log_debug, utils::*};
 
-/// Enumeration type options for Raknet transport reliability
-#[derive(Clone)]
+/// Delivery and ordering guarantees for a RakNet frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Reliability {
-    /// Unreliable packets are sent by straight UDP. They may arrive out of order, or not at all. This is best for data that is unimportant, or data that you send very frequently so even if some packets are missed newer packets will compensate.
-    /// Advantages - These packets don't need to be acknowledged by the network, saving the size of a UDP header in acknowledgment (about 50 bytes or so). The savings can really add up.
-    /// Disadvantages - No packet ordering, packets may never arrive, these packets are the first to get dropped if the send buffer is full.
+    /// The frame may be lost or arrive out of order.
     Unreliable = 0x00,
-    /// Unreliable sequenced packets are the same as unreliable packets, except that only the newest packet is ever accepted. Older packets are ignored. Advantages - Same low overhead as unreliable packets, and you don't have to worry about older packets changing your data to old values.
-    /// Disadvantages - A LOT of packets will be dropped since they may never arrive because of UDP and may be dropped even when they do arrive. These packets are the first to get dropped if the send buffer is full. The last packet sent may never arrive, which can be a problem if you stop sending packets at some particular point.
+    /// Only the newest frame in the ordering stream is delivered.
     UnreliableSequenced = 0x01,
-    /// Reliable packets are UDP packets monitored by a reliablilty layer to ensure they arrive at the destination.
-    /// Advantages - You know the packet will get there. Eventually...
-    /// Disadvantages - Retransmissions and acknowledgments can add significant bandwidth requirements. Packets may arrive very late if the network is busy. No packet ordering.
+    /// The frame is retransmitted until acknowledged, without ordering guarantees.
     Reliable = 0x02,
-    /// Reliable ordered packets are UDP packets monitored by a reliability layer to ensure they arrive at the destination and are ordered at the destination. Advantages - The packet will get there and in the order it was sent. These are by far the easiest to program for because you don't have to worry about strange behavior due to out of order or lost packets.
-    /// Disadvantages - Retransmissions and acknowledgments can add significant bandwidth requirements. Packets may arrive very late if the network is busy. One late packet can delay many packets that arrived sooner, resulting in significant lag spikes. However, this disadvantage can be mitigated by the clever use of ordering streams .
+    /// The frame is retransmitted and delivered in order within its channel.
     ReliableOrdered = 0x03,
-    /// Reliable sequenced packets are UDP packets monitored by a reliability layer to ensure they arrive at the destination and are sequenced at the destination.
-    /// Advantages - You get the reliability of UDP packets, the ordering of ordered packets, yet don't have to wait for old packets. More packets will arrive with this method than with the unreliable sequenced method, and they will be distributed more evenly. The most important advantage however is that the latest packet sent will arrive, where with unreliable sequenced the latest packet sent may not arrive.
-    /// Disadvantages - Wasteful of bandwidth because it uses the overhead of reliable UDP packets to ensure late packets arrive that just get ignored anyway.
+    /// The frame is reliable, but older frames in its ordering stream may be skipped.
     ReliableSequenced = 0x04,
 }
 
 impl Reliability {
     pub fn to_u8(&self) -> u8 {
-        match self {
-            Reliability::Unreliable => 0x00,
-            Reliability::UnreliableSequenced => 0x01,
-            Reliability::Reliable => 0x02,
-            Reliability::ReliableOrdered => 0x03,
-            Reliability::ReliableSequenced => 0x04,
-        }
+        *self as u8
     }
 
     pub fn from(flags: u8) -> Result<Self> {
+        Self::try_from(flags)
+    }
+}
+
+impl TryFrom<u8> for Reliability {
+    type Error = RaknetError;
+
+    fn try_from(flags: u8) -> Result<Self> {
         match flags {
-            0x00 => Ok(Reliability::Unreliable),
-            0x01 => Ok(Reliability::UnreliableSequenced),
-            0x02 => Ok(Reliability::Reliable),
-            0x03 => Ok(Reliability::ReliableOrdered),
-            0x04 => Ok(Reliability::ReliableSequenced),
+            0x00 => Ok(Self::Unreliable),
+            0x01 => Ok(Self::UnreliableSequenced),
+            0x02 => Ok(Self::Reliable),
+            0x03 => Ok(Self::ReliableOrdered),
+            0x04 => Ok(Self::ReliableSequenced),
             _ => Err(RaknetError::IncorrectReliability),
         }
     }
@@ -53,7 +48,6 @@ const CONTINUOUS_SEND_FLAG: u8 = 0x8;
 
 #[derive(Clone)]
 pub struct FrameSetPacket {
-    pub id: u8,
     pub sequence_number: u32,
     pub flags: u8,
     pub length_in_bytes: u16,
@@ -68,11 +62,10 @@ pub struct FrameSetPacket {
 }
 
 impl FrameSetPacket {
-    pub fn new(r: Reliability, data: Vec<u8>) -> FrameSetPacket {
+    pub fn new(r: Reliability, data: Vec<u8>) -> Self {
         let flag = r.to_u8() << 5;
 
-        FrameSetPacket {
-            id: 0,
+        Self {
             sequence_number: 0,
             flags: flag,
             length_in_bytes: data.len() as u16,
@@ -87,11 +80,12 @@ impl FrameSetPacket {
         }
     }
 
-    pub fn _deserialize(buf: Vec<u8>) -> Result<(Self, bool)> {
+    #[cfg(test)]
+    pub fn deserialize(buf: &[u8]) -> Result<(Self, bool)> {
         let mut reader = RaknetReader::new(buf);
+        let input_len = buf.len() as u64;
 
         let mut ret = Self {
-            id: 0,
             sequence_number: 0,
             flags: 0,
             length_in_bytes: 0,
@@ -105,90 +99,91 @@ impl FrameSetPacket {
             data: vec![],
         };
 
-        ret.id = reader.read_u8().unwrap();
-        ret.sequence_number = reader.read_u24(Endian::Little).unwrap();
+        let packet_id = reader.read_u8()?;
+        if !(0x80..=0x8d).contains(&packet_id) {
+            return Err(RaknetError::PacketHeaderError);
+        }
+        ret.sequence_number = reader.read_u24(Endian::Little)?;
+        ret.flags = reader.read_u8()?;
 
-        //Top 3 bits are reliability type
-        //224 = 1110 0000(b)
-        ret.flags = reader.read_u8().unwrap();
-
-        ret.length_in_bytes = reader.read_u16(Endian::Big).unwrap() / 8;
+        let length_in_bits = reader.read_u16(Endian::Big)?;
+        if length_in_bits % 8 != 0 {
+            return Err(RaknetError::PacketParseError);
+        }
+        ret.length_in_bytes = length_in_bits / 8;
 
         if ret.is_reliable()? {
-            ret.reliable_frame_index = reader.read_u24(Endian::Little).unwrap();
+            ret.reliable_frame_index = reader.read_u24(Endian::Little)?;
         }
 
         if ret.is_sequenced()? {
-            ret.sequenced_frame_index = reader.read_u24(Endian::Little).unwrap();
+            ret.sequenced_frame_index = reader.read_u24(Endian::Little)?;
         }
         if ret.is_ordered()? {
-            ret.ordered_frame_index = reader.read_u24(Endian::Little).unwrap();
-            ret.order_channel = reader.read_u8().unwrap();
+            ret.ordered_frame_index = reader.read_u24(Endian::Little)?;
+            ret.order_channel = reader.read_u8()?;
         }
 
-        //fourth bit is 1 when the frame is fragmented and part of a compound.
-        //flags and 16 [0001 0000(b)] == if fragmented
-        if (ret.flags & 16) != 0 {
-            ret.compound_size = reader.read_u32(Endian::Big).unwrap();
-            ret.compound_id = reader.read_u16(Endian::Big).unwrap();
-            ret.fragment_index = reader.read_u32(Endian::Big).unwrap();
+        if ret.is_fragment() {
+            ret.compound_size = reader.read_u32(Endian::Big)?;
+            ret.compound_id = reader.read_u16(Endian::Big)?;
+            ret.fragment_index = reader.read_u32(Endian::Big)?;
         }
 
-        let mut buf = vec![0u8; ret.length_in_bytes as usize].into_boxed_slice();
-        reader.read(&mut buf).unwrap();
-        ret.data.append(&mut buf.to_vec());
+        ret.data.resize(usize::from(ret.length_in_bytes), 0);
+        reader.read(&mut ret.data)?;
 
-        Ok((ret, reader.pos() == buf.len() as u64))
+        if ret.is_fragment() && (ret.compound_size == 0 || ret.fragment_index >= ret.compound_size)
+        {
+            return Err(RaknetError::PacketParseError);
+        }
+
+        Ok((ret, reader.pos() == input_len))
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut writer = RaknetWriter::new();
+        if self.data.len() != usize::from(self.length_in_bytes)
+            || self.data.len() > usize::from(u16::MAX / 8)
+            || (self.is_fragment()
+                && (self.compound_size == 0 || self.fragment_index >= self.compound_size))
+        {
+            return Err(RaknetError::PacketParseError);
+        }
 
+        let mut writer = RaknetWriter::new();
         let mut id = 0x80 | NEEDS_B_AND_AS_FLAG;
 
-        //set fragment flag , first fragment frame id == 0x84
+        // Set the continuation bit for all fragments after the first.
         if (self.flags & 16) != 0 && self.fragment_index != 0 {
             id |= CONTINUOUS_SEND_FLAG;
         }
 
-        writer.write_u8(id).unwrap();
-        writer
-            .write_u24(self.sequence_number, Endian::Little)
-            .unwrap();
+        writer.write_u8(id)?;
+        writer.write_u24(self.sequence_number, Endian::Little)?;
 
-        //Top 3 bits are reliability type
-        //224 = 1110 0000(b)
-        writer.write_u8(self.flags).unwrap();
-        writer
-            .write_u16(self.length_in_bytes * 8, Endian::Big)
-            .unwrap();
+        // The top three bits encode the reliability mode.
+        writer.write_u8(self.flags)?;
+        writer.write_u16(self.length_in_bytes * 8, Endian::Big)?;
 
         if self.is_reliable()? {
-            writer
-                .write_u24(self.reliable_frame_index, Endian::Little)
-                .unwrap();
+            writer.write_u24(self.reliable_frame_index, Endian::Little)?;
         }
 
         if self.is_sequenced()? {
-            writer
-                .write_u24(self.sequenced_frame_index, Endian::Little)
-                .unwrap();
+            writer.write_u24(self.sequenced_frame_index, Endian::Little)?;
         }
         if self.is_ordered()? {
-            writer
-                .write_u24(self.ordered_frame_index, Endian::Little)
-                .unwrap();
-            writer.write_u8(self.order_channel).unwrap();
+            writer.write_u24(self.ordered_frame_index, Endian::Little)?;
+            writer.write_u8(self.order_channel)?;
         }
 
-        //fourth bit is 1 when the frame is fragmented and part of a compound.
-        //flags and 16 [0001 0000(b)] == if fragmented
+        // Bit 4 marks a fragmented frame.
         if (self.flags & 16) != 0 {
-            writer.write_u32(self.compound_size, Endian::Big).unwrap();
-            writer.write_u16(self.compound_id, Endian::Big).unwrap();
-            writer.write_u32(self.fragment_index, Endian::Big).unwrap();
+            writer.write_u32(self.compound_size, Endian::Big)?;
+            writer.write_u16(self.compound_id, Endian::Big)?;
+            writer.write_u32(self.fragment_index, Endian::Big)?;
         }
-        writer.write(self.data.as_slice()).unwrap();
+        writer.write(self.data.as_slice())?;
 
         Ok(writer.get_raw_payload())
     }
@@ -246,11 +241,11 @@ impl FrameSetPacket {
             ret += 3;
         }
         if self.is_ordered()? {
-            //ordered frame index + order channel
+            // Ordered frame index and channel.
             ret += 4;
         }
         if (self.flags & 16) != 0 {
-            //compound size + compound id + fragment index
+            // Compound size, compound ID, and fragment index.
             ret += 10;
         }
         //body
@@ -260,30 +255,25 @@ impl FrameSetPacket {
 }
 
 pub struct FrameVec {
-    pub id: u8,
-    pub sequence_number: u32,
     pub frames: Vec<FrameSetPacket>,
 }
 
 impl FrameVec {
-    pub fn new(buf: Vec<u8>) -> Result<Self> {
-        let mut ret = Self {
-            id: 0,
-            sequence_number: 0,
-            frames: vec![],
-        };
-
-        let size = buf.len();
-
+    pub fn new(buf: &[u8]) -> Result<Self> {
         let mut reader = RaknetReader::new(buf);
+        let id = reader.read_u8()?;
+        if !(0x80..=0x8d).contains(&id) {
+            return Err(RaknetError::PacketHeaderError);
+        }
+        let sequence_number = reader.read_u24(Endian::Little)?;
+        if reader.pos() == buf.len() as u64 {
+            return Err(RaknetError::PacketParseError);
+        }
+        let mut frames = Vec::new();
 
-        ret.id = reader.read_u8().unwrap();
-        ret.sequence_number = reader.read_u24(Endian::Little).unwrap();
-
-        while reader.pos() < size.try_into().unwrap() {
+        while reader.pos() < buf.len() as u64 {
             let mut frame = FrameSetPacket {
-                id: ret.id,
-                sequence_number: ret.sequence_number,
+                sequence_number,
                 flags: 0,
                 length_in_bytes: 0,
                 reliable_frame_index: 0,
@@ -293,94 +283,45 @@ impl FrameVec {
                 compound_size: 0,
                 compound_id: 0,
                 fragment_index: 0,
-                data: vec![],
+                data: Vec::new(),
             };
 
-            //Top 3 bits are reliability type
-            //224 = 1110 0000(b)
-            frame.flags = reader.read_u8().unwrap();
-
-            frame.length_in_bytes = reader.read_u16(Endian::Big).unwrap() / 8;
+            frame.flags = reader.read_u8()?;
+            let length_in_bits = reader.read_u16(Endian::Big)?;
+            if length_in_bits % 8 != 0 {
+                return Err(RaknetError::PacketParseError);
+            }
+            frame.length_in_bytes = length_in_bits / 8;
 
             if frame.is_reliable()? {
-                frame.reliable_frame_index = reader.read_u24(Endian::Little).unwrap();
+                frame.reliable_frame_index = reader.read_u24(Endian::Little)?;
             }
-
             if frame.is_sequenced()? {
-                frame.sequenced_frame_index = reader.read_u24(Endian::Little).unwrap();
+                frame.sequenced_frame_index = reader.read_u24(Endian::Little)?;
             }
             if frame.is_ordered()? {
-                frame.ordered_frame_index = reader.read_u24(Endian::Little).unwrap();
-                frame.order_channel = reader.read_u8().unwrap();
+                frame.ordered_frame_index = reader.read_u24(Endian::Little)?;
+                frame.order_channel = reader.read_u8()?;
+            }
+            if frame.is_fragment() {
+                frame.compound_size = reader.read_u32(Endian::Big)?;
+                frame.compound_id = reader.read_u16(Endian::Big)?;
+                frame.fragment_index = reader.read_u32(Endian::Big)?;
+                if frame.compound_size == 0 || frame.fragment_index >= frame.compound_size {
+                    return Err(RaknetError::PacketParseError);
+                }
             }
 
-            //fourth bit is 1 when the frame is fragmented and part of a compound.
-            //flags and 16 [0001 0000(b)] == if fragmented
-            if (frame.flags & 16) != 0 {
-                frame.compound_size = reader.read_u32(Endian::Big).unwrap();
-                frame.compound_id = reader.read_u16(Endian::Big).unwrap();
-                frame.fragment_index = reader.read_u32(Endian::Big).unwrap();
-            }
-
-            let mut buf = vec![0u8; frame.length_in_bytes as usize].into_boxed_slice();
-            reader.read(&mut buf).unwrap();
-            frame.data.append(&mut buf.to_vec());
-            ret.frames.push(frame);
+            frame.data.resize(usize::from(frame.length_in_bytes), 0);
+            reader.read(&mut frame.data)?;
+            frames.push(frame);
         }
 
-        Ok(ret)
-    }
-
-    pub fn _serialize(&self) -> Result<Vec<u8>> {
-        let mut writer = RaknetWriter::new();
-
-        let id = 0x80 | 4 | 8;
-
-        writer.write_u8(id).unwrap();
-        writer
-            .write_u24(self.sequence_number, Endian::Little)
-            .unwrap();
-
-        for frame in &self.frames {
-            //Top 3 bits are reliability type
-            //224 = 1110 0000(b)
-            writer.write_u8(frame.flags).unwrap();
-            writer
-                .write_u16(frame.length_in_bytes * 8, Endian::Big)
-                .unwrap();
-
-            if frame.is_reliable()? {
-                writer
-                    .write_u24(frame.reliable_frame_index, Endian::Little)
-                    .unwrap();
-            }
-
-            if frame.is_sequenced()? {
-                writer
-                    .write_u24(frame.sequenced_frame_index, Endian::Little)
-                    .unwrap();
-            }
-            if frame.is_ordered()? {
-                writer
-                    .write_u24(frame.ordered_frame_index, Endian::Little)
-                    .unwrap();
-                writer.write_u8(frame.order_channel).unwrap();
-            }
-
-            //fourth bit is 1 when the frame is fragmented and part of a compound.
-            //flags and 8 [0000 1000(b)] == if fragmented
-            if (frame.flags & 0x08) != 0 {
-                writer.write_u32(frame.compound_size, Endian::Big).unwrap();
-                writer.write_u16(frame.compound_id, Endian::Big).unwrap();
-                writer.write_u32(frame.fragment_index, Endian::Big).unwrap();
-            }
-            writer.write(frame.data.as_slice()).unwrap();
-        }
-
-        Ok(writer.get_raw_payload())
+        Ok(Self { frames })
     }
 }
 
+#[derive(Default)]
 pub struct ACKSet {
     ack: Vec<(u32, u32)>,
     nack: Vec<(u32, u32)>,
@@ -388,17 +329,10 @@ pub struct ACKSet {
 }
 
 impl ACKSet {
-    pub fn new() -> Self {
-        ACKSet {
-            ack: vec![],
-            nack: vec![],
-            last_max: 0,
-        }
-    }
     pub fn insert(&mut self, s: u32) {
         if s != 0 {
-            if s > self.last_max && s != self.last_max + 1 {
-                self.nack.push((self.last_max + 1, s - 1));
+            if s > self.last_max && s != self.last_max.saturating_add(1) {
+                self.nack.push((self.last_max.saturating_add(1), s - 1));
             }
 
             if s > self.last_max {
@@ -412,7 +346,7 @@ impl ACKSet {
                 self.ack[i].0 = s;
                 return;
             }
-            if s == a.1 + 1 {
+            if s == a.1.saturating_add(1) {
                 self.ack[i].1 = s;
                 return;
             }
@@ -421,18 +355,15 @@ impl ACKSet {
     }
 
     pub fn get_ack(&mut self) -> Vec<(u32, u32)> {
-        let ret = self.ack.clone();
-        self.ack.clear();
-        ret
+        std::mem::take(&mut self.ack)
     }
 
     pub fn get_nack(&mut self) -> Vec<(u32, u32)> {
-        let ret = self.nack.clone();
-        self.nack.clear();
-        ret
+        std::mem::take(&mut self.nack)
     }
 }
 
+#[derive(Default)]
 pub struct RecvQ {
     sequenced_frame_indexes: HashMap<u8, u32>,
     last_ordered_indexes: HashMap<u8, u32>,
@@ -444,14 +375,7 @@ pub struct RecvQ {
 
 impl RecvQ {
     pub fn new() -> Self {
-        Self {
-            sequence_number_ackset: ACKSet::new(),
-            packets: HashMap::new(),
-            fragment_queue: FragmentQ::new(),
-            ordered_packets: HashMap::new(),
-            sequenced_frame_indexes: HashMap::new(),
-            last_ordered_indexes: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn insert(&mut self, frame: FrameSetPacket) -> Result<()> {
@@ -459,9 +383,10 @@ impl RecvQ {
             return Ok(());
         }
 
+        let reliability = frame.reliability()?;
         self.sequence_number_ackset.insert(frame.sequence_number);
 
-        match frame.reliability()? {
+        match reliability {
             Reliability::Unreliable => {
                 self.packets.entry(frame.sequence_number).or_insert(frame);
             }
@@ -541,12 +466,11 @@ impl RecvQ {
         let mut packets_keys: Vec<u32> = self.packets.keys().cloned().collect();
         packets_keys.sort_unstable();
 
-        for i in packets_keys {
-            let v = self.packets.get(&i).unwrap();
-            ret.push(v.clone());
+        for sequence in packets_keys {
+            if let Some(frame) = self.packets.remove(&sequence) {
+                ret.push(frame);
+            }
         }
-
-        self.packets.clear();
         ret
     }
     pub fn get_ordered_packet(&self) -> usize {
@@ -574,7 +498,7 @@ pub struct SendQ {
     sequenced_frame_indexes: HashMap<u8, u32>,
     ordered_frame_indexes: HashMap<u8, u32>,
     compound_id: u16,
-    //packet : FrameSetPacket , is_sent: bool ,last_tick : i64 , resend_times : u32
+    // Each entry stores a frame, send state, last send time, retry count, and prior sequence IDs.
     packets: Vec<FrameSetPacket>,
     rto: i64,
     srtt: i64,
@@ -614,9 +538,16 @@ impl SendQ {
         buf: &[u8],
         order_channel: u8,
     ) -> Result<()> {
+        let max_payload = self
+            .mtu
+            .checked_sub(60)
+            .map(usize::from)
+            .filter(|size| *size > 0)
+            .ok_or(RaknetError::PacketSizeExceedMTU)?;
+
         match reliability {
             Reliability::Unreliable => {
-                if buf.len() > (self.mtu - 60).into() {
+                if buf.len() > max_payload {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
@@ -624,7 +555,7 @@ impl SendQ {
                 self.packets.push(frame);
             }
             Reliability::UnreliableSequenced => {
-                if buf.len() > (self.mtu - 60).into() {
+                if buf.len() > max_payload {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
@@ -649,7 +580,7 @@ impl SendQ {
                 self.packets.push(frame);
             }
             Reliability::Reliable => {
-                if buf.len() > (self.mtu - 60).into() {
+                if buf.len() > max_payload {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
@@ -659,7 +590,7 @@ impl SendQ {
                 self.reliable_frame_index += 1;
             }
             Reliability::ReliableOrdered => {
-                if buf.len() < (self.mtu - 60).into() {
+                if buf.len() < max_payload {
                     let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                     frame.order_channel = order_channel;
                     frame.reliable_frame_index = self.reliable_frame_index;
@@ -668,28 +599,18 @@ impl SendQ {
                     self.packets.push(frame);
                     self.reliable_frame_index += 1;
                 } else {
-                    let max = (self.mtu - 60) as usize;
-                    let mut compound_size = buf.len() / max;
-                    if buf.len() % max != 0 {
-                        compound_size += 1;
-                    }
+                    let compound_size = buf.len().div_ceil(max_payload);
+                    let compound_size = u32::try_from(compound_size)
+                        .map_err(|_| RaknetError::PacketSizeExceedMTU)?;
                     let ordered_frame_index =
                         *self.ordered_frame_indexes.entry(order_channel).or_default();
 
-                    for i in 0..compound_size {
-                        let begin = max * i;
-                        let end = if i == compound_size - 1 {
-                            buf.len()
-                        } else {
-                            max * (i + 1)
-                        };
-
-                        let mut frame =
-                            FrameSetPacket::new(reliability.clone(), buf[begin..end].to_vec());
+                    for (fragment_index, chunk) in buf.chunks(max_payload).enumerate() {
+                        let mut frame = FrameSetPacket::new(reliability, chunk.to_vec());
                         frame.flags |= 16;
-                        frame.compound_size = compound_size as u32;
+                        frame.compound_size = compound_size;
                         frame.compound_id = self.compound_id;
-                        frame.fragment_index = i as u32;
+                        frame.fragment_index = fragment_index as u32;
                         frame.order_channel = order_channel;
                         frame.reliable_frame_index = self.reliable_frame_index;
                         frame.ordered_frame_index = ordered_frame_index;
@@ -701,7 +622,7 @@ impl SendQ {
                 *self.ordered_frame_indexes.entry(order_channel).or_default() += 1;
             }
             Reliability::ReliableSequenced => {
-                if buf.len() > (self.mtu - 60).into() {
+                if buf.len() > max_payload {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
@@ -805,8 +726,8 @@ impl SendQ {
 
             let mut cur_rto = self.rto;
 
-            // TCP timeout calculation is RTOx2, so three consecutive packet losses will make it RTOx8, which is very terrible,
-            // while rust-raknet it is not x2, but x1.5 (Experimental results show that the value of 1.5 is relatively good), which has improved the transmission speed.
+            // Increase the retransmission timeout by 1.5 for each retry to avoid
+            // the exponential backoff used by TCP.
             for _ in 0..p.3 {
                 cur_rto = (cur_rto as f64 * 1.5) as i64;
             }
@@ -849,23 +770,18 @@ impl SendQ {
             return ret;
         }
 
-        if !self.packets.is_empty() {
-            for i in 0..self.packets.len() {
-                self.packets[i].sequence_number = self.sequence_number;
-                self.sequence_number += 1;
-                ret.push(self.packets[i].clone());
-                if self.packets[i].is_reliable().unwrap() {
-                    self.sent_packet.push((
-                        self.packets[i].clone(),
-                        true,
-                        tick,
-                        0,
-                        vec![self.packets[i].sequence_number],
-                    ));
-                }
-            }
+        for mut packet in self.packets.drain(..) {
+            packet.sequence_number = self.sequence_number;
+            self.sequence_number += 1;
 
-            self.packets.clear();
+            if packet.is_reliable().unwrap_or(false) {
+                ret.push(packet.clone());
+                let sequence_number = packet.sequence_number;
+                self.sent_packet
+                    .push((packet, true, tick, 0, vec![sequence_number]));
+            } else {
+                ret.push(packet);
+            }
         }
 
         ret
@@ -882,6 +798,18 @@ impl SendQ {
     pub fn get_sent_queue_size(&self) -> usize {
         self.sent_packet.len()
     }
+}
+
+#[test]
+fn malformed_datagrams_are_rejected() {
+    assert!(FrameVec::new(&[0x80, 0, 0]).is_err());
+    assert!(FrameVec::new(&[0x10, 0, 0, 0]).is_err());
+}
+
+#[test]
+fn send_queue_rejects_an_invalid_mtu() {
+    let mut send_queue = SendQ::new(59);
+    assert!(send_queue.insert(Reliability::Reliable, &[0xfe]).is_err());
 }
 
 #[tokio::test]
@@ -937,7 +865,7 @@ async fn test_sendq_maintains_ordered_indexes_per_channel() {
 
 #[tokio::test]
 async fn test_ackset() {
-    let mut ackset = ACKSet::new();
+    let mut ackset = ACKSet::default();
 
     ackset.insert(0);
     ackset.insert(1);
@@ -948,7 +876,7 @@ async fn test_ackset() {
 
     assert!(acks == vec![(0, 2), (4, 4)]);
 
-    let mut ackset = ACKSet::new();
+    let mut ackset = ACKSet::default();
 
     ackset.insert(0);
     ackset.insert(1);
@@ -973,14 +901,14 @@ async fn test_ackset() {
 
 #[tokio::test]
 async fn test_frame_serialize_deserialize() {
-    //minecraft 1.18.12 first frame packet
+    // Captured first frame datagram from a Bedrock 1.18.12 client.
     let p: Vec<u8> = [
         132, 0, 0, 0, 64, 0, 144, 0, 0, 0, 9, 146, 33, 7, 47, 57, 18, 128, 111, 0, 0, 0, 0, 20,
         200, 47, 41, 0,
     ]
     .to_vec();
 
-    let a = FrameSetPacket::_deserialize(p.clone()).unwrap();
+    let a = FrameSetPacket::deserialize(&p).unwrap();
     assert!(a.0.serialize().unwrap() == p);
 }
 
@@ -1010,27 +938,27 @@ async fn test_recvq_fragment() {
     p.ordered_frame_index = 0;
     p.compound_id = 1;
     p.compound_size = 3;
-    p.fragment_index = 1;
+    p.fragment_index = 0;
     p.order_channel = 7;
     r.insert(p).unwrap();
 
     let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![2]);
     p.flags |= 16;
     p.sequence_number = 1;
-    p.ordered_frame_index = 1;
+    p.ordered_frame_index = 0;
     p.compound_id = 1;
     p.compound_size = 3;
-    p.fragment_index = 2;
+    p.fragment_index = 1;
     p.order_channel = 7;
     r.insert(p).unwrap();
 
     let mut p = FrameSetPacket::new(Reliability::ReliableOrdered, vec![3]);
     p.flags |= 16;
     p.sequence_number = 2;
-    p.ordered_frame_index = 2;
+    p.ordered_frame_index = 0;
     p.compound_id = 1;
     p.compound_size = 3;
-    p.fragment_index = 3;
+    p.fragment_index = 2;
     p.order_channel = 7;
     r.insert(p).unwrap();
 
@@ -1142,7 +1070,7 @@ async fn test_client_packet1() {
         134, 103, 142, 230, 53, 203, 157, 71, 83, 211, 242, 126, 118, 55, 196,
     ];
 
-    let b = FrameVec::new(a.to_vec()).unwrap();
+    let b = FrameVec::new(&a).unwrap();
     assert!(b.frames.len() == 1);
     assert!(b.frames[0].is_fragment());
 }
@@ -1365,7 +1293,7 @@ async fn test_client_packet2() {
 
     let mut rq = RecvQ::new();
     for i in ps {
-        let v = FrameVec::new(i.clone()).unwrap();
+        let v = FrameVec::new(&i).unwrap();
         for i in v.frames {
             rq.insert(i).unwrap();
             if !rq.flush(&"0.0.0.0:0".parse().unwrap()).is_empty() {
