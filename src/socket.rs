@@ -705,9 +705,12 @@ impl RaknetSocket {
                 }
 
                 // Send queued frames.
-                let mut sendq = sendq.write().await;
-                for f in sendq.flush(cur_timestamp_millis(), &peer_addr) {
-                    let data = match f.serialize() {
+                let outgoing_frames = {
+                    let mut sendq = sendq.write().await;
+                    sendq.flush(cur_timestamp_millis(), &peer_addr)
+                };
+                for frame in outgoing_frames {
+                    let data = match frame.serialize() {
                         Ok(data) => data,
                         Err(error) => {
                             raknet_log_error!("failed to encode frame: {}", error);
@@ -729,6 +732,14 @@ impl RaknetSocket {
 
                 // Periodically report queue and latency state.
                 if cur_timestamp_millis() - last_monitor_tick > 10000 {
+                    let (send_queue_size, sent_queue_size, rto) = {
+                        let sendq = sendq.read().await;
+                        (
+                            sendq.get_reliable_queue_size(),
+                            sendq.get_sent_queue_size(),
+                            sendq.get_rto(),
+                        )
+                    };
                     let (recvq_size, fragment_size, ordered_size, ordered_keys) = {
                         let recvq = recvq.lock().await;
                         (
@@ -741,9 +752,9 @@ impl RaknetSocket {
                     raknet_log_debug!(
                         "peer addr: {} | send queue: {} | sent queue: {} | RTO: {} | receive queue: {} | fragments: {} | ordered queue: {} - {:?}",
                         peer_addr,
-                        sendq.get_reliable_queue_size(),
-                        sendq.get_sent_queue_size(),
-                        sendq.get_rto(),
+                        send_queue_size,
+                        sent_queue_size,
+                        rto,
                         recvq_size,
                         fragment_size,
                         ordered_size,
@@ -900,18 +911,18 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        let mut sendq = self.sendq.write().await;
-        sendq.insert_with_order_channel(reliability, buf, order_channel)?;
+        let frames = {
+            let mut sendq = self.sendq.write().await;
+            sendq.insert_with_order_channel(reliability, buf, order_channel)?;
+            sendq.flush(cur_timestamp_millis(), &self.peer_addr)
+        };
         let sender = self.sender.clone();
-        for frame in sendq.flush(cur_timestamp_millis(), &self.peer_addr) {
+        let enable_loss = self.enable_loss.load(Ordering::Relaxed);
+        let loss_rate = self.loss_rate.load(Ordering::Relaxed);
+        for frame in frames {
             let data = frame.serialize()?;
             sender
-                .send((
-                    data,
-                    self.peer_addr,
-                    self.enable_loss.load(Ordering::Relaxed),
-                    self.loss_rate.load(Ordering::Relaxed),
-                ))
+                .send((data, self.peer_addr, enable_loss, loss_rate))
                 .await
                 .map_err(|_| RaknetError::ConnectionClosed)?;
         }

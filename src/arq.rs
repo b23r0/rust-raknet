@@ -150,7 +150,7 @@ impl FrameSetPacket {
             return Err(RaknetError::PacketParseError);
         }
 
-        let mut writer = RaknetWriter::new();
+        let mut writer = RaknetWriter::with_capacity(self._size()?);
         let mut id = 0x80 | NEEDS_B_AND_AS_FLAG;
 
         // Set the continuation bit for all fragments after the first.
@@ -449,28 +449,23 @@ impl RecvQ {
     }
 
     pub fn flush(&mut self, _peer_addr: &SocketAddr) -> Vec<FrameSetPacket> {
-        let mut ret = vec![];
+        let mut ret = Vec::new();
         let mut ordered_keys: Vec<(u8, u32)> = self.ordered_packets.keys().copied().collect();
         ordered_keys.sort_unstable();
 
         for (channel, index) in ordered_keys {
             let expected_index = self.last_ordered_indexes.entry(channel).or_default();
             if index == *expected_index {
-                let frame = self.ordered_packets[&(channel, index)].clone();
-                ret.push(frame);
-                self.ordered_packets.remove(&(channel, index));
-                *expected_index = index + 1;
+                if let Some(frame) = self.ordered_packets.remove(&(channel, index)) {
+                    ret.push(frame);
+                    *expected_index = index + 1;
+                }
             }
         }
 
-        let mut packets_keys: Vec<u32> = self.packets.keys().cloned().collect();
-        packets_keys.sort_unstable();
-
-        for sequence in packets_keys {
-            if let Some(frame) = self.packets.remove(&sequence) {
-                ret.push(frame);
-            }
-        }
+        let mut packets: Vec<_> = self.packets.drain().map(|(_, frame)| frame).collect();
+        packets.sort_unstable_by_key(|frame| frame.sequence_number);
+        ret.extend(packets);
         ret
     }
     pub fn get_ordered_packet(&self) -> usize {

@@ -16,6 +16,12 @@ impl RaknetWriter {
         Self::default()
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn write(&mut self, v: &[u8]) -> Result<()> {
         self.buf.put_slice(v);
         Ok(())
