@@ -43,6 +43,7 @@ mod datatype;
 pub mod error;
 mod fragment;
 mod log;
+mod nethernet;
 mod packet;
 mod server;
 mod socket;
@@ -50,6 +51,7 @@ mod utils;
 
 pub use crate::arq::Reliability;
 pub use crate::log::enable_raknet_log;
+pub use crate::nethernet::NetherNetProxy;
 pub use crate::server::*;
 pub use crate::socket::*;
 

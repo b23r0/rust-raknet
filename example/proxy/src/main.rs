@@ -62,7 +62,15 @@ async fn main() {
         let mut client1 = listener.accept().await.unwrap();
         let remote_address = remote_address.clone();
         tokio::spawn(async move {
-            let mut client2 = match RaknetSocket::connect(&remote_address.parse().unwrap()).await{
+            // Bedrock 26.52.3 advertises RakNet protocol 11 when run in legacy
+            // RakNet mode. Match the upstream handshake to the version the
+            // client successfully negotiated with this listener.
+            let mut client2 = match RaknetSocket::connect_with_version(
+                &remote_address.parse().unwrap(),
+                client1.raknet_version().unwrap(),
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     println!("connect remote raknet server faild : {:?}", e);

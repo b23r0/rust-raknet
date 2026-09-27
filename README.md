@@ -22,13 +22,14 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 * RTO Not Doubled (TCP/RTO Doubled)
 * Linux/Windows/Mac/BSD support
 * Compatible with Minecraft
+* NetherNet TCP signaling forwarding API
 
 # Get Started
 
 ```toml
 # Cargo.toml
 [dependencies]
-rust-raknet = "0.13"
+rust-raknet = "0.14"
 ```
 
 Documentation : https://docs.rs/rust-raknet/latest/rust_raknet/
@@ -83,9 +84,28 @@ The example/bedrock_ping program sends an unconnected RakNet ping and prints the
 
 This example covers server-list status discovery. Game login and gameplay packets are outside the crate's current APIs.
 
-# Publishing
+## Bedrock transport compatibility
 
-Bump the version in Cargo.toml, configure the repository secret CARGO_REGISTRY_TOKEN with a crates.io token, and publish a GitHub release to run the Cargo publish workflow.
+The `example/proxy` program is a RakNet/UDP proxy. It works with Bedrock servers configured as `transport=raknet`; it cannot accept the TCP/WebRTC transport that recent Bedrock Dedicated Server versions use by default. The RakNet proxy negotiates the upstream RakNet version accepted from its client.
+
+For servers configured as `transport=nethernet`, the library exposes `NetherNetProxy` to forward the HTTP signaling connection:
+
+```rust
+async fn start() -> std::io::Result<()> {
+    let proxy = rust_raknet::NetherNetProxy::bind(
+        "127.0.0.1:19144".parse().unwrap(),
+        "127.0.0.1:19142".parse().unwrap(),
+    )
+    .await?;
+    proxy.run().await
+}
+```
+
+The runnable example uses this API:
+
+    cargo run --manifest-path example/nethernet_proxy/Cargo.toml -- --listen 127.0.0.1:19144 --upstream 127.0.0.1:19142
+
+This API forwards only NetherNet's TCP signaling connection. After SDP signaling, Bedrock sends game traffic directly to the server over WebRTC; it does not pass through this proxy. The client's network must be able to reach the server's advertised ICE candidate. For the protocol flow and NAT guidance, see Mojang's [NetherNet signaling guide](https://github.com/Mojang/bedrock-protocol-docs/blob/main/additional_docs/NetherNetOnboardingGuide.md).
 
 # Benchmark
 
