@@ -109,17 +109,19 @@ This API forwards only NetherNet's TCP signaling connection. After SDP signaling
 
 # Benchmark
 
-Use Tcp to compare with this project. Set the server packet loss rate to 50%, the client connects to the server, and the server sends an 800-byte packet every 30ms, a total of 100 times. The client counts the delay time of each received data, and calculates the average time of receiving 100 times. The following results are obtained.
+The benchmark compares a TCP echo server with RakNet using `ReliableOrdered` packets. The client first measures request/echo round-trip latency, then sends a pipelined burst while receiving echoes concurrently. TCP uses length-prefixed records. See the [benchmark instructions](example/test_benchmark/README.md) for commands and options.
 
-Test code: https://github.com/b23r0/rust-raknet/blob/main/example/test_benchmark/src/main.rs
+Command used for these results: 20,000 measured 800-byte packets per run, 200 warmup rounds, and 300 sequential RTT samples; release build; three runs for each protocol and loss profile. The table reports the median of the three run summaries, with the throughput range in parentheses.
 
-Result:
+| Configured loss | TCP payload MiB/s (median, range) | RakNet payload MiB/s (median, range) | TCP RTT p50 / p95 / p99 | RakNet RTT p50 / p95 / p99 |
+| ---: | ---: | ---: | ---: | ---: |
+| 0% | 115.90 (102.45–116.26) | 14.33 (2.04–16.42) | 15.6 / 31.6 / 74.8 µs | 222.1 / 409.4 / 487.1 µs |
+| 1% | 17.64 (9.30–21.05) | 13.33 (0.99–14.45) | 74.3 / 294 / 4,588 µs | 84 / 279 / 86,390 µs |
+| 5% | 1.20 (1.19–1.49) | 13.77 (12.34–13.93) | 112 / 5,051 / 207,972 µs | 94 / 51,133 / 100,194 µs |
 
-![image]( https://github.com/b23r0/rust-raknet/blob/main/images/benchmark20220612.jpg)
+Measured on 2026-09-28 on an Intel Core i7-9700F (8 logical CPUs), Linux x86_64, and `rustc 1.98.1`. TCP and RakNet ran in a temporary isolated network namespace with `tc netem` on its loopback; MTU was 1,500 bytes and GSO/GRO were limited to one packet. The host loopback remained unchanged. Per-run qdisc counters confirmed approximately 1% and 5% drops. The 5% profile yielded 11.5× higher median RakNet payload throughput, while 0% favored TCP throughput; 1% results were close and varied between runs. These results describe this local echo workload, not Internet performance. MiB/s counts application payload in one direction and excludes protocol headers and acknowledgements. RTT values are medians of the three run-level percentiles; loss-induced tails are visible in p99.
 
-(June 12, 2022)
-
-In the network environment with high packet loss rate, this project can reduce the delay time by about 50% compared with TCP.
+Benchmark source: [example/test_benchmark/src/main.rs](example/test_benchmark/src/main.rs).
 
 # Contributing
 
@@ -131,15 +133,12 @@ Options :
 * Add an example of using rust-raknet
 * Supplement the documentation about using rust-raknet
 
-Thanks go to these wonderful people.
+Thanks to the contributors with commits in the repository history:
 
-<table>
-  <tbody>
-    <tr>
-      <td align="center"><a href="https://github.com/b23r0"><img src="https://avatars.githubusercontent.com/u/35518985?v=3?s=100" width="50px;" alt=""/><br /><sub><b>b23r0</b></sub></a></td>
-      <td align="center"><a href="https://github.com/nounfve"><img src="https://avatars.githubusercontent.com/u/73693057?v=3?s=100" width="50px;" alt=""/><br /><sub><b>nounfve</b></sub></a></td>
-    </tr>
-  </tbody>
-</table>
+* [b23r0](https://github.com/b23r0)
+* [nounfve](https://github.com/nounfve)
+* [mikhaillav](https://github.com/mikhaillav)
+* [AndreasHGK](https://github.com/AndreasHGK)
+* [minerj101](https://github.com/minerj101)
 
 Contributions of any kind are welcome! If you've ever wanted to contribute to open source, and a great cause, now is your chance!

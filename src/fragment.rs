@@ -47,20 +47,27 @@ impl Fragment {
             return Err(RaknetError::PacketParseError);
         }
 
-        let mut keys: Vec<u32> = self.frames.keys().copied().collect();
-        keys.sort_unstable();
-
-        let last_key = keys.last().ok_or(RaknetError::PacketParseError)?;
-        let sequence_number = self.frames[last_key].sequence_number;
-        let capacity = keys
-            .iter()
+        let last_index = self
+            .compound_size
+            .checked_sub(1)
+            .ok_or(RaknetError::PacketParseError)?;
+        let sequence_number = self
+            .frames
+            .get(&last_index)
+            .ok_or(RaknetError::PacketParseError)?
+            .sequence_number;
+        let capacity = (0..self.compound_size)
             .try_fold(0usize, |total, index| {
-                total.checked_add(self.frames[index].data.len())
+                total.checked_add(self.frames.get(&index)?.data.len())
             })
             .ok_or(RaknetError::PacketSizeExceedMTU)?;
         let mut data = Vec::with_capacity(capacity);
-        for index in keys {
-            data.extend_from_slice(&self.frames[&index].data);
+        for index in 0..self.compound_size {
+            let frame = self
+                .frames
+                .get(&index)
+                .ok_or(RaknetError::PacketParseError)?;
+            data.extend_from_slice(&frame.data);
         }
 
         let mut ret = FrameSetPacket::new(Reliability::from((self.flags & 224) >> 5)?, data);
@@ -73,13 +80,14 @@ impl Fragment {
 }
 
 #[derive(Default)]
-pub struct FragmentQ {
+pub(crate) struct FragmentQ {
     fragments: HashMap<u16, Fragment>,
 }
 
 impl FragmentQ {
-    pub fn insert(&mut self, frame: FrameSetPacket) {
-        let fragment = self.fragments.entry(frame.compound_id).or_insert_with(|| {
+    fn insert_frame(&mut self, frame: FrameSetPacket) -> u16 {
+        let compound_id = frame.compound_id;
+        let fragment = self.fragments.entry(compound_id).or_insert_with(|| {
             Fragment::new(
                 frame.flags,
                 frame.compound_size,
@@ -88,27 +96,25 @@ impl FragmentQ {
             )
         });
         fragment.insert(frame);
+        compound_id
     }
 
-    pub fn flush(&mut self) -> Result<Vec<FrameSetPacket>> {
-        let mut ret = vec![];
-
-        let completed: Vec<u16> = self
-            .fragments
-            .iter()
-            .filter_map(|(&compound_id, fragment)| fragment.full().then_some(compound_id))
-            .collect();
-
-        for compound_id in completed {
-            if let Some(fragment) = self.fragments.remove(&compound_id) {
-                ret.push(fragment.merge()?);
-            }
+    pub(crate) fn insert_and_take_completed(
+        &mut self,
+        frame: FrameSetPacket,
+    ) -> Result<Option<FrameSetPacket>> {
+        let compound_id = self.insert_frame(frame);
+        if self.fragments.get(&compound_id).is_some_and(Fragment::full) {
+            self.fragments
+                .remove(&compound_id)
+                .map(|fragment| fragment.merge())
+                .transpose()
+        } else {
+            Ok(None)
         }
-
-        Ok(ret)
     }
 
-    pub fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.fragments.len()
     }
 }

@@ -7,18 +7,30 @@ use std::{
 
 use rust_raknet::{RaknetListener, RaknetSocket, Reliability};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    time::sleep,
 };
 
-const PACKET_COUNT: usize = 100;
-const PAYLOAD_SIZE: usize = 800;
+const DEFAULT_PACKET_COUNT: usize = 10_000;
+const DEFAULT_PAYLOAD_SIZE: usize = 800;
+const DEFAULT_WARMUP_COUNT: usize = 100;
+const DEFAULT_LATENCY_SAMPLES: usize = 100;
+const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+const TCP_RECORD_HEADER_SIZE: usize = std::mem::size_of::<u32>();
 
 #[derive(Clone, Copy)]
 enum Protocol {
     Tcp,
     RakNet,
+}
+
+impl Protocol {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "TCP",
+            Self::RakNet => "RakNet",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -27,104 +39,303 @@ enum Mode {
     Server,
 }
 
+struct Config {
+    protocol: Protocol,
+    mode: Mode,
+    address: String,
+    packet_count: usize,
+    payload_size: usize,
+    warmup_count: usize,
+    latency_samples: usize,
+}
+
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
 }
 
-fn parse_args() -> Result<(Protocol, Mode, String), Box<dyn Error>> {
+fn set_once(slot: &mut Option<String>, value: String, option: &str) -> io::Result<()> {
+    if slot.is_some() {
+        return Err(invalid_input(format!(
+            "{option} may only be specified once"
+        )));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn parse_count(value: Option<&str>, option: &str, default: usize) -> io::Result<usize> {
+    value.map_or(Ok(default), |value| {
+        value
+            .parse()
+            .map_err(|_| invalid_input(format!("{option} must be a non-negative integer")))
+    })
+}
+
+fn print_help() {
+    println!(
+        "Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT> [--packets N] [--payload-size BYTES] [--warmup N] [--latency-samples N]\n\n\
+         Client defaults: --packets {DEFAULT_PACKET_COUNT}, --payload-size {DEFAULT_PAYLOAD_SIZE}, --warmup {DEFAULT_WARMUP_COUNT}, --latency-samples {DEFAULT_LATENCY_SAMPLES}.\n\
+         The client measures request/echo RTT samples, then pipelined echo throughput.\n\
+         For TCP, each record is length-prefixed. RakNet uses ReliableOrdered packets."
+    );
+}
+
+fn parse_args() -> io::Result<Config> {
     let mut protocol = None;
     let mut mode = None;
     let mut address = None;
+    let mut packet_count = None;
+    let mut payload_size = None;
+    let mut warmup_count = None;
+    let mut latency_samples = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(option) = args.next() {
         if option == "-h" || option == "--help" {
-            println!("Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT>");
+            print_help();
             std::process::exit(0);
         }
 
         let value = args
             .next()
             .ok_or_else(|| invalid_input(format!("missing value for {option}")))?;
-        let destination = match option.as_str() {
-            "-p" | "--protocol" => &mut protocol,
-            "-t" | "--type" => &mut mode,
-            "-a" | "--address" => &mut address,
-            _ => return Err(invalid_input(format!("unknown option: {option}")).into()),
-        };
-        if destination.replace(value).is_some() {
-            return Err(invalid_input(format!("{option} may only be specified once")).into());
+        match option.as_str() {
+            "-p" | "--protocol" => set_once(&mut protocol, value, &option)?,
+            "-t" | "--type" => set_once(&mut mode, value, &option)?,
+            "-a" | "--address" => set_once(&mut address, value, &option)?,
+            "-n" | "--packets" => set_once(&mut packet_count, value, &option)?,
+            "--payload-size" => set_once(&mut payload_size, value, &option)?,
+            "--warmup" => set_once(&mut warmup_count, value, &option)?,
+            "--latency-samples" => set_once(&mut latency_samples, value, &option)?,
+            _ => return Err(invalid_input(format!("unknown option: {option}"))),
         }
     }
 
     let protocol = match protocol.as_deref() {
         Some("tcp") => Protocol::Tcp,
         Some("raknet") => Protocol::RakNet,
-        Some(value) => return Err(invalid_input(format!("unsupported protocol: {value}")).into()),
-        None => return Err(invalid_input("--protocol is required").into()),
+        Some(value) => return Err(invalid_input(format!("unsupported protocol: {value}"))),
+        None => return Err(invalid_input("--protocol is required")),
     };
     let mode = match mode.as_deref() {
         Some("client") => Mode::Client,
         Some("server") => Mode::Server,
-        Some(value) => return Err(invalid_input(format!("unsupported type: {value}")).into()),
-        None => return Err(invalid_input("--type is required").into()),
+        Some(value) => return Err(invalid_input(format!("unsupported type: {value}"))),
+        None => return Err(invalid_input("--type is required")),
     };
     let address = address.ok_or_else(|| invalid_input("--address is required"))?;
+    let packet_count = parse_count(packet_count.as_deref(), "--packets", DEFAULT_PACKET_COUNT)?;
+    let payload_size = parse_count(
+        payload_size.as_deref(),
+        "--payload-size",
+        DEFAULT_PAYLOAD_SIZE,
+    )?;
+    let warmup_count = parse_count(warmup_count.as_deref(), "--warmup", DEFAULT_WARMUP_COUNT)?;
+    let latency_samples = parse_count(
+        latency_samples.as_deref(),
+        "--latency-samples",
+        DEFAULT_LATENCY_SAMPLES,
+    )?;
 
-    Ok((protocol, mode, address))
-}
-
-fn print_latency_summary(latencies: &[u128]) {
-    let total: u128 = latencies.iter().sum();
-    for latency in latencies {
-        println!("latency: {latency} ms");
+    if packet_count == 0 {
+        return Err(invalid_input("--packets must be greater than zero"));
     }
-    println!("average: {} ms", total / latencies.len() as u128);
+    if payload_size == 0 || payload_size > MAX_PAYLOAD_SIZE {
+        return Err(invalid_input(format!(
+            "--payload-size must be between 1 and {MAX_PAYLOAD_SIZE} bytes"
+        )));
+    }
+    if packet_count.checked_mul(payload_size).is_none() {
+        return Err(invalid_input(
+            "packet count times payload size is too large",
+        ));
+    }
+
+    Ok(Config {
+        protocol,
+        mode,
+        address,
+        packet_count,
+        payload_size,
+        warmup_count,
+        latency_samples,
+    })
 }
 
-async fn run_tcp_client(address: &str) -> Result<(), Box<dyn Error>> {
-    let mut client = TcpStream::connect(address).await?;
-    let mut latencies = Vec::with_capacity(PACKET_COUNT);
-    let mut buffer = [0; PAYLOAD_SIZE];
+fn ensure_echo(actual: &[u8], expected: &[u8]) -> io::Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "echoed payload differs from the sent payload",
+        ))
+    }
+}
 
-    for _ in 0..PACKET_COUNT {
+fn encode_tcp_record(payload: &[u8]) -> Vec<u8> {
+    let mut record = Vec::with_capacity(TCP_RECORD_HEADER_SIZE + payload.len());
+    record.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    record.extend_from_slice(payload);
+    record
+}
+
+async fn read_tcp_record<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    expected_payload: &[u8],
+    response: &mut Vec<u8>,
+) -> io::Result<()> {
+    let mut header = [0; TCP_RECORD_HEADER_SIZE];
+    reader.read_exact(&mut header).await?;
+    let payload_size = u32::from_be_bytes(header) as usize;
+    if payload_size != expected_payload.len() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "expected {} echoed bytes, received {payload_size}",
+                expected_payload.len()
+            ),
+        ));
+    }
+
+    response.resize(payload_size, 0);
+    reader.read_exact(response).await?;
+    ensure_echo(response, expected_payload)
+}
+
+async fn tcp_round_trip(
+    client: &mut TcpStream,
+    record: &[u8],
+    payload: &[u8],
+    response: &mut Vec<u8>,
+) -> io::Result<()> {
+    client.write_all(record).await?;
+    read_tcp_record(client, payload, response).await
+}
+
+async fn echo_tcp_client(mut client: TcpStream) -> io::Result<()> {
+    client.set_nodelay(true)?;
+    loop {
+        let mut header = [0; TCP_RECORD_HEADER_SIZE];
+        match client.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(()),
+            Err(error) => return Err(error),
+        }
+
+        let payload_size = u32::from_be_bytes(header) as usize;
+        if payload_size > MAX_PAYLOAD_SIZE {
+            return Err(invalid_input(format!(
+                "TCP record exceeds the {MAX_PAYLOAD_SIZE}-byte benchmark limit"
+            )));
+        }
+
+        let mut payload = vec![0; payload_size];
+        client.read_exact(&mut payload).await?;
+        client.write_all(&header).await?;
+        client.write_all(&payload).await?;
+    }
+}
+
+async fn run_tcp_client(config: &Config) -> Result<(), Box<dyn Error>> {
+    let mut client = TcpStream::connect(&config.address).await?;
+    client.set_nodelay(true)?;
+
+    let payload = vec![0xfe; config.payload_size];
+    let record = encode_tcp_record(&payload);
+    let mut response = Vec::with_capacity(config.payload_size);
+
+    for _ in 0..config.warmup_count {
+        tcp_round_trip(&mut client, &record, &payload, &mut response).await?;
+    }
+
+    let mut latencies = Vec::with_capacity(config.latency_samples);
+    for _ in 0..config.latency_samples {
         let started = Instant::now();
-        client.read_exact(&mut buffer).await?;
-        latencies.push(started.elapsed().as_millis());
+        tcp_round_trip(&mut client, &record, &payload, &mut response).await?;
+        latencies.push(started.elapsed());
     }
 
-    print_latency_summary(&latencies);
+    let started = Instant::now();
+    let (mut reader, mut writer) = client.into_split();
+    let send_burst = async {
+        for _ in 0..config.packet_count {
+            writer.write_all(&record).await?;
+        }
+        Ok::<(), io::Error>(())
+    };
+    let receive_burst = async {
+        for _ in 0..config.packet_count {
+            read_tcp_record(&mut reader, &payload, &mut response).await?;
+        }
+        Ok::<(), io::Error>(())
+    };
+    let (send_result, receive_result) = tokio::join!(send_burst, receive_burst);
+    send_result?;
+    receive_result?;
+    let elapsed = started.elapsed();
+
+    print_summary(config, &latencies, elapsed);
     Ok(())
 }
 
 async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(address).await?;
+    println!("TCP echo benchmark listening on {address}");
+
     loop {
-        let (mut client, _) = listener.accept().await?;
+        let (client, peer) = listener.accept().await?;
         tokio::spawn(async move {
-            let payload = [0; PAYLOAD_SIZE];
-            for _ in 0..PACKET_COUNT {
-                sleep(Duration::from_millis(30)).await;
-                if client.write_all(&payload).await.is_err() {
-                    break;
-                }
+            if let Err(error) = echo_tcp_client(client).await {
+                eprintln!("TCP benchmark connection from {peer} ended: {error}");
             }
         });
     }
 }
 
-async fn run_raknet_client(address: &str) -> Result<(), Box<dyn Error>> {
-    let address: SocketAddr = address.parse()?;
-    let client = RaknetSocket::connect(&address).await?;
-    let mut latencies = Vec::with_capacity(PACKET_COUNT);
+async fn raknet_round_trip(client: &RaknetSocket, payload: &[u8]) -> Result<(), Box<dyn Error>> {
+    client.send(payload, Reliability::ReliableOrdered).await?;
+    let response = client.recv().await?;
+    ensure_echo(&response, payload)?;
+    Ok(())
+}
 
-    for _ in 0..PACKET_COUNT {
-        let started = Instant::now();
-        client.recv().await?;
-        latencies.push(started.elapsed().as_millis());
+async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error>> {
+    let address: SocketAddr = config.address.parse()?;
+    let client = RaknetSocket::connect(&address).await?;
+    let payload = vec![0xfe; config.payload_size];
+
+    for _ in 0..config.warmup_count {
+        raknet_round_trip(&client, &payload).await?;
     }
 
-    print_latency_summary(&latencies);
+    let mut latencies = Vec::with_capacity(config.latency_samples);
+    for _ in 0..config.latency_samples {
+        let started = Instant::now();
+        raknet_round_trip(&client, &payload).await?;
+        latencies.push(started.elapsed());
+    }
+
+    let started = Instant::now();
+    let send_burst = async {
+        for _ in 0..config.packet_count {
+            client.send(&payload, Reliability::ReliableOrdered).await?;
+        }
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let receive_burst = async {
+        for _ in 0..config.packet_count {
+            let response = client.recv().await?;
+            ensure_echo(&response, &payload)?;
+        }
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (send_result, receive_result) = tokio::join!(send_burst, receive_burst);
+    send_result?;
+    receive_result?;
+    let elapsed = started.elapsed();
+
+    print_summary(config, &latencies, elapsed);
     Ok(())
 }
 
@@ -132,13 +343,16 @@ async fn run_raknet_server(address: &str) -> Result<(), Box<dyn Error>> {
     let address: SocketAddr = address.parse()?;
     let mut listener = RaknetListener::bind(&address).await?;
     listener.listen().await;
+    println!("RakNet echo benchmark listening on {address}");
 
     loop {
         let client = listener.accept().await?;
         tokio::spawn(async move {
-            let payload = [0xfe; PAYLOAD_SIZE];
-            for _ in 0..PACKET_COUNT {
-                sleep(Duration::from_millis(30)).await;
+            loop {
+                let payload = match client.recv().await {
+                    Ok(payload) => payload,
+                    Err(_) => break,
+                };
                 if client
                     .send(&payload, Reliability::ReliableOrdered)
                     .await
@@ -151,13 +365,71 @@ async fn run_raknet_server(address: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn percentile(sorted: &[Duration], percent: usize) -> Duration {
+    let index = sorted
+        .len()
+        .saturating_mul(percent)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    sorted[index]
+}
+
+fn print_summary(config: &Config, latencies: &[Duration], elapsed: Duration) {
+    let seconds = elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+    let payload_bytes = config.packet_count * config.payload_size;
+
+    println!("Protocol: {}", config.protocol.name());
+    println!("Packets: {}", config.packet_count);
+    println!("Payload size: {} bytes", config.payload_size);
+    println!("Warmup rounds: {}", config.warmup_count);
+    println!("RTT samples: {}", latencies.len());
+    println!("Elapsed: {:.3} s", seconds);
+    println!(
+        "Echo payload throughput (per direction): {:.2} MiB/s",
+        payload_bytes as f64 / 1_048_576.0 / seconds
+    );
+    println!(
+        "Completed echo rate: {:.0} packets/s",
+        config.packet_count as f64 / seconds
+    );
+
+    if latencies.is_empty() {
+        println!("RTT: no samples (set --latency-samples to collect them)");
+        return;
+    }
+
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    let average_micros =
+        sorted.iter().map(Duration::as_secs_f64).sum::<f64>() * 1_000_000.0 / sorted.len() as f64;
+    println!("RTT average: {average_micros:.1} us");
+    println!(
+        "RTT p50: {:.1} us",
+        percentile(&sorted, 50).as_secs_f64() * 1_000_000.0
+    );
+    println!(
+        "RTT p95: {:.1} us",
+        percentile(&sorted, 95).as_secs_f64() * 1_000_000.0
+    );
+    println!(
+        "RTT p99: {:.1} us",
+        percentile(&sorted, 99).as_secs_f64() * 1_000_000.0
+    );
+    println!("RTT min: {:.1} us", sorted[0].as_secs_f64() * 1_000_000.0);
+    println!(
+        "RTT max: {:.1} us",
+        sorted[sorted.len() - 1].as_secs_f64() * 1_000_000.0
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let (protocol, mode, address) = parse_args()?;
-    match (protocol, mode) {
-        (Protocol::Tcp, Mode::Client) => run_tcp_client(&address).await,
-        (Protocol::Tcp, Mode::Server) => run_tcp_server(&address).await,
-        (Protocol::RakNet, Mode::Client) => run_raknet_client(&address).await,
-        (Protocol::RakNet, Mode::Server) => run_raknet_server(&address).await,
+    let config = parse_args()?;
+    match (config.protocol, config.mode) {
+        (Protocol::Tcp, Mode::Client) => run_tcp_client(&config).await,
+        (Protocol::Tcp, Mode::Server) => run_tcp_server(&config.address).await,
+        (Protocol::RakNet, Mode::Client) => run_raknet_client(&config).await,
+        (Protocol::RakNet, Mode::Server) => run_raknet_server(&config.address).await,
     }
 }

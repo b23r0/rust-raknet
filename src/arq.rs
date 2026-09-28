@@ -1,4 +1,7 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
+};
 
 use crate::{datatype::*, error::*, fragment::FragmentQ, raknet_log_debug, utils::*};
 
@@ -414,8 +417,7 @@ impl RecvQ {
                 }
 
                 if frame.is_fragment() {
-                    self.fragment_queue.insert(frame);
-                    for fragment in self.fragment_queue.flush()? {
+                    if let Some(fragment) = self.fragment_queue.insert_and_take_completed(frame)? {
                         self.ordered_packets
                             .entry((fragment.order_channel, fragment.ordered_frame_index))
                             .or_insert(fragment);
@@ -494,7 +496,7 @@ pub struct SendQ {
     ordered_frame_indexes: HashMap<u8, u32>,
     compound_id: u16,
     // Each entry stores a frame, send state, last send time, retry count, and prior sequence IDs.
-    packets: Vec<FrameSetPacket>,
+    packets: VecDeque<FrameSetPacket>,
     rto: i64,
     srtt: i64,
     sent_packet: Vec<(FrameSetPacket, bool, i64, u32, Vec<u32>)>,
@@ -502,6 +504,7 @@ pub struct SendQ {
 
 impl SendQ {
     pub const DEFAULT_TIMEOUT_MILLS: i64 = 50;
+    const MAX_IN_FLIGHT_PACKETS: usize = 64;
 
     const RTO_UBOUND: i64 = 12000;
     const RTO_LBOUND: i64 = 50;
@@ -511,7 +514,7 @@ impl SendQ {
             mtu,
             ack_sequence_number: 0,
             sequence_number: 0,
-            packets: vec![],
+            packets: VecDeque::new(),
             sent_packet: vec![],
             reliable_frame_index: 0,
             sequenced_frame_indexes: HashMap::new(),
@@ -547,7 +550,7 @@ impl SendQ {
                 }
 
                 let frame = FrameSetPacket::new(reliability, buf.to_vec());
-                self.packets.push(frame);
+                self.packets.push_back(frame);
             }
             Reliability::UnreliableSequenced => {
                 if buf.len() > max_payload {
@@ -572,7 +575,7 @@ impl SendQ {
                 frame.order_channel = order_channel;
                 frame.ordered_frame_index = ordered_frame_index;
                 frame.sequenced_frame_index = sequenced_frame_index;
-                self.packets.push(frame);
+                self.packets.push_back(frame);
             }
             Reliability::Reliable => {
                 if buf.len() > max_payload {
@@ -581,7 +584,7 @@ impl SendQ {
 
                 let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                 frame.reliable_frame_index = self.reliable_frame_index;
-                self.packets.push(frame);
+                self.packets.push_back(frame);
                 self.reliable_frame_index += 1;
             }
             Reliability::ReliableOrdered => {
@@ -591,7 +594,7 @@ impl SendQ {
                     frame.reliable_frame_index = self.reliable_frame_index;
                     frame.ordered_frame_index =
                         *self.ordered_frame_indexes.entry(order_channel).or_default();
-                    self.packets.push(frame);
+                    self.packets.push_back(frame);
                     self.reliable_frame_index += 1;
                 } else {
                     let compound_size = buf.len().div_ceil(max_payload);
@@ -609,7 +612,7 @@ impl SendQ {
                         frame.order_channel = order_channel;
                         frame.reliable_frame_index = self.reliable_frame_index;
                         frame.ordered_frame_index = ordered_frame_index;
-                        self.packets.push(frame);
+                        self.packets.push_back(frame);
                         self.reliable_frame_index += 1;
                     }
                     self.compound_id += 1;
@@ -640,7 +643,7 @@ impl SendQ {
                 frame.reliable_frame_index = self.reliable_frame_index;
                 frame.sequenced_frame_index = sequenced_frame_index;
                 frame.ordered_frame_index = ordered_frame_index;
-                self.packets.push(frame);
+                self.packets.push_back(frame);
                 self.reliable_frame_index += 1;
             }
         };
@@ -683,6 +686,7 @@ impl SendQ {
                 );
                 item.0.sequence_number = self.sequence_number;
                 self.sequence_number += 1;
+                item.1 = false;
                 item.2 = tick;
                 item.3 += 1;
                 item.4.push(item.0.sequence_number);
@@ -691,13 +695,13 @@ impl SendQ {
     }
 
     pub fn ack(&mut self, sequence: u32, tick: i64) {
-        if sequence != 0 && sequence != self.ack_sequence_number + 1 {
-            for i in self.ack_sequence_number + 1..sequence {
-                self.nack(i, tick);
+        if sequence > self.ack_sequence_number.saturating_add(1) {
+            for missing in self.ack_sequence_number.saturating_add(1)..sequence {
+                self.nack(missing, tick);
             }
         }
 
-        self.ack_sequence_number = sequence;
+        self.ack_sequence_number = self.ack_sequence_number.max(sequence);
 
         let mut rtts = vec![];
 
@@ -739,37 +743,42 @@ impl SendQ {
     pub fn flush(&mut self, tick: i64, peer_addr: &SocketAddr) -> Vec<FrameSetPacket> {
         self.tick(tick);
 
-        let mut ret = vec![];
+        let mut ret = Vec::new();
+        self.sent_packet
+            .sort_unstable_by_key(|packet| packet.0.sequence_number);
 
-        if !self.sent_packet.is_empty() {
-            self.sent_packet
-                .sort_by(|x, y| x.0.sequence_number.cmp(&y.0.sequence_number));
-
-            for i in 0..self.sent_packet.len() {
-                let p = &mut self.sent_packet[i];
-                if !p.1 {
-                    raknet_log_debug!(
-                        "{} , packet {}-{}-{} resend {} times",
-                        peer_addr,
-                        p.0.sequence_number,
-                        p.0.reliable_frame_index,
-                        p.0.ordered_frame_index,
-                        p.3 + 1
-                    );
-                    ret.push(p.0.clone());
-                    p.1 = true;
-                    p.2 = tick;
-                    p.3 += 1;
-                }
+        for packet in &mut self.sent_packet {
+            if !packet.1 {
+                raknet_log_debug!(
+                    "{} , packet {}-{}-{} resend {} times",
+                    peer_addr,
+                    packet.0.sequence_number,
+                    packet.0.reliable_frame_index,
+                    packet.0.ordered_frame_index,
+                    packet.3 + 1
+                );
+                ret.push(packet.0.clone());
+                packet.1 = true;
+                packet.2 = tick;
+                packet.3 += 1;
             }
-            return ret;
         }
 
-        for mut packet in self.packets.drain(..) {
+        let queued_count = self.packets.len();
+        for _ in 0..queued_count {
+            let Some(mut packet) = self.packets.pop_front() else {
+                break;
+            };
+            let reliable = packet.is_reliable().unwrap_or(false);
+            if reliable && self.sent_packet.len() >= Self::MAX_IN_FLIGHT_PACKETS {
+                self.packets.push_back(packet);
+                continue;
+            }
+
             packet.sequence_number = self.sequence_number;
             self.sequence_number += 1;
 
-            if packet.is_reliable().unwrap_or(false) {
+            if reliable {
                 ret.push(packet.clone());
                 let sequence_number = packet.sequence_number;
                 self.sent_packet
@@ -983,6 +992,54 @@ async fn test_sendq() {
 
     let ret = s.flush(300, &sockaddr);
     assert!(ret.is_empty());
+}
+
+#[test]
+fn send_queue_pipelines_reliable_packets_with_a_bounded_window() {
+    let mut sendq = SendQ::new(1500);
+    let peer = "127.0.0.1:8000".parse().unwrap();
+
+    for index in 0..SendQ::MAX_IN_FLIGHT_PACKETS + 1 {
+        sendq
+            .insert(Reliability::ReliableOrdered, &[0xfe, index as u8])
+            .unwrap();
+        let sent = sendq.flush(0, &peer);
+        if index < SendQ::MAX_IN_FLIGHT_PACKETS {
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].ordered_frame_index, index as u32);
+        } else {
+            assert!(sent.is_empty());
+        }
+    }
+
+    assert_eq!(sendq.get_sent_queue_size(), SendQ::MAX_IN_FLIGHT_PACKETS);
+    assert_eq!(sendq.get_reliable_queue_size(), 1);
+
+    sendq.ack(0, 1);
+    let sent = sendq.flush(1, &peer);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].ordered_frame_index,
+        SendQ::MAX_IN_FLIGHT_PACKETS as u32
+    );
+    assert_eq!(sendq.get_sent_queue_size(), SendQ::MAX_IN_FLIGHT_PACKETS);
+    assert_eq!(sendq.get_reliable_queue_size(), 0);
+}
+
+#[test]
+fn send_queue_retransmits_immediately_after_nack() {
+    let mut sendq = SendQ::new(1500);
+    let peer = "127.0.0.1:8000".parse().unwrap();
+    sendq.insert(Reliability::Reliable, &[0xfe]).unwrap();
+
+    let first = sendq.flush(0, &peer);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].sequence_number, 0);
+
+    sendq.nack(0, 1);
+    let retransmitted = sendq.flush(1, &peer);
+    assert_eq!(retransmitted.len(), 1);
+    assert_eq!(retransmitted[0].sequence_number, 1);
 }
 
 #[tokio::test]

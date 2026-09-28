@@ -159,6 +159,23 @@ impl RaknetSocket {
         Ok(true)
     }
 
+    async fn enqueue_frames(
+        frames: Vec<FrameSetPacket>,
+        sender: &Sender<(Vec<u8>, SocketAddr, bool, u8)>,
+        peer_addr: SocketAddr,
+        enable_loss: bool,
+        loss_rate: u8,
+    ) -> Result<()> {
+        for frame in frames {
+            let data = frame.serialize()?;
+            sender
+                .send((data, peer_addr, enable_loss, loss_rate))
+                .await
+                .map_err(|_| RaknetError::ConnectionClosed)?;
+        }
+        Ok(())
+    }
+
     async fn sendto(
         s: &UdpSocket,
         buf: &[u8],
@@ -442,6 +459,7 @@ impl RaknetSocket {
         let local_addr = self.local_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
+        let sender = self.sender.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         let incomming_notify = self.incomming_notifier.clone();
         let s = s.clone();
@@ -503,11 +521,25 @@ impl RaknetSocket {
                         }
                     };
                     let now = cur_timestamp_millis();
-                    let mut sendq = sendq.write().await;
-                    for (start, end) in ack.sequences {
-                        for sequence in start..=end {
-                            sendq.ack(sequence, now);
+                    let outgoing_frames = {
+                        let mut sendq = sendq.write().await;
+                        for (start, end) in ack.sequences {
+                            for sequence in start..=end {
+                                sendq.ack(sequence, now);
+                            }
                         }
+                        sendq.flush(now, &peer_addr)
+                    };
+                    if let Err(error) = RaknetSocket::enqueue_frames(
+                        outgoing_frames,
+                        &sender,
+                        peer_addr,
+                        enable_loss.load(Ordering::Relaxed),
+                        loss_rate.load(Ordering::Relaxed),
+                    )
+                    .await
+                    {
+                        raknet_log_debug!("failed to queue frames after ACK: {}", error);
                     }
                     continue;
                 }
@@ -521,11 +553,25 @@ impl RaknetSocket {
                         }
                     };
                     let now = cur_timestamp_millis();
-                    let mut sendq = sendq.write().await;
-                    for (start, end) in nack.sequences {
-                        for sequence in start..=end {
-                            sendq.nack(sequence, now);
+                    let outgoing_frames = {
+                        let mut sendq = sendq.write().await;
+                        for (start, end) in nack.sequences {
+                            for sequence in start..=end {
+                                sendq.nack(sequence, now);
+                            }
                         }
+                        sendq.flush(now, &peer_addr)
+                    };
+                    if let Err(error) = RaknetSocket::enqueue_frames(
+                        outgoing_frames,
+                        &sender,
+                        peer_addr,
+                        enable_loss.load(Ordering::Relaxed),
+                        loss_rate.load(Ordering::Relaxed),
+                    )
+                    .await
+                    {
+                        raknet_log_debug!("failed to queue frames after NACK: {}", error);
                     }
                     continue;
                 }
@@ -916,17 +962,14 @@ impl RaknetSocket {
             sendq.insert_with_order_channel(reliability, buf, order_channel)?;
             sendq.flush(cur_timestamp_millis(), &self.peer_addr)
         };
-        let sender = self.sender.clone();
-        let enable_loss = self.enable_loss.load(Ordering::Relaxed);
-        let loss_rate = self.loss_rate.load(Ordering::Relaxed);
-        for frame in frames {
-            let data = frame.serialize()?;
-            sender
-                .send((data, self.peer_addr, enable_loss, loss_rate))
-                .await
-                .map_err(|_| RaknetError::ConnectionClosed)?;
-        }
-        Ok(())
+        RaknetSocket::enqueue_frames(
+            frames,
+            &self.sender,
+            self.peer_addr,
+            self.enable_loss.load(Ordering::Relaxed),
+            self.loss_rate.load(Ordering::Relaxed),
+        )
+        .await
     }
 
     /// Wait until all reliable packets have been acknowledged.
