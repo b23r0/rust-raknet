@@ -117,37 +117,39 @@ Receive reordering is limited to 65,536 reliable indexes and 64 MiB of ordered p
 
 # Benchmark
 
-Measured on **2026-09-30** using the optimized code in this tree, with unchanged 0.14.2 ([`5658a98`](https://github.com/b23r0/rust-raknet/commit/5658a982d19f41014ddb8d78c2fdf5fca9314acb)) as the baseline. RakNet uses `ReliableOrdered`; TCP uses length-prefixed records with `TCP_NODELAY`. The client measures sequential request/echo RTT, then sends a pipelined burst while receiving echoes concurrently.
+Measured on **2026-09-30**, comparing the RakNet implementation in this tree with TCP. RakNet uses `ReliableOrdered`; TCP uses length-prefixed records with `TCP_NODELAY`. The client measures sequential request/echo RTT, then sends a pipelined burst while receiving echoes concurrently.
 
 Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1, Tokio 1.53.1, release builds. Network tests ran in a private user/network namespace with `tc netem` applied only to its loopback. MTU was 1,500 bytes, with GSO/GRO aggregation limited to one packet. The host network configuration was unchanged.
 
 ### Throughput
 
-MiB/s counts echoed application payload **per direction**, excluding headers and ACKs. Each run used 100 warmup rounds and 300 RTT samples before its measured burst. RakNet values are medians of three successful runs, except the baseline's 1% loss result, which has two successful runs. Optimized ranges are shown in parentheses. **TCP has one control run per profile**, so its values are single observations.
+**Higher is better.** Throughput is measured in MiB/s (1 MiB = 1,048,576 bytes).
 
-| Network profile | Payload / burst messages | TCP (single run) | Baseline RakNet (median) | Optimized RakNet (median, range) |
-| --- | ---: | ---: | ---: | ---: |
-| 0% loss | 800 B / 20,000 | 114.83 | 11.58 | **75.28** (74.27–75.74) |
-| 1% loss | 800 B / 20,000 | 19.89 | 12.79 | **74.94** (71.74–78.15) |
-| 5% loss | 800 B / 20,000 | 1.07 | 9.87 | **68.86** (47.49–73.01) |
-| 0% loss, small packets | 64 B / 30,000 | 10.10 | 0.42 | **4.02** (3.91–5.40) |
-| 0% loss, fragmented messages | 4,096 B / 5,000 | 262.76 | 9.72 | **86.64** (83.17–93.61) |
-| 1% loss + 5 ms each way | 800 B / 3,000 | 1.04 | 1.77 | **4.46** (4.26–4.56) |
+MiB/s counts echoed application payload **per direction**, excluding headers and ACKs. Each run used 100 warmup rounds and 300 RTT samples before its measured burst. RakNet values are medians of three successful runs, with ranges shown in parentheses. **TCP has one control run per profile**, so its values are single observations.
 
-The optimized version completed **18/18** throughput runs; the baseline completed **17/18**, with one `ConnectionClosed` failure after 62.2 seconds at 1% loss. All six TCP controls completed. The baseline failure remains in the [raw results](docs/validation-2026-09-30/comparison.jsonl).
+| Network profile | Payload size / burst count | TCP throughput (single run) | RakNet throughput (median, range) |
+| --- | ---: | ---: | ---: |
+| 0% loss | 800 B / 20,000 messages | 114.83 MiB/s | **75.28 MiB/s** (74.27–75.74 MiB/s) |
+| 1% loss | 800 B / 20,000 messages | 19.89 MiB/s | **74.94 MiB/s** (71.74–78.15 MiB/s) |
+| 5% loss | 800 B / 20,000 messages | 1.07 MiB/s | **68.86 MiB/s** (47.49–73.01 MiB/s) |
+| 0% loss, small packets | 64 B / 30,000 messages | 10.10 MiB/s | **4.02 MiB/s** (3.91–5.40 MiB/s) |
+| 0% loss, fragmented messages | 4,096 B / 5,000 messages | 262.76 MiB/s | **86.64 MiB/s** (83.17–93.61 MiB/s) |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s | **4.46 MiB/s** (4.26–4.56 MiB/s) |
 
-Across these six profiles, optimized RakNet's median throughput was 2.52–9.57× the baseline's successful-run median. Aggregate CPU time and peak RSS were also lower in each profile. For the 800-byte, 0% loss case, CPU time decreased from 2.30 to 0.64 seconds and aggregate peak RSS from 16,616 to 9,752 KiB. TCP was faster in the clean, small-packet, and fragmented loopback controls.
+RakNet completed **18/18** throughput runs, and TCP completed all six control runs. See the [raw results](docs/validation-2026-09-30/comparison.jsonl) for the individual measurements.
 
 ### Latency
 
-The separate focused checks use fixed client/server CPU affinities. The clean check has five runs of 10,000 measured RTTs per RakNet revision after 1,000 warmups; the delayed 1% loss check has three runs of 2,000 RTTs after 100 warmups. RakNet entries below are medians of the **run-level percentiles**; each TCP entry is one control run with the same sample count per run.
+**Lower is better.** RTT is round-trip latency; µs means microseconds and ms means milliseconds (1 ms = 1,000 µs). Each cell lists p50 / p95 / p99 in that order.
 
-| Profile; RTT p50 / p95 / p99 | TCP (single run) | Baseline RakNet | Optimized RakNet |
-| --- | ---: | ---: | ---: |
-| 0% loss (µs) | 16.2 / 30.7 / 82.0 | 25.6 / 48.7 / 200.2 | 25.6 / 43.3 / 128.1 |
-| 1% loss + 5 ms each way (ms) | 10.361 / 13.332 / 221.831 | 10.451 / 12.729 / 83.805 | 10.431 / 12.902 / 77.670 |
+The separate focused checks use fixed client/server CPU affinities. The clean check has five RakNet runs of 10,000 measured RTTs after 1,000 warmups; the delayed 1% loss check has three runs of 2,000 RTTs after 100 warmups. RakNet entries below are medians of the **run-level percentiles**; each TCP entry is one control run with the same sample count per run.
 
-Clean median RTT was unchanged at 25.6 µs. In the delayed loss check, optimized p99 was lower, while p95 was 0.173 ms higher with overlapping run ranges. Random loss and scheduling affect tails; these measurements do not establish that every latency percentile improves.
+| Network profile | TCP RTT (single run) | RakNet RTT |
+| --- | ---: | ---: |
+| 0% loss | 16.2 µs / 30.7 µs / 82.0 µs | 25.6 µs / 43.3 µs / 128.1 µs |
+| 1% loss + 5 ms each way | 10.361 ms / 13.332 ms / 221.831 ms | 10.431 ms / 12.902 ms / 77.670 ms |
+
+Random loss and scheduling affect tail latencies; the TCP measurements are single-run controls.
 
 These results describe a local, single-connection echo workload. Random loss applies in both directions, including ACKs, and is not an identical packet-loss trace across runs. The [validation report](docs/optimization-report.md) includes per-run data, CPU/memory measurements, latency ranges, binary hashes, and compatibility limits. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction and the [benchmark source](example/test_benchmark/src/main.rs) for implementation details.
 
