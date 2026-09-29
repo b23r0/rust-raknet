@@ -123,22 +123,36 @@ Measured on 2026-09-28 on an Intel Core i7-9700F (8 logical CPUs), Linux x86_64,
 
 Benchmark source: [example/test_benchmark/src/main.rs](example/test_benchmark/src/main.rs).
 
-# Contributing
+## Contributing
 
-Options :
+Contributions are welcome! You can help by reporting bugs, suggesting features, improving documentation, adding examples, or submitting code changes.
 
-* Report a BUG
-* Submit an ISSUE about suggestion
-* Submit a improved PR
-* Add an example of using rust-raknet
-* Supplement the documentation about using rust-raknet
+### Send a contribution
 
-Thanks to the contributors with commits in the repository history:
+1. For a larger change, open an issue first so we can agree on the approach. Bug reports are most helpful with steps to reproduce and expected behavior.
+2. Fork the repository and create a focused branch for your change.
+3. Format the code and run the same build and test checks used by CI:
 
-* [b23r0](https://github.com/b23r0)
-* [nounfve](https://github.com/nounfve)
-* [mikhaillav](https://github.com/mikhaillav)
-* [AndreasHGK](https://github.com/AndreasHGK)
-* [minerj101](https://github.com/minerj101)
+   ```sh
+   cargo fmt --all -- --check
+   cargo build --all-targets
+   cargo test --all-targets
+   ```
 
-Contributions of any kind are welcome! If you've ever wanted to contribute to open source, and a great cause, now is your chance!
+4. Open a pull request with a short summary and the checks you ran. For protocol or performance changes, include a reproducer or benchmark details when possible.
+
+### Contributors
+
+A big thank you to everyone who has contributed commits to rust-raknet.
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="120"><a href="https://github.com/b23r0"><img src="https://github.com/b23r0.png?size=96" width="80" height="80" alt="b23r0's GitHub avatar" /><br /><sub><b>b23r0</b></sub></a></td>
+      <td align="center" width="120"><a href="https://github.com/nounfve"><img src="https://github.com/nounfve.png?size=96" width="80" height="80" alt="nounfve's GitHub avatar" /><br /><sub><b>nounfve</b></sub></a></td>
+      <td align="center" width="120"><a href="https://github.com/mikhaillav"><img src="https://github.com/mikhaillav.png?size=96" width="80" height="80" alt="mikhaillav's GitHub avatar" /><br /><sub><b>mikhaillav</b></sub></a></td>
+      <td align="center" width="120"><a href="https://github.com/AndreasHGK"><img src="https://github.com/AndreasHGK.png?size=96" width="80" height="80" alt="AndreasHGK's GitHub avatar" /><br /><sub><b>AndreasHGK</b></sub></a></td>
+      <td align="center" width="120"><a href="https://github.com/minerj101"><img src="https://github.com/minerj101.png?size=96" width="80" height="80" alt="minerj101's GitHub avatar" /><br /><sub><b>minerj101</b></sub></a></td>
+    </tr>
+  </table>
+</div>
