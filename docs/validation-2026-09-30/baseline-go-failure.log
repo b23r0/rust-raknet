@@ -1,0 +1,14 @@
+0 None READY 127.0.0.1:19132
+time=2026-09-30T02:03:21.012+08:00 level=ERROR msg="handle packet: handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '3863920263833860867', expected negative" src=listener raddr=127.0.0.1:39265 block-duration=10s
+
+1 None READY 127.0.0.1:19132
+time=2026-09-30T02:03:23.419+08:00 level=ERROR msg="handle packet: handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '4307543950737304922', expected negative" src=listener raddr=127.0.0.1:51005 block-duration=10s
+
+2 None READY 127.0.0.1:19132
+time=2026-09-30T02:03:23.832+08:00 level=ERROR msg="handle packet: handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '9142163122342329455', expected negative" src=listener raddr=127.0.0.1:59329 block-duration=10s
+
+3 None READY 127.0.0.1:19132
+time=2026-09-30T02:03:24.229+08:00 level=ERROR msg="handle packet: handle OPEN_CONNECTION_REQUEST_2: invalid ClientGUID '1508153045816367010', expected negative" src=listener raddr=127.0.0.1:39693 block-duration=10s
+
+4 1 READY 127.0.0.1:19132
+time=2026-09-30T02:03:33.100+08:00 level=ERROR msg="handle packet: handle datagram: receive packet: split packet: maximum concurrent splits 16 reached" src=listener raddr=127.0.0.1:59558 block-duration=10s

@@ -364,6 +364,10 @@ fn read_sequence_records(
     cursor: &mut RaknetReader<'_>,
     record_count: u16,
 ) -> Result<Vec<(u32, u32)>> {
+    // Every record needs at least its tag and one u24. Validate before allocation.
+    if usize::from(record_count) > cursor.remaining() / 4 {
+        return Err(RaknetError::PacketParseError);
+    }
     let mut sequences = Vec::with_capacity(usize::from(record_count));
     for _ in 0..record_count {
         let is_single = cursor.read_u8()?;
@@ -465,16 +469,30 @@ pub fn write_packet_connection_request(packet: &ConnectionRequest) -> Result<Vec
     Ok(cursor.get_raw_payload())
 }
 
+// RakNet peers commonly advertise either ten or twenty internal addresses.
+fn read_internal_addresses(cursor: &mut RaknetReader<'_>) -> Result<()> {
+    let mut count = 0;
+    while cursor.remaining() > 16 && count < 20 {
+        cursor.read_address()?;
+        count += 1;
+    }
+    if cursor.remaining() != 16 {
+        return Err(RaknetError::PacketParseError);
+    }
+    Ok(())
+}
+
 pub fn read_packet_connection_request_accepted(buf: &[u8]) -> Result<ConnectionRequestAccepted> {
     let mut cursor = RaknetReader::new(buf);
     cursor.read_u8()?;
+    let client_address = cursor.read_address()?;
+    let system_index = cursor.read_u16(Endian::Big)?;
+    read_internal_addresses(&mut cursor)?;
     Ok(ConnectionRequestAccepted {
-        client_address: cursor.read_address()?,
-        system_index: cursor.read_u16(Endian::Big)?,
-        // Some servers vary the number of internal addresses. This implementation
-        // does not use the timestamp fields, so leave them at zero.
-        request_timestamp: 0,
-        accepted_timestamp: 0,
+        client_address,
+        system_index,
+        request_timestamp: cursor.read_i64(Endian::Big)?,
+        accepted_timestamp: cursor.read_i64(Endian::Big)?,
     })
 }
 
@@ -501,9 +519,7 @@ pub fn read_packet_new_incomming_connection(buf: &[u8]) -> Result<NewIncomingCon
     Ok(NewIncomingConnection {
         server_address: cursor.read_address()?,
         request_timestamp: {
-            for _ in 0..10 {
-                cursor.read_address()?;
-            }
+            read_internal_addresses(&mut cursor)?;
             cursor.read_i64(Endian::Big)?
         },
         accepted_timestamp: cursor.read_i64(Endian::Big)?,
@@ -592,4 +608,31 @@ mod tests {
             Err(RaknetError::PacketParseError)
         ));
     }
+}
+
+#[test]
+fn handshake_timestamps_follow_ten_or_twenty_internal_addresses() {
+    for count in [10, 20] {
+        let address = "127.0.0.1:19132".parse().unwrap();
+        let mut writer = RaknetWriter::new();
+        writer
+            .write_u8(PacketID::ConnectionRequestAccepted.to_u8())
+            .unwrap();
+        writer.write_address(address).unwrap();
+        writer.write_u16(0, Endian::Big).unwrap();
+        for _ in 0..count {
+            writer.write_address(address).unwrap();
+        }
+        writer.write_i64(123, Endian::Big).unwrap();
+        writer.write_i64(456, Endian::Big).unwrap();
+        let parsed = read_packet_connection_request_accepted(&writer.get_raw_payload()).unwrap();
+        assert_eq!(parsed.request_timestamp, 123);
+        assert_eq!(parsed.accepted_timestamp, 456);
+    }
+}
+
+#[test]
+fn ack_count_is_validated_before_allocating_records() {
+    assert!(read_packet_ack(&[0xc0, 0xff, 0xff]).is_err());
+    assert!(read_packet_nack(&[0xa0, 0xff, 0xff]).is_err());
 }

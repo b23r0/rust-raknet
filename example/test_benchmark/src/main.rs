@@ -425,6 +425,9 @@ fn print_summary(config: &Config, latencies: &[Duration], elapsed: Duration) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("RAKNET_DEBUG").is_some() {
+        rust_raknet::enable_raknet_log(7);
+    }
     let config = parse_args()?;
     match (config.protocol, config.mode) {
         (Protocol::Tcp, Mode::Client) => run_tcp_client(&config).await,

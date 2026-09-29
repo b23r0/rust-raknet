@@ -1,0 +1,24 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+   Doc-tests rust_raknet
+
+running 16 tests
+test src/server.rs - server::RaknetListener::accept (line 513) ... ignored
+test src/server.rs - server::RaknetListener::close (line 607) ... ignored
+test src/server.rs - server::RaknetListener::get_motd (line 581) ... ignored
+test src/server.rs - server::RaknetListener::local_addr (line 592) ... ignored
+test src/server.rs - server::RaknetListener::set_full_motd (line 634) ... ignored
+test src/server.rs - server::RaknetListener::set_motd (line 549) ... ignored
+test src/socket.rs - socket::RaknetSocket::close (line 930) ... ignored
+test src/socket.rs - socket::RaknetSocket::connect (line 228) ... ignored
+test src/socket.rs - socket::RaknetSocket::flush (line 1095) ... ignored
+test src/socket.rs - socket::RaknetSocket::local_addr (line 1151) ... ignored
+test src/socket.rs - socket::RaknetSocket::peer_addr (line 1140) ... ignored
+test src/socket.rs - socket::RaknetSocket::ping (line 948) ... ignored
+test src/socket.rs - socket::RaknetSocket::recv (line 1118) ... ignored
+test src/socket.rs - socket::RaknetSocket::send (line 1011) ... ignored
+test src/socket.rs - socket::RaknetSocket::set_loss_rate (line 1168) ... ignored
+test src/nethernet.rs - nethernet::NetherNetProxy (line 21) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 15 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.14s; merged doctests compilation took 0.14s

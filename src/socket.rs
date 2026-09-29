@@ -23,6 +23,7 @@ use crate::{arq::*, packet::*, raknet_log_debug, utils::*};
 
 /// A RakNet connection backed by a UDP socket.
 pub struct RaknetSocket {
+    udp: std::sync::Weak<UdpSocket>,
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     user_data_receiver: Arc<Mutex<Receiver<Vec<u8>>>>,
@@ -32,13 +33,32 @@ pub struct RaknetSocket {
     last_heartbeat_time: Arc<AtomicI64>,
     enable_loss: Arc<AtomicBool>,
     loss_rate: Arc<AtomicU8>,
-    incomming_notifier: Arc<Notify>,
+    handshake_complete: Arc<tokio::sync::Semaphore>,
+    send_capacity: Arc<Notify>,
     sender: Sender<(Vec<u8>, SocketAddr, bool, u8)>,
-    drop_notifier: Arc<Notify>,
     raknet_version: u8,
 }
 
 impl RaknetSocket {
+    pub(crate) fn close_signal(&self) -> Arc<tokio::sync::Semaphore> {
+        self.close_notifier.clone()
+    }
+
+    async fn wait_for_handshake(&self) -> Result<()> {
+        if self.close_notifier.is_closed() {
+            return Err(RaknetError::ConnectionClosed);
+        }
+        if self.handshake_complete.available_permits() == 0 {
+            tokio::select! {
+                _ = self.close_notifier.acquire() => return Err(RaknetError::ConnectionClosed),
+                permit = self.handshake_complete.acquire() => {
+                    drop(permit.map_err(|_| RaknetError::ConnectionClosed)?);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create a RakNet socket for an established UDP connection.
     ///
     /// This constructor is used internally by [`RaknetListener`].
@@ -55,34 +75,34 @@ impl RaknetSocket {
         let (sender_sender, sender_receiver) = channel::<(Vec<u8>, SocketAddr, bool, u8)>(10);
 
         let ret = RaknetSocket {
+            udp: Arc::downgrade(s),
             peer_addr: *addr,
             local_addr,
             user_data_receiver: Arc::new(Mutex::new(user_data_receiver)),
             recvq: Arc::new(Mutex::new(RecvQ::new())),
             sendq: Arc::new(RwLock::new(SendQ::new(mtu))),
             close_notifier: Arc::new(tokio::sync::Semaphore::new(0)),
-            last_heartbeat_time: Arc::new(AtomicI64::new(cur_timestamp_millis())),
+            last_heartbeat_time: Arc::new(AtomicI64::new(monotonic_millis())),
             enable_loss: Arc::new(AtomicBool::new(false)),
             loss_rate: Arc::new(AtomicU8::new(0)),
-            incomming_notifier: Arc::new(Notify::new()),
+            handshake_complete: Arc::new(tokio::sync::Semaphore::new(0)),
+            send_capacity: Arc::new(Notify::new()),
             sender: sender_sender,
-            drop_notifier: Arc::new(Notify::new()),
             raknet_version,
         };
         ret.start_receiver(s, receiver, user_data_sender);
         ret.start_tick(s, Some(collecter));
         ret.start_sender(s, sender_receiver);
-        ret.drop_watcher().await;
         ret
     }
 
     async fn handle(
-        frame: &FrameSetPacket,
+        frame: FrameSetPacket,
         peer_addr: &SocketAddr,
         local_addr: &SocketAddr,
         sendq: &RwLock<SendQ>,
         user_data_sender: &Sender<Vec<u8>>,
-        incomming_notify: &Notify,
+        handshake_complete: &tokio::sync::Semaphore,
     ) -> Result<bool> {
         let Some(&packet_id) = frame.data.first() else {
             return Err(RaknetError::PacketHeaderError);
@@ -90,7 +110,7 @@ impl RaknetSocket {
 
         match PacketID::from(packet_id)? {
             PacketID::ConnectionRequest => {
-                let packet = read_packet_connection_request(frame.data.as_slice())?;
+                let packet = read_packet_connection_request(frame.data.as_ref())?;
 
                 let packet_reply = ConnectionRequestAccepted {
                     client_address: *peer_addr,
@@ -106,7 +126,7 @@ impl RaknetSocket {
                     .insert(Reliability::ReliableOrdered, &buf)?;
             }
             PacketID::ConnectionRequestAccepted => {
-                let packet = read_packet_connection_request_accepted(frame.data.as_slice())?;
+                let packet = read_packet_connection_request_accepted(frame.data.as_ref())?;
 
                 let packet_reply = NewIncomingConnection {
                     server_address: *local_addr,
@@ -126,14 +146,15 @@ impl RaknetSocket {
                 // Bedrock sends a connected ping immediately after the connection is accepted.
                 let buf = write_packet_connected_ping(&ping)?;
                 sendq.insert(Reliability::Unreliable, &buf)?;
-                raknet_log_debug!("incomming notified");
-                incomming_notify.notify_one();
+                raknet_log_debug!("handshake complete");
+                handshake_complete.add_permits(1);
             }
             PacketID::NewIncomingConnection => {
-                let _packet = read_packet_new_incomming_connection(frame.data.as_slice())?;
+                let _packet = read_packet_new_incomming_connection(frame.data.as_ref())?;
+                handshake_complete.add_permits(1);
             }
             PacketID::ConnectedPing => {
-                let packet = read_packet_connected_ping(frame.data.as_slice())?;
+                let packet = read_packet_connected_ping(frame.data.as_ref())?;
 
                 let packet_reply = ConnectedPong {
                     client_timestamp: packet.client_timestamp,
@@ -148,7 +169,7 @@ impl RaknetSocket {
                 return Ok(false);
             }
             _ => {
-                match user_data_sender.send(frame.data.clone()).await {
+                match user_data_sender.send(frame.data.into()).await {
                     Ok(_) => {}
                     Err(_) => {
                         return Ok(false);
@@ -218,11 +239,16 @@ impl RaknetSocket {
     }
 
     pub async fn connect_with_version(addr: &SocketAddr, raknet_version: u8) -> Result<Self> {
-        let guid: u64 = rand::random();
+        // Bedrock peers expect a negative signed GUID on the wire.
+        let guid: u64 = rand::random::<u64>() | (1_u64 << 63);
 
-        let s = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|_| RaknetError::BindAddressError)?;
+        let s = UdpSocket::bind(if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .await
+        .map_err(|_| RaknetError::BindAddressError)?;
 
         let packet = OpenConnectionRequest1 {
             protocol_version: raknet_version,
@@ -264,7 +290,7 @@ impl RaknetSocket {
                 }
             };
 
-            if size == 0 {
+            if size == 0 || src != *addr {
                 continue;
             }
             remote_addr = src;
@@ -312,7 +338,7 @@ impl RaknetSocket {
             };
 
             let mut buf = [0u8; 2048];
-            let (size, _) =
+            let (size, source) =
                 match match timeout(std::time::Duration::from_secs(2), s.recv_from(&mut buf)).await
                 {
                     Ok(p) => p,
@@ -328,7 +354,7 @@ impl RaknetSocket {
                     }
                 };
 
-            if size == 0 {
+            if size == 0 || source != *addr {
                 continue;
             }
 
@@ -337,6 +363,12 @@ impl RaknetSocket {
                 continue;
             }
 
+            if matches!(
+                PacketID::from(buf[0]),
+                Ok(PacketID::AlreadyConnected | PacketID::Disconnect)
+            ) {
+                return Err(RaknetError::ConnectionClosed);
+            }
             if buf[0] != PacketID::OpenConnectionReply2.to_u8() {
                 raknet_log_debug!("incorrect reply2");
                 continue;
@@ -380,15 +412,11 @@ impl RaknetSocket {
                 if connected_s.is_closed() {
                     break;
                 }
-                let (size, _) = match match timeout(
-                    std::time::Duration::from_secs(10),
-                    recv_s.recv_from(&mut buf),
-                )
-                .await
-                {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                } {
+                let received = tokio::select! {
+                    _ = connected_s.acquire() => break,
+                    result = recv_s.recv_from(&mut buf) => result,
+                };
+                let (size, source) = match received {
                     Ok(p) => p,
                     Err(e) => {
                         #[cfg(target_family = "windows")]
@@ -403,7 +431,7 @@ impl RaknetSocket {
                     }
                 };
 
-                if size == 0 {
+                if size == 0 || source != peer_addr {
                     continue;
                 }
 
@@ -422,28 +450,28 @@ impl RaknetSocket {
         let (sender_sender, sender_receiver) = channel::<(Vec<u8>, SocketAddr, bool, u8)>(10);
 
         let ret = RaknetSocket {
+            udp: Arc::downgrade(&s),
             peer_addr: *addr,
             local_addr: s.local_addr().map_err(|_| RaknetError::SocketError)?,
             user_data_receiver: Arc::new(Mutex::new(user_data_receiver)),
             recvq: Arc::new(Mutex::new(RecvQ::new())),
             sendq,
             close_notifier: connected,
-            last_heartbeat_time: Arc::new(AtomicI64::new(cur_timestamp_millis())),
+            last_heartbeat_time: Arc::new(AtomicI64::new(monotonic_millis())),
             enable_loss: Arc::new(AtomicBool::new(false)),
             loss_rate: Arc::new(AtomicU8::new(0)),
-            incomming_notifier: Arc::new(Notify::new()),
+            handshake_complete: Arc::new(tokio::sync::Semaphore::new(0)),
+            send_capacity: Arc::new(Notify::new()),
             sender: sender_sender,
-            drop_notifier: Arc::new(Notify::new()),
             raknet_version,
         };
 
         ret.start_receiver(&s, receiver, user_data_sender);
         ret.start_tick(&s, None);
         ret.start_sender(&s, sender_receiver);
-        ret.drop_watcher().await;
 
-        raknet_log_debug!("wait incomming notify");
-        ret.incomming_notifier.notified().await;
+        raknet_log_debug!("waiting for handshake");
+        ret.wait_for_handshake().await?;
 
         Ok(ret)
     }
@@ -461,44 +489,47 @@ impl RaknetSocket {
         let recvq = self.recvq.clone();
         let sender = self.sender.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
-        let incomming_notify = self.incomming_notifier.clone();
+        let handshake_complete = self.handshake_complete.clone();
+        let send_capacity = self.send_capacity.clone();
         let s = s.clone();
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
         tokio::spawn(async move {
+            // Application backpressure must not prevent ACK/NACK processing.
+            let mut pending_data = std::collections::VecDeque::<Vec<u8>>::new();
+            let mut pending_bytes = 0usize;
             loop {
-                if connected.is_closed() {
-                    let ready = recvq.lock().await.flush(&peer_addr);
-                    for frame in ready {
-                        if let Err(error) = RaknetSocket::handle(
-                            &frame,
-                            &peer_addr,
-                            &local_addr,
-                            &sendq,
-                            &user_data_sender,
-                            &incomming_notify,
-                        )
-                        .await
-                        {
-                            raknet_log_debug!("dropping queued frame: {}", error);
+                let buf = if pending_data.is_empty() {
+                    tokio::select! {
+                        _ = connected.acquire() => break,
+                        message = receiver.recv() => match message {
+                            Some(buf) => buf,
+                            None => { connected.close(); break; }
                         }
                     }
-                    break;
-                }
-
-                let buf = match receiver.recv().await {
-                    Some(buf) => buf,
-                    None => {
-                        raknet_log_debug!("receive channel closed");
-                        connected.close();
-                        break;
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = connected.acquire() => break,
+                        permit = user_data_sender.reserve() => {
+                            let Ok(permit) = permit else { connected.close(); break; };
+                            if let Some(data) = pending_data.pop_front() {
+                                pending_bytes -= data.len();
+                                permit.send(data);
+                            }
+                            continue;
+                        }
+                        message = receiver.recv() => match message {
+                            Some(buf) => buf,
+                            None => { connected.close(); break; }
+                        }
                     }
                 };
                 let Some(&packet_id) = buf.first() else {
                     continue;
                 };
 
-                last_heartbeat_time.store(cur_timestamp_millis(), Ordering::Relaxed);
+                last_heartbeat_time.store(monotonic_millis(), Ordering::Relaxed);
                 let packet_kind = match PacketID::from(packet_id) {
                     Ok(kind) => kind,
                     Err(error) => {
@@ -520,16 +551,13 @@ impl RaknetSocket {
                             continue;
                         }
                     };
-                    let now = cur_timestamp_millis();
+                    let now = monotonic_millis();
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
-                        for (start, end) in ack.sequences {
-                            for sequence in start..=end {
-                                sendq.ack(sequence, now);
-                            }
-                        }
+                        sendq.ack_ranges(&ack.sequences, now);
                         sendq.flush(now, &peer_addr)
                     };
+                    send_capacity.notify_waiters();
                     if let Err(error) = RaknetSocket::enqueue_frames(
                         outgoing_frames,
                         &sender,
@@ -552,14 +580,10 @@ impl RaknetSocket {
                             continue;
                         }
                     };
-                    let now = cur_timestamp_millis();
+                    let now = monotonic_millis();
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
-                        for (start, end) in nack.sequences {
-                            for sequence in start..=end {
-                                sendq.nack(sequence, now);
-                            }
-                        }
+                        sendq.nack_ranges(&nack.sequences, now);
                         sendq.flush(now, &peer_addr)
                     };
                     if let Err(error) = RaknetSocket::enqueue_frames(
@@ -581,6 +605,12 @@ impl RaknetSocket {
                     continue;
                 }
 
+                // Leave excess datagrams unacknowledged so reliable senders retry.
+                // Already accepted data remains owned until delivered or disconnected.
+                if pending_bytes >= 1024 * 1024 || pending_data.len() >= 4096 {
+                    continue;
+                }
+
                 let frames = match FrameVec::new(&buf) {
                     Ok(frames) => frames,
                     Err(error) => {
@@ -588,31 +618,68 @@ impl RaknetSocket {
                         continue;
                     }
                 };
-                let (ready_frames, acks) = {
+                let (ready_frames, acks, invalid) = {
                     let mut recvq = recvq.lock().await;
                     let mut ready_frames = Vec::new();
+                    let mut invalid = false;
                     for frame in frames.frames {
                         if let Err(error) = recvq.insert(frame) {
-                            raknet_log_debug!("ignoring malformed frame: {}", error);
-                            continue;
+                            raknet_log_debug!(
+                                "receive window or reassembly rejected frame: {}",
+                                error
+                            );
+                            invalid = true;
+                            break;
                         }
-                        ready_frames.extend(recvq.flush(&peer_addr));
+                        if ready_frames.is_empty() {
+                            ready_frames = recvq.flush(&peer_addr);
+                        } else {
+                            ready_frames.extend(recvq.flush(&peer_addr));
+                        }
                     }
-                    (ready_frames, recvq.get_ack())
+                    (ready_frames, recvq.get_ack(), invalid)
                 };
 
+                if invalid {
+                    connected.close();
+                    break;
+                }
                 let mut should_close = false;
                 for frame in ready_frames {
-                    match RaknetSocket::handle(
-                        &frame,
+                    if frame.data.first() == Some(&PacketID::Game.to_u8()) {
+                        let data: Vec<u8> = frame.data.into();
+                        // There is a single application-channel producer. Try the
+                        // common path without registering another async waiter.
+                        let data = if pending_data.is_empty() {
+                            match user_data_sender.try_send(data) {
+                                Ok(()) => continue,
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => data,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    connected.close();
+                                    should_close = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            data
+                        };
+                        pending_bytes += data.len();
+                        pending_data.push_back(data);
+                        continue;
+                    }
+                    let result = tokio::select! {
+                        _ = connected.acquire() => break,
+                        result = RaknetSocket::handle(
+                        frame,
                         &peer_addr,
                         &local_addr,
                         &sendq,
                         &user_data_sender,
-                        &incomming_notify,
+                        &handshake_complete,
                     )
-                    .await
-                    {
+                        => result,
+                    };
+                    match result {
                         Ok(true) => {}
                         Ok(false) => {
                             raknet_log_info!("peer disconnected");
@@ -709,7 +776,7 @@ impl RaknetSocket {
         let peer_addr = self.peer_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
-        let mut last_monitor_tick = cur_timestamp_millis();
+        let mut last_monitor_tick = monotonic_millis();
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
@@ -721,7 +788,14 @@ impl RaknetSocket {
                 .await;
 
                 // Send NACK ranges.
-                let nacks = recvq.lock().await.get_nack();
+                let nacks = {
+                    let mut recvq = recvq.lock().await;
+                    if recvq.fragments_expired() {
+                        connected.close();
+                        break;
+                    }
+                    recvq.get_nack()
+                };
                 if !nacks.is_empty() {
                     let Ok(record_count) = u16::try_from(nacks.len()) else {
                         raknet_log_error!("too many NACK ranges to encode");
@@ -753,7 +827,7 @@ impl RaknetSocket {
                 // Send queued frames.
                 let outgoing_frames = {
                     let mut sendq = sendq.write().await;
-                    sendq.flush(cur_timestamp_millis(), &peer_addr)
+                    sendq.flush(monotonic_millis(), &peer_addr)
                 };
                 for frame in outgoing_frames {
                     let data = match frame.serialize() {
@@ -777,7 +851,7 @@ impl RaknetSocket {
                 }
 
                 // Periodically report queue and latency state.
-                if cur_timestamp_millis() - last_monitor_tick > 10000 {
+                if monotonic_millis() - last_monitor_tick > 10000 {
                     let (send_queue_size, sent_queue_size, rto) = {
                         let sendq = sendq.read().await;
                         (
@@ -806,11 +880,11 @@ impl RaknetSocket {
                         ordered_size,
                         ordered_keys
                     );
-                    last_monitor_tick = cur_timestamp_millis();
+                    last_monitor_tick = monotonic_millis();
                 }
 
                 // Close the connection after 60 seconds without receiving a packet.
-                if cur_timestamp_millis() - last_heartbeat_time.load(Ordering::Relaxed)
+                if monotonic_millis() - last_heartbeat_time.load(Ordering::Relaxed)
                     > RECEIVE_TIMEOUT
                 {
                     raknet_log_debug!("recv timeout");
@@ -876,9 +950,13 @@ impl RaknetSocket {
     /// assert!((0..10).contains(&latency));
     /// ```
     pub async fn ping(addr: &SocketAddr) -> Result<(i64, String)> {
-        let s = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|_| RaknetError::BindAddressError)?;
+        let s = UdpSocket::bind(if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .await
+        .map_err(|_| RaknetError::BindAddressError)?;
 
         loop {
             let packet = PacketUnconnectedPing {
@@ -923,7 +1001,11 @@ impl RaknetSocket {
 
     /// Send a Bedrock game packet.
     ///
-    /// The packet must begin with `0xfe`. Payloads that exceed the negotiated MTU return [`RaknetError::PacketSizeExceedMTU`].
+    /// The packet must begin with `0xfe`. `ReliableOrdered` messages are fragmented
+    /// when necessary; other modes must fit the negotiated MTU. Messages exceeding
+    /// the 64 MiB send budget (including fragment overhead) return
+    /// [`RaknetError::PacketSizeExceedMTU`]. A full send queue applies asynchronous
+    /// backpressure until capacity is available or the connection closes.
     ///
     /// # Example
     /// ```ignore
@@ -957,19 +1039,54 @@ impl RaknetSocket {
             return Err(RaknetError::ConnectionClosed);
         }
 
-        let frames = {
-            let mut sendq = self.sendq.write().await;
-            sendq.insert_with_order_channel(reliability, buf, order_channel)?;
-            sendq.flush(cur_timestamp_millis(), &self.peer_addr)
-        };
-        RaknetSocket::enqueue_frames(
-            frames,
-            &self.sender,
-            self.peer_addr,
-            self.enable_loss.load(Ordering::Relaxed),
-            self.loss_rate.load(Ordering::Relaxed),
-        )
-        .await
+        // Offline negotiation can create the server socket before the connected
+        // handshake arrives. Do not let application data overtake that handshake.
+        if self.handshake_complete.available_permits() == 0 {
+            self.wait_for_handshake().await?;
+        }
+        loop {
+            let frames = {
+                let mut sendq = self.sendq.write().await;
+                if sendq.has_capacity(reliability, buf.len())? {
+                    sendq.insert_with_order_channel(reliability, buf, order_channel)?;
+                    Some(sendq.flush(monotonic_millis(), &self.peer_addr))
+                } else {
+                    None
+                }
+            };
+            if let Some(frames) = frames {
+                // Send from the caller task to avoid an extra channel hop on
+                // the application path. Reliable frames remain in the send queue
+                // until acknowledged, including when this future is cancelled.
+                let udp = self.udp.upgrade().ok_or(RaknetError::ConnectionClosed)?;
+                let enable_loss = self.enable_loss.load(Ordering::Relaxed);
+                let loss_rate = self.loss_rate.load(Ordering::Relaxed);
+                for frame in frames {
+                    let data = frame.serialize()?;
+                    Self::sendto(&udp, &data, &self.peer_addr, enable_loss, loss_rate)
+                        .await
+                        .map_err(|_| RaknetError::SocketError)?;
+                }
+                return Ok(());
+            }
+            let available = self.send_capacity.notified();
+            tokio::pin!(available);
+            available.as_mut().enable();
+            // Register before rechecking capacity so an intervening ACK cannot
+            // be missed. No polling delay is added to a newly available slot.
+            if self
+                .sendq
+                .read()
+                .await
+                .has_capacity(reliability, buf.len())?
+            {
+                continue;
+            }
+            tokio::select! {
+                _ = self.close_notifier.acquire() => return Err(RaknetError::ConnectionClosed),
+                _ = &mut available => {}
+            }
+        }
     }
 
     /// Wait until all reliable packets have been acknowledged.
@@ -1057,32 +1174,10 @@ impl RaknetSocket {
         self.enable_loss.store(true, Ordering::Relaxed);
         self.loss_rate.store(stage, Ordering::Relaxed);
     }
-
-    async fn drop_watcher(&self) {
-        let close_notifier = self.close_notifier.clone();
-        let drop_notifier = self.drop_notifier.clone();
-        tokio::spawn(async move {
-            raknet_log_debug!("socket drop watcher start");
-            drop_notifier.notify_one();
-
-            drop_notifier.notified().await;
-
-            if close_notifier.is_closed() {
-                raknet_log_debug!("socket close notifier closed");
-                return;
-            }
-
-            close_notifier.close();
-
-            raknet_log_debug!("socket drop watcher closed");
-        });
-
-        self.drop_notifier.notified().await;
-    }
 }
 
 impl Drop for RaknetSocket {
     fn drop(&mut self) {
-        self.drop_notifier.notify_one();
+        self.close_notifier.close();
     }
 }

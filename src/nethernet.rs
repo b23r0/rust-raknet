@@ -30,6 +30,7 @@ use tokio::{
 pub struct NetherNetProxy {
     listener: TcpListener,
     upstream: SocketAddr,
+    connection_limit: usize,
 }
 
 impl NetherNetProxy {
@@ -38,6 +39,7 @@ impl NetherNetProxy {
         Ok(Self {
             listener: TcpListener::bind(listen).await?,
             upstream,
+            connection_limit: 1024,
         })
     }
 
@@ -46,27 +48,47 @@ impl NetherNetProxy {
         self.listener.local_addr()
     }
 
+    /// Sets the maximum number of simultaneous signaling connections (default: 1024).
+    pub fn with_connection_limit(mut self, limit: std::num::NonZeroUsize) -> Self {
+        self.connection_limit = limit.get();
+        self
+    }
+
     /// Accepts and forwards signaling connections until an I/O error occurs.
     ///
     /// Call this in a Tokio task if the application needs to stop it by
-    /// cancelling that task.
+    /// cancelling that task. Cancellation also aborts its active forwarding tasks.
     pub async fn run(&self) -> io::Result<()> {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (client, peer) = self.listener.accept().await?;
-            let upstream = self.upstream;
-            tokio::spawn(async move {
-                if let Err(error) = forward(client, upstream).await {
-                    crate::raknet_log_error!(
-                        "NetherNet signaling relay for {peer} failed: {error}"
-                    );
+            tokio::select! {
+                _ = connections.join_next(), if !connections.is_empty() => {}
+                accepted = self.listener.accept(), if connections.len() < self.connection_limit => {
+                    let (client, peer) = accepted?;
+                    let upstream = self.upstream;
+                    connections.spawn(async move {
+                        if let Err(error) = forward(client, upstream).await {
+                            crate::raknet_log_error!("NetherNet signaling relay for {peer} failed: {error}");
+                        }
+                    });
                 }
-            });
+            }
         }
     }
 }
 
 async fn forward(mut client: TcpStream, upstream: SocketAddr) -> io::Result<()> {
-    let mut upstream_stream = TcpStream::connect(upstream).await?;
+    let mut upstream_stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(upstream),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "NetherNet upstream connection timed out",
+        )
+    })??;
     copy_bidirectional(&mut client, &mut upstream_stream).await?;
     Ok(())
 }

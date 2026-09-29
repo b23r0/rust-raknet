@@ -1,0 +1,23 @@
+127.0.0.1:19132 0 go-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes
+
+127.0.0.1:19132 0 rust-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes
+
+127.0.0.1:19132 5 go-server  1  Error: ConnectionClosed
+
+FAILED CASE
+READY 127.0.0.1:19132
+time=2026-09-30T02:20:21.412+08:00 level=ERROR msg="handle packet: handle datagram: receive packet: split packet: maximum concurrent splits 16 reached" src=listener raddr=127.0.0.1:50625 block-duration=10s
+
+127.0.0.1:19132 5 rust-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes
+
+[::1]:19132 0 go-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes
+
+[::1]:19132 0 rust-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes
+
+[::1]:19132 5 go-server  1  Error: ConnectionClosed
+
+FAILED CASE
+READY [::1]:19132
+time=2026-09-30T02:20:46.018+08:00 level=ERROR msg="handle packet: handle datagram: receive packet: split packet: maximum concurrent splits 16 reached" src=listener raddr=[::1]:39930 block-duration=10s
+
+[::1]:19132 5 rust-server  0 PASS: 400 unique ordered messages, 64/800/4096/10000 bytes

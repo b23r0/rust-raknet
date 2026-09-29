@@ -40,6 +40,7 @@ mod fragment;
 mod log;
 mod nethernet;
 mod packet;
+mod sequence;
 mod server;
 mod socket;
 mod utils;
@@ -534,9 +535,11 @@ async fn test_send_recv_full_packet() {
         server.listen().await;
         let client = server.accept().await.unwrap();
 
+        // Complete delivery requires ordered reliability; sequenced mode may
+        // discard superseded messages during retransmission.
         for _ in 0..50 {
             client
-                .send(&vec![0xfe; 1000], Reliability::ReliableSequenced)
+                .send(&vec![0xfe; 1000], Reliability::ReliableOrdered)
                 .await
                 .unwrap();
         }

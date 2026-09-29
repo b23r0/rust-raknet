@@ -155,6 +155,7 @@ impl RaknetWriter {
                 self.write_u16(address.port(), Endian::Big)
             }
             SocketAddr::V6(address) => {
+                self.write_u8(6)?;
                 self.write_i16(23, Endian::Little)?;
                 self.write_u16(address.port(), Endian::Big)?;
                 self.write_i32(0, Endian::Big)?;
@@ -178,6 +179,10 @@ pub struct RaknetReader<'a> {
 }
 
 impl<'a> RaknetReader<'a> {
+    pub(crate) fn remaining(&self) -> usize {
+        self.buf.remaining()
+    }
+
     pub fn new(buf: &'a [u8]) -> Self {
         Self {
             buf: Cursor::new(buf),
@@ -305,9 +310,16 @@ impl<'a> RaknetReader<'a> {
             );
             let port = self.read_u16(Endian::Big)?;
             Ok(SocketAddr::new(IpAddr::V4(ip), port))
-        } else if ip_ver == 23 {
-            // RakNet encodes AF_INET6 as a little-endian u16 (23).
-            self.skip(1)?;
+        } else if ip_ver == 6 || ip_ver == 23 {
+            // Standard IPv6 addresses include a version byte before AF_INET6.
+            // Accept the legacy encoding emitted by releases through 0.14.2.
+            if ip_ver == 6 {
+                if self.read_u16(Endian::Little)? != 23 {
+                    return Err(RaknetError::PacketHeaderError);
+                }
+            } else {
+                self.skip(1)?;
+            }
             let port = self.read_u16(Endian::Big)?;
             self.skip(4)?;
             let mut address_bytes = [0; 16];
@@ -396,4 +408,20 @@ async fn test_u24_encode_decode() {
     let c = reader.read_u24(Endian::Little).unwrap();
 
     assert!(a == c);
+}
+
+#[test]
+fn ipv6_address_matches_the_raknet_wire_format() {
+    let address = "[::1]:19132".parse().unwrap();
+    let mut writer = RaknetWriter::new();
+    writer.write_address(address).unwrap();
+    let bytes = writer.get_raw_payload();
+    assert_eq!(bytes.len(), 29);
+    assert_eq!(&bytes[..9], &[6, 23, 0, 0x4a, 0xbc, 0, 0, 0, 0]);
+    assert_eq!(bytes[24], 1);
+    assert_eq!(RaknetReader::new(&bytes).read_address().unwrap(), address);
+    assert_eq!(
+        RaknetReader::new(&bytes[1..]).read_address().unwrap(),
+        address
+    );
 }

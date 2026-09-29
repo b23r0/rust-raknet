@@ -19,3 +19,13 @@ pub fn cur_timestamp_millis() -> i64 {
         .try_into()
         .unwrap_or(0)
 }
+
+/// Elapsed time for local deadlines; wire timestamps still use wall-clock time.
+pub(crate) fn monotonic_millis() -> i64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}

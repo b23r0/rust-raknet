@@ -6,19 +6,37 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable]
+        include:
+          - os: ubuntu-latest
+            rust: '1.85.0'
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest stable Rust
-        run: rustup update stable && rustup default stable
-      - name: Build
-        run: cargo build --all-targets --verbose
+      - name: Select Rust toolchain
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal && rustup default ${{ matrix.rust }}
       - name: Run tests
         run: cargo test --all-targets --verbose
+      - name: Test documentation
+        run: cargo test --doc
+      - name: Check examples
+        shell: bash
+        run: |
+          for manifest in example/*/Cargo.toml; do
+            cargo check --all-targets --manifest-path "$manifest"
+          done
       - name: Check package
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
         run: cargo package --no-verify
