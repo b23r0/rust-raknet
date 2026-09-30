@@ -636,3 +636,14 @@ fn ack_count_is_validated_before_allocating_records() {
     assert!(read_packet_ack(&[0xc0, 0xff, 0xff]).is_err());
     assert!(read_packet_nack(&[0xa0, 0xff, 0xff]).is_err());
 }
+
+#[test]
+fn accepts_captured_bedrock_linux_handshake_with_mixed_address_families() {
+    // Captured from the official Bedrock 26.52.3 Linux server in a private netns.
+    let bytes = include_bytes!("../tests/fixtures/bedrock-26.52-linux-accepted.bin");
+    let packet = read_packet_connection_request_accepted(bytes).unwrap();
+    assert_eq!(packet.client_address, "127.0.0.1:19145".parse().unwrap());
+    assert_eq!(packet.system_index, 0);
+    assert!(packet.request_timestamp > 0);
+    assert!(packet.accepted_timestamp > 0);
+}

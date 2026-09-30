@@ -42,7 +42,7 @@ def run_case(profile, repeat, variant, *, warmup=100, samples=300, pin=False):
     if delay:
         netem += ["delay", f"{delay}ms"]
     command(*netem)
-    binary = ROOT / ("base" if variant == "base" else "work")
+    binary = ROOT / ("target" if variant != "base" else "base-target") / "release/test_benchmark"
     protocol = "tcp" if variant == "tcp" else "raknet"
     common = [str(binary), "--protocol", protocol, "--address", "127.0.0.1:19132"]
     record = dict(profile=name, variant=variant, repeat=repeat,
@@ -113,18 +113,6 @@ def main():
     if sys.argv[1:] == ["--latency"]:
         profiles, repeats = [("latency_clean", 0, 0, 800, 1000)], 5
         options = dict(warmup=1000, samples=10000, pin=True)
-    elif sys.argv[1:] == ["--latency-unpinned"]:
-        profiles, repeats = [("latency_clean_unpinned", 0, 0, 800, 1000)], 5
-        options = dict(warmup=1000, samples=10000, pin=False)
-    elif sys.argv[1:] == ["--throughput-long"]:
-        profiles = [
-            ("clean-long", 0, 0, 800, 200000),
-            ("small-long", 0, 0, 64, 300000),
-            ("fragment-long", 0, 0, 4096, 50000),
-            ("loss1", 1, 0, 800, 20000),
-            ("loss5", 5, 0, 800, 10000),
-            ("wan", 1, 5, 800, 3000),
-        ]
     elif sys.argv[1:] == ["--wan-latency"]:
         profiles = [("wan_latency", 1, 5, 800, 1000)]
         options = dict(warmup=100, samples=2000, pin=True)
@@ -133,7 +121,9 @@ def main():
     failed = False
     for profile in profiles:
         for repeat in range(repeats):
-            variants = ["base", "work", "tcp"] if repeat % 2 == 0 else ["tcp", "work", "base"]
+            variants = ["base", "work"] if repeat % 2 == 0 else ["work", "base"]
+            if repeat == 0:
+                variants.append("tcp")
             for variant in variants:
                 record = run_case(profile, repeat, variant, **options)
                 failed |= record.get("returncode", 1) != 0 or "error" in record

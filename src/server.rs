@@ -41,10 +41,52 @@ impl RaknetListener {
     ///
     /// Call [`listen`](Self::listen) before accepting connections.
     pub async fn bind(sockaddr: &SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(sockaddr)
-            .await
-            .map_err(|_| RaknetError::BindAddressError)?;
-        Self::from_udp_socket(socket).await
+        let socket =
+            std::net::UdpSocket::bind(sockaddr).map_err(|_| RaknetError::BindAddressError)?;
+        // A shared listener receives bursts from every connection. This changes
+        // only this socket; the OS may clamp the requested receive buffer.
+        if let Err(error) = socket2::SockRef::from(&socket).set_recv_buffer_size(2 * 1024 * 1024) {
+            raknet_log_debug!("could not enlarge the listener receive buffer: {error}");
+        }
+        Self::from_std(socket).await
+    }
+
+    /// Bind with a requested per-socket UDP receive buffer size.
+    ///
+    /// The OS may clamp the size to its existing limits. No system limits are
+    /// changed. Unlike [`bind`](Self::bind), a failed buffer request returns an error.
+    /// [`from_std`](Self::from_std) preserves the supplied socket's buffer settings.
+    pub async fn bind_with_receive_buffer_size(
+        sockaddr: &SocketAddr,
+        size: std::num::NonZeroUsize,
+    ) -> Result<Self> {
+        if size.get() > i32::MAX as usize {
+            return Err(RaknetError::SocketError);
+        }
+        let socket =
+            std::net::UdpSocket::bind(sockaddr).map_err(|_| RaknetError::BindAddressError)?;
+        socket2::SockRef::from(&socket)
+            .set_recv_buffer_size(size.get())
+            .map_err(|_| RaknetError::SocketError)?;
+        Self::from_std(socket).await
+    }
+
+    /// Sets the number of connections that may wait for [`accept`](Self::accept).
+    ///
+    /// The default backlog is 128. When it is full, new offline handshakes wait
+    /// for a retried request instead of allocating and immediately closing a session.
+    ///
+    /// # Panics
+    /// Panics if called after [`listen`](Self::listen).
+    pub fn with_accept_backlog(mut self, backlog: std::num::NonZeroUsize) -> Self {
+        assert!(
+            !self.listened,
+            "configure the accept backlog before listening"
+        );
+        let (sender, receiver) = channel(backlog.get());
+        self.connection_sender = sender;
+        self.connection_receiver = receiver;
+        self
     }
 
     /// Creates a listener from a standard UDP socket.
@@ -58,7 +100,7 @@ impl RaknetListener {
     }
 
     async fn from_udp_socket(socket: UdpSocket) -> Result<Self> {
-        let (connection_sender, connection_receiver) = channel::<RaknetSocket>(10);
+        let (connection_sender, connection_receiver) = channel::<RaknetSocket>(128);
         let (motd_sender, motd_receiver) = watch::channel(String::new());
         let listener = Self {
             motd: String::new(),
@@ -260,7 +302,6 @@ impl RaknetListener {
                     continue;
                 }
 
-                let new_motd = motd_receiver.borrow_and_update().clone();
                 let cur_status = match PacketID::from(buf[0]) {
                     Ok(p) => p,
                     Err(e) => {
@@ -279,7 +320,7 @@ impl RaknetListener {
                         let packet = crate::packet::PacketUnconnectedPong {
                             time: cur_timestamp_millis(),
                             guid,
-                            motd: new_motd,
+                            motd: motd_receiver.borrow_and_update().clone(),
                         };
 
                         let pong = match write_packet_pong(&packet) {
@@ -304,7 +345,7 @@ impl RaknetListener {
                         let packet = crate::packet::PacketUnconnectedPong {
                             time: cur_timestamp_millis(),
                             guid,
-                            motd: new_motd,
+                            motd: motd_receiver.borrow_and_update().clone(),
                         };
 
                         let pong = match write_packet_pong(&packet) {
@@ -409,6 +450,14 @@ impl RaknetListener {
                             continue;
                         }
 
+                        // Reserve acceptance before acknowledging the offline handshake.
+                        // A full backlog must not create a session only to disconnect it.
+                        let accept_slot = match connection_sender.try_reserve() {
+                            Ok(slot) => slot,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                        };
+
                         let packet = crate::packet::OpenConnectionReply2 {
                             guid,
                             address: addr,
@@ -456,15 +505,7 @@ impl RaknetListener {
                         );
 
                         raknet_log_debug!("accept connection : {}", addr);
-                        if connection_sender.try_send(raknet_socket).is_err() {
-                            sessions.lock().await.remove(&addr);
-                            version_map.lock().await.remove(&addr);
-                            let _ = socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await;
-                            raknet_log_debug!(
-                                "pending accept queue is full; disconnected {}",
-                                addr
-                            );
-                        }
+                        accept_slot.send(raknet_socket);
                     }
                     PacketID::Disconnect => {
                         let session_sender = sessions
@@ -652,4 +693,41 @@ impl Drop for RaknetListener {
     fn drop(&mut self) {
         self.close_notifier.close();
     }
+}
+
+#[tokio::test]
+async fn supplied_udp_socket_keeps_its_receive_buffer_configuration() {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket2::SockRef::from(&socket)
+        .set_recv_buffer_size(8192)
+        .unwrap();
+    let before = socket2::SockRef::from(&socket).recv_buffer_size().unwrap();
+    let listener = RaknetListener::from_std(socket).await.unwrap();
+    let socket = listener.socket.as_ref().unwrap();
+    assert_eq!(
+        socket2::SockRef::from(socket.as_ref())
+            .recv_buffer_size()
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn custom_receive_buffer_binds_and_rejects_unrepresentable_sizes() {
+    let address = "127.0.0.1:0".parse().unwrap();
+    let listener = RaknetListener::bind_with_receive_buffer_size(
+        &address,
+        std::num::NonZeroUsize::new(8192).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(listener.local_addr().unwrap().port(), 0);
+    assert!(matches!(
+        RaknetListener::bind_with_receive_buffer_size(
+            &address,
+            std::num::NonZeroUsize::new(usize::MAX).unwrap(),
+        )
+        .await,
+        Err(RaknetError::SocketError)
+    ));
 }

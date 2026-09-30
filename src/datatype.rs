@@ -194,6 +194,19 @@ impl<'a> RaknetReader<'a> {
             Err(_) => Err(RaknetError::ReadPacketBufferError),
         }
     }
+    pub(crate) fn read_slice(&mut self, length: usize) -> Result<&'a [u8]> {
+        let start = self.buf.position() as usize;
+        let end = start
+            .checked_add(length)
+            .ok_or(RaknetError::ReadPacketBufferError)?;
+        let source = *self.buf.get_ref();
+        let bytes = source
+            .get(start..end)
+            .ok_or(RaknetError::ReadPacketBufferError)?;
+        self.buf.set_position(end as u64);
+        Ok(bytes)
+    }
+
     pub fn read_u8(&mut self) -> Result<u8> {
         if !self.buf.has_remaining() {
             return Err(RaknetError::ReadPacketBufferError);
@@ -314,9 +327,9 @@ impl<'a> RaknetReader<'a> {
             // Standard IPv6 addresses include a version byte before AF_INET6.
             // Accept the legacy encoding emitted by releases through 0.14.2.
             if ip_ver == 6 {
-                if self.read_u16(Endian::Little)? != 23 {
-                    return Err(RaknetError::PacketHeaderError);
-                }
+                // AF_INET6 is native to the sender's OS (10 on Linux, 23 on
+                // Windows). The explicit IP version determines the wire layout.
+                self.skip(2)?;
             } else {
                 self.skip(1)?;
             }
@@ -424,4 +437,32 @@ fn ipv6_address_matches_the_raknet_wire_format() {
         RaknetReader::new(&bytes[1..]).read_address().unwrap(),
         address
     );
+}
+
+#[test]
+fn ipv6_addresses_accept_native_family_values_from_other_platforms() {
+    let address = "[::1]:19132".parse().unwrap();
+    let mut writer = RaknetWriter::new();
+    writer.write_address(address).unwrap();
+    let mut bytes = writer.get_raw_payload();
+    for family in [10_u16, 23, 28, 30] {
+        bytes[1..3].copy_from_slice(&family.to_le_bytes());
+        assert_eq!(RaknetReader::new(&bytes).read_address().unwrap(), address);
+    }
+    for length in 0..bytes.len() {
+        assert!(RaknetReader::new(&bytes[..length]).read_address().is_err());
+    }
+}
+
+#[test]
+fn borrowed_reads_validate_lengths_without_consuming_truncated_payloads() {
+    let bytes = [1, 2, 3];
+    let mut reader = RaknetReader::new(&bytes);
+    assert_eq!(reader.read_u8().unwrap(), 1);
+    assert!(reader.read_slice(3).is_err());
+    assert!(reader.read_slice(usize::MAX).is_err());
+    assert_eq!(reader.remaining(), 2);
+    assert_eq!(reader.read_slice(2).unwrap(), &[2, 3]);
+    assert_eq!(reader.read_slice(0).unwrap(), &[]);
+    assert!(reader.read_slice(1).is_err());
 }

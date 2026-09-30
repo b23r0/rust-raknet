@@ -3,6 +3,8 @@ use crate::error::*;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+pub(crate) const MAX_FRAGMENTS: usize = 65_536;
+
 struct Fragment {
     pub flags: u8,
     pub compound_size: u32,
@@ -104,7 +106,7 @@ impl FragmentQ {
     fn insert_frame(&mut self, frame: FrameSetPacket) -> Result<u16> {
         let compound_id = frame.compound_id;
         if frame.compound_size == 0
-            || frame.compound_size > 65_536
+            || frame.compound_size as usize > MAX_FRAGMENTS
             || self.bytes.saturating_add(frame.data.len() + 128) > 64 * 1024 * 1024
             || (self.fragments.len() >= 1024 && !self.fragments.contains_key(&compound_id))
         {

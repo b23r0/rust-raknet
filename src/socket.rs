@@ -319,6 +319,10 @@ impl RaknetSocket {
             Err(_) => return Err(RaknetError::PacketParseError),
         };
 
+        if !(61..=RAKNET_CLIENT_MTU).contains(&reply1.mtu_size) {
+            return Err(RaknetError::IncorrectReply);
+        }
+
         let packet = OpenConnectionRequest2 {
             address: remote_addr,
             mtu: reply1.mtu_size,
@@ -327,7 +331,7 @@ impl RaknetSocket {
 
         let buf = write_packet_connection_open_request_2(&packet)?;
 
-        loop {
+        let negotiated_mtu = loop {
             match s.send_to(&buf, addr).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -374,15 +378,18 @@ impl RaknetSocket {
                 continue;
             }
 
-            let _reply2 = match read_packet_connection_open_reply_2(&buf[..size]) {
+            let reply2 = match read_packet_connection_open_reply_2(&buf[..size]) {
                 Ok(p) => p,
                 Err(_) => return Err(RaknetError::PacketParseError),
             };
 
-            break;
-        }
+            if !(61..=reply1.mtu_size).contains(&reply2.mtu) {
+                return Err(RaknetError::IncorrectReply);
+            }
+            break reply2.mtu;
+        };
 
-        let sendq = Arc::new(RwLock::new(SendQ::new(reply1.mtu_size)));
+        let sendq = Arc::new(RwLock::new(SendQ::new(negotiated_mtu)));
 
         let packet = ConnectionRequest {
             guid,
@@ -852,35 +859,37 @@ impl RaknetSocket {
 
                 // Periodically report queue and latency state.
                 if monotonic_millis() - last_monitor_tick > 10000 {
-                    let (send_queue_size, sent_queue_size, rto) = {
-                        let sendq = sendq.read().await;
-                        (
-                            sendq.get_reliable_queue_size(),
-                            sendq.get_sent_queue_size(),
-                            sendq.get_rto(),
-                        )
-                    };
-                    let (recvq_size, fragment_size, ordered_size, ordered_keys) = {
-                        let recvq = recvq.lock().await;
-                        (
-                            recvq.get_size(),
-                            recvq.get_fragment_queue_size(),
-                            recvq.get_ordered_packet(),
-                            recvq.get_ordered_keys(),
-                        )
-                    };
-                    raknet_log_debug!(
-                        "peer addr: {} | send queue: {} | sent queue: {} | RTO: {} | receive queue: {} | fragments: {} | ordered queue: {} - {:?}",
-                        peer_addr,
-                        send_queue_size,
-                        sent_queue_size,
-                        rto,
-                        recvq_size,
-                        fragment_size,
-                        ordered_size,
-                        ordered_keys
-                    );
                     last_monitor_tick = monotonic_millis();
+                    if crate::log::ENABLE_RAKNET_LOG.load(Ordering::Relaxed) & 1 != 0 {
+                        let (send_queue_size, sent_queue_size, rto) = {
+                            let sendq = sendq.read().await;
+                            (
+                                sendq.get_reliable_queue_size(),
+                                sendq.get_sent_queue_size(),
+                                sendq.get_rto(),
+                            )
+                        };
+                        let (recvq_size, fragment_size, ordered_size, ordered_keys) = {
+                            let recvq = recvq.lock().await;
+                            (
+                                recvq.get_size(),
+                                recvq.get_fragment_queue_size(),
+                                recvq.get_ordered_packet(),
+                                recvq.get_ordered_keys(),
+                            )
+                        };
+                        raknet_log_debug!(
+                            "peer addr: {} | send queue: {} | sent queue: {} | RTO: {} | receive queue: {} | fragments: {} | ordered queue: {} - {:?}",
+                            peer_addr,
+                            send_queue_size,
+                            sent_queue_size,
+                            rto,
+                            recvq_size,
+                            fragment_size,
+                            ordered_size,
+                            ordered_keys
+                        );
+                    }
                 }
 
                 // Close the connection after 60 seconds without receiving a packet.
@@ -1003,7 +1012,7 @@ impl RaknetSocket {
     ///
     /// The packet must begin with `0xfe`. `ReliableOrdered` messages are fragmented
     /// when necessary; other modes must fit the negotiated MTU. Messages exceeding
-    /// the 64 MiB send budget (including fragment overhead) return
+    /// 65,536 fragments or the 64 MiB send budget (including fragment overhead) return
     /// [`RaknetError::PacketSizeExceedMTU`]. A full send queue applies asynchronous
     /// backpressure until capacity is available or the connection closes.
     ///
@@ -1099,16 +1108,21 @@ impl RaknetSocket {
     /// ```
     pub async fn flush(&self) -> Result<()> {
         loop {
-            {
-                if self.close_notifier.is_closed() {
-                    return Err(RaknetError::ConnectionClosed);
-                }
-                let sendq = self.sendq.read().await;
-                if sendq.is_empty() {
-                    return Ok(());
-                }
+            // Register before checking the queue so an intervening ACK wakes
+            // every concurrent flush caller, including an unpolled waiter.
+            let acknowledged = self.send_capacity.notified();
+            tokio::pin!(acknowledged);
+            acknowledged.as_mut().enable();
+            if self.close_notifier.is_closed() {
+                return Err(RaknetError::ConnectionClosed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            if self.sendq.read().await.is_empty() {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = self.close_notifier.acquire() => return Err(RaknetError::ConnectionClosed),
+                _ = &mut acknowledged => {}
+            }
         }
     }
 

@@ -1,0 +1,4 @@
+{"kind": "interop", "address": "127.0.0.1:19210", "direction": "go-server", "rc": 0, "stdout": "PASS: 400 unique ordered messages, 64/800/4096/10000 bytes\n", "stderr": ""}
+{"kind": "interop", "address": "127.0.0.1:19210", "direction": "rust-server", "rc": 0, "stdout": "PASS: 400 unique ordered messages, 64/800/4096/10000 bytes\n", "stderr": ""}
+{"kind": "interop", "address": "[::1]:19210", "direction": "go-server", "rc": 0, "stdout": "PASS: 400 unique ordered messages, 64/800/4096/10000 bytes\n", "stderr": ""}
+{"kind": "interop", "address": "[::1]:19210", "direction": "rust-server", "rc": 0, "stdout": "PASS: 400 unique ordered messages, 64/800/4096/10000 bytes\n", "stderr": ""}

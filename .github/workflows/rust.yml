@@ -29,6 +29,8 @@ jobs:
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal && rustup default ${{ matrix.rust }}
       - name: Run tests
         run: cargo test --all-targets --verbose
+      - name: Test RakNet proxy forwarding
+        run: cargo test --manifest-path example/proxy/Cargo.toml
       - name: Test documentation
         run: cargo test --doc
       - name: Check examples

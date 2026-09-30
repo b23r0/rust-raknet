@@ -63,27 +63,29 @@ fn parse_args(
 async fn relay(client: RaknetSocket, upstream: RaknetSocket) {
     println!("RakNet proxy connection established");
 
-    loop {
-        tokio::select! {
-            result = client.recv() => {
-                let Ok(packet) = result else {
-                    break;
-                };
-                if let Err(error) = upstream.send(&packet, Reliability::ReliableOrdered).await {
-                    eprintln!("client-to-upstream relay failed: {error}");
-                    break;
-                }
-            }
-            result = upstream.recv() => {
-                let Ok(packet) = result else {
-                    break;
-                };
-                if let Err(error) = client.send(&packet, Reliability::ReliableOrdered).await {
-                    eprintln!("upstream-to-client relay failed: {error}");
-                    break;
-                }
+    async fn forward(
+        source: &RaknetSocket,
+        destination: &RaknetSocket,
+    ) -> rust_raknet::error::Result<()> {
+        let mut batch = 0;
+        loop {
+            let packet = source.recv().await?;
+            destination
+                .send(&packet, Reliability::ReliableOrdered)
+                .await?;
+            batch += 1;
+            if batch == 8 {
+                // Bound each ready batch so other connections and UDP receivers
+                // can run before a burst fills a shared socket's receive buffer.
+                batch = 0;
+                tokio::task::yield_now().await;
             }
         }
+    }
+
+    // A blocked send in one direction must not stall the reverse receive path.
+    if let Err(error) = tokio::try_join!(forward(&client, &upstream), forward(&upstream, &client)) {
+        eprintln!("RakNet relay stopped: {error}");
     }
 
     let _ = client.close().await;
@@ -116,16 +118,88 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             };
 
-            let upstream = match RaknetSocket::connect_with_version(&remote_address, version).await
+            let upstream = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                RaknetSocket::connect_with_version(&remote_address, version),
+            )
+            .await
             {
-                Ok(socket) => socket,
-                Err(error) => {
+                Ok(Ok(socket)) => socket,
+                Ok(Err(error)) => {
                     eprintln!("could not connect to the remote RakNet server: {error}");
+                    let _ = client.close().await;
+                    return;
+                }
+                Err(_) => {
+                    eprintln!("remote RakNet handshake timed out");
                     let _ = client.close().await;
                     return;
                 }
             };
             relay(client, upstream).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn relay_keeps_both_directions_moving_under_backpressure() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut frontend = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let front_addr = frontend.local_addr().unwrap();
+            frontend.listen().await;
+            let client = RaknetSocket::connect_with_version(&front_addr, 11)
+                .await
+                .unwrap();
+            let proxy_client = frontend.accept().await.unwrap();
+            let mut backend = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let back_addr = backend.local_addr().unwrap();
+            backend.listen().await;
+            let proxy_upstream = RaknetSocket::connect_with_version(&back_addr, 11)
+                .await
+                .unwrap();
+            let server = backend.accept().await.unwrap();
+            let task = tokio::spawn(relay(proxy_client, proxy_upstream));
+            async fn exchange(socket: &RaknetSocket, outgoing: u8, incoming: u8) {
+                let send = async {
+                    for index in 0..2000_u32 {
+                        let mut payload = vec![0xfe; 800];
+                        payload[1] = outgoing;
+                        payload[2..6].copy_from_slice(&index.to_le_bytes());
+                        socket
+                            .send(&payload, Reliability::ReliableOrdered)
+                            .await
+                            .unwrap();
+                    }
+                    socket.flush().await.unwrap();
+                };
+                let receive = async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    for index in 0..2000_u32 {
+                        let payload = socket.recv().await.unwrap();
+                        assert_eq!(payload.len(), 800);
+                        assert_eq!(payload[1], incoming);
+                        assert_eq!(&payload[2..6], &index.to_le_bytes());
+                    }
+                };
+                tokio::join!(send, receive);
+            }
+            tokio::join!(exchange(&client, 1, 2), exchange(&server, 2, 1));
+            client.close().await.unwrap();
+            task.await.unwrap();
+            server.close().await.unwrap();
+            frontend.close().await.unwrap();
+            backend.close().await.unwrap();
+        })
+        .await
+        .expect("bidirectional proxy forwarding stalled");
     }
 }

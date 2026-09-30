@@ -318,9 +318,8 @@ impl FrameVec {
                 }
             }
 
-            let mut data = vec![0; usize::from(frame.length_in_bytes)];
-            reader.read(&mut data)?;
-            frame.data = data.into();
+            let data = reader.read_slice(usize::from(frame.length_in_bytes))?;
+            frame.data = Bytes::copy_from_slice(data);
             frames.push(frame);
         }
 
@@ -629,8 +628,12 @@ impl SendQ {
             .checked_sub(60)
             .filter(|n| *n > 0)
             .ok_or(RaknetError::PacketSizeExceedMTU)?;
-        let frames = if reliability == Reliability::ReliableOrdered {
-            len.div_ceil(payload).max(1)
+        let frames = if reliability == Reliability::ReliableOrdered && len > payload {
+            let frames = len.div_ceil(payload);
+            if frames > crate::fragment::MAX_FRAGMENTS {
+                return Err(RaknetError::PacketSizeExceedMTU);
+            }
+            frames
         } else {
             1
         };
@@ -707,7 +710,7 @@ impl SendQ {
                 self.reliable_frame_index = sequence::next(self.reliable_frame_index);
             }
             Reliability::ReliableOrdered => {
-                if buf.len() < max_payload {
+                if buf.len() <= max_payload {
                     let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
                     frame.order_channel = order_channel;
                     frame.reliable_frame_index = self.reliable_frame_index;
@@ -1537,3 +1540,34 @@ async fn test_client_packet2() {
 #[cfg(test)]
 #[path = "arq_tests.rs"]
 mod regressions;
+
+#[test]
+fn rejects_messages_exceeding_the_receivers_fragment_limit() {
+    let sendq = SendQ::new(576);
+    let limit = crate::fragment::MAX_FRAGMENTS * (576 - 60);
+    assert!(
+        sendq
+            .required_bytes(Reliability::ReliableOrdered, limit)
+            .is_ok()
+    );
+    assert!(matches!(
+        sendq.required_bytes(Reliability::ReliableOrdered, limit + 1),
+        Err(RaknetError::PacketSizeExceedMTU)
+    ));
+}
+
+#[test]
+fn exact_mtu_payload_is_not_marked_as_split() {
+    let mut sendq = SendQ::new(576);
+    let payload = vec![0xfe; 516];
+    sendq
+        .insert(Reliability::ReliableOrdered, &payload)
+        .unwrap();
+    let frames = sendq.flush(0, &"127.0.0.1:19132".parse().unwrap());
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].flags & 16, 0);
+    assert_eq!(frames[0].data.as_ref(), payload);
+    sendq.ack(frames[0].sequence_number, 1);
+    assert!(sendq.is_empty());
+    assert_eq!(sendq.buffered_bytes, 0);
+}

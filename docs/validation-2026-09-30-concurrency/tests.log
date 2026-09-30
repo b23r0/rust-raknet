@@ -1,0 +1,105 @@
+   Compiling rust-raknet v0.14.2 (/tmp/codex-raknet-concurrency-3389irgc/work)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.92s
+     Running unittests src/lib.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/deps/rust_raknet-30c9915118a86b22)
+
+running 62 tests
+test arq::malformed_datagrams_are_rejected ... ok
+test arq::exact_mtu_payload_is_not_marked_as_split ... ok
+test arq::regressions::ack_history_allocates_only_after_retransmission_and_accepts_old_ids ... ok
+test arq::regressions::compound_id_wraps_without_debug_overflow ... ok
+test arq::regressions::ack_and_nack_ranges_visit_only_outstanding_frames ... ok
+test arq::regressions::fragment_limit_rejects_a_peer_before_allocating_its_declared_count ... ok
+test arq::regressions::queue_budget_counts_frame_overhead_and_is_released_by_ack ... ok
+test arq::regressions::reordered_hole_is_not_nacked_after_it_arrives ... ok
+test arq::regressions::retransmitted_reliable_frame_is_acknowledged_but_delivered_once ... ok
+test arq::regressions::sequenced_frames_cross_the_24_bit_wrap ... ok
+test arq::regressions::full_reliable_window_still_allows_unreliable_messages ... ok
+test arq::regressions::reliable_ordered_delivery_and_acks_cross_the_wire_wrap ... ok
+test arq::regressions::two_reliable_frames_in_one_datagram_are_not_confused_with_duplicates ... ok
+test arq::regressions::retransmission_shares_payload_and_does_not_sample_ambiguous_rtt ... ok
+test arq::rejects_messages_exceeding_the_receivers_fragment_limit ... ok
+test arq::send_queue_rejects_an_invalid_mtu ... ok
+test arq::send_queue_pipelines_reliable_packets_with_a_bounded_window ... ok
+test arq::send_queue_retransmits_immediately_after_nack ... ok
+test arq::test_ackset ... ok
+test arq::test_frame_serialize_deserialize ... ok
+test arq::test_client_packet1 ... ok
+test arq::test_recvq ... ok
+test arq::test_client_packet2 ... ok
+test arq::regressions::backpressure_bounds_bursts_and_admits_a_single_large_message ... ok
+test datatype::borrowed_reads_validate_lengths_without_consuming_truncated_payloads ... ok
+test arq::test_recvq_fragment ... ok
+test arq::test_recvq_orders_channels_independently ... ok
+test arq::test_sendq ... ok
+test datatype::invalid_utf8_returns_a_parse_error ... ok
+test datatype::ipv6_address_matches_the_raknet_wire_format ... ok
+test arq::test_sendq_maintains_ordered_indexes_per_channel ... ok
+test datatype::socket_addresses_round_trip ... ok
+test datatype::ipv6_addresses_accept_native_family_values_from_other_platforms ... ok
+test datatype::strings_longer_than_the_wire_length_are_rejected ... ok
+test fragment::tests::conflicting_compound_metadata_is_rejected ... ok
+test datatype::test_u24_encode_decode ... ok
+test fragment::tests::incomplete_fragments_expire_and_completed_ones_release_the_budget ... ok
+test packet::accepts_captured_bedrock_linux_handshake_with_mixed_address_families ... ok
+test datatype::truncated_reads_return_errors ... ok
+test packet::ack_count_is_validated_before_allocating_records ... ok
+test packet::tests::ack_reader_rejects_reversed_ranges ... ok
+test packet::tests::ping_rejects_invalid_magic ... ok
+test packet::handshake_timestamps_follow_ten_or_twenty_internal_addresses ... ok
+test packet::tests::ack_writer_rejects_a_mismatched_record_count ... ok
+test sequence::tests::serial_order_wraps_at_24_bits ... ok
+test sequence::tests::reliable_window_deduplicates_reordered_and_wrapped_frames ... ok
+test nethernet::tests::closes_client_when_upstream_is_unavailable ... ok
+test server::custom_receive_buffer_binds_and_rejects_unrepresentable_sizes ... ok
+test server::supplied_udp_socket_keeps_its_receive_buffer_configuration ... ok
+test nethernet::tests::forwards_signaling_bytes_in_both_directions ... ok
+test test_listener_updates_motd_after_listen ... ok
+test test_raknet_error_implements_std_error ... ok
+test test_connect ... ok
+test test_loss_packet2 ... ok
+test test_send_recv_fragment_data ... ok
+test test_send_recv_full_packet ... ok
+test test_send_recv_more_reliability_type_packet ... ok
+test test_loss_packet_with_sequenced ... ok
+test test_send_recv_with_flush ... ok
+test test_loss_packet1 ... ok
+test test_listener_accepts_more_than_one_queue_of_connections ... ok
+test test_raknet_server_close ... ok
+
+test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running tests/transport_regressions.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/deps/transport_regressions-d12b7829d7d002f3)
+
+running 12 tests
+test cancelling_nethernet_proxy_closes_active_forwarders ... ok
+test disconnect_during_handshake_does_not_leave_connect_waiting ... ok
+test final_mtu_negotiation_controls_fragmentation ... ok
+test nethernet_concurrent_connections_obey_the_configured_limit ... ok
+test foreign_udp_datagram_cannot_disconnect_a_client ... ok
+test closing_listener_unblocks_a_stalled_application_receiver ... ok
+test concurrent_flush_waiters_wake_on_ack_and_close ... ok
+test both_protocol_versions_preserve_messages_and_channels ... ok
+test bidirectional_bursts_keep_processing_acks_under_backpressure ... ok
+test a_full_accept_backlog_recovers_without_disconnecting_handshakes ... ok
+test lost_offline_reply_is_replayed_without_replacing_the_session ... ok
+test repeated_construction_and_drop_cannot_consume_its_own_startup_signal ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.28s
+
+     Running unittests examples/bedrock_probe.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/examples/bedrock_probe-ba7edb9394187934)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/concurrency.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/examples/concurrency-cafcf2f0d1d49ac7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/interop.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/examples/interop-0dfdd3400a7888a3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

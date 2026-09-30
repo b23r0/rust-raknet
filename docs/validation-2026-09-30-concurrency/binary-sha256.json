@@ -1,0 +1,9 @@
+{
+  "baseline-benchmark": "1dcaa2567b07b0774e0fe9a9144755d0637d2edf82b89d4bd98b9fe44630de07",
+  "candidate-benchmark": "d31e881bf1469348b4965d58325c314217b17183c196250cf2f05333c562aa90",
+  "baseline-proxy": "f1a909ee29db0d85656da0717003bc03e952a97e150536e0155e341d232a2a13",
+  "candidate-proxy": "aa234c9d29541528010b9a5da1c71442db67249ac537f93e50df6a56fb4c27cb",
+  "concurrency-client": "77fbab75904e59a230d262cd52e8d8f886195c21acd59ea0dd5ddc178fb4711f",
+  "bedrock-probe": "b8928b5fd47a1172e91524a255141b4698c96d5f2f34e154d967ad68f8373bd0",
+  "independent-go-peer": "278f605c6f55c204e18efadff1c745dacf3cfcf1c4f1e2eea03c796faa316d58"
+}

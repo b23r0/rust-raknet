@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if (( $# < 2 || $# > 3 )); then
-    printf 'Usage: %s BASELINE_BINARY CANDIDATE_BINARY [--latency|--wan-latency]\nBuild both binaries in isolated task copies first.\n' "$0" >&2
+    printf 'Usage: %s BASELINE_BINARY CANDIDATE_BINARY [--latency|--latency-unpinned|--wan-latency|--throughput-long]\nBuild both binaries in isolated task copies first.\n' "$0" >&2
     exit 2
 fi
 MODE=()
 if (( $# == 3 )); then
     case $3 in
-        --latency|--wan-latency) MODE=("$3") ;;
+        --latency|--latency-unpinned|--wan-latency|--throughput-long) MODE=("$3") ;;
         *) printf 'Unknown comparison mode: %s\n' "$3" >&2; exit 2 ;;
     esac
-    command -v taskset >/dev/null || { printf 'taskset is required.\n' >&2; exit 1; }
+    if [[ $3 == --latency || $3 == --wan-latency ]]; then
+        command -v taskset >/dev/null || { printf 'taskset is required.\n' >&2; exit 1; }
+    fi
 fi
 for binary in "$1" "$2"; do
     [[ -x "$binary" ]] || { printf 'Not executable: %s\n' "$binary" >&2; exit 1; }

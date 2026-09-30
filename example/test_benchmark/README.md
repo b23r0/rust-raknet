@@ -55,8 +55,18 @@ bash example/test_benchmark/compare_revisions.sh \
   > comparison.jsonl
 ```
 
-This runner creates its own isolated namespace. It alternates baseline/candidate order, runs three repetitions, and includes a TCP control for each profile: 800-byte clean/1%/5% loss, 64-byte small packets, 4 KiB fragmented messages, and 800-byte messages with 1% loss plus 5 ms delay per direction. Each result contains RTT percentiles, throughput, client/server CPU and peak RSS, raw benchmark output, and qdisc counters. Failures remain in the JSONL and cause a nonzero final exit status. Latency percentiles are sensitive to random loss; increase repetitions before treating a small difference as a regression. This measures one connection per process; it does not characterize high connection counts or Internet congestion fairness.
+This runner creates its own isolated namespace. It alternates baseline/candidate order, runs three repetitions, and repeats the TCP control equally for each profile: 800-byte clean/1%/5% loss, 64-byte small packets, 4 KiB fragmented messages, and 800-byte messages with 1% loss plus 5 ms delay per direction. Each result contains RTT percentiles, throughput, client/server CPU and peak RSS, raw benchmark output, and qdisc counters. Failures remain in the JSONL and cause a nonzero final exit status. Latency percentiles are sensitive to random loss; increase repetitions before treating a small difference as a regression. This measures one connection per process; it does not characterize high connection counts or Internet congestion fairness.
 
 Measured results and compatibility boundaries are recorded in the [optimization validation report](../../docs/optimization-report.md).
 
-For larger latency samples, add `--latency` (five pairs, 10,000 RTT samples each, no loss) or `--wan-latency` (three pairs, 2,000 samples each, 1% loss and 5 ms each way). These modes pin the client and server to opposite ends of the available CPU affinity list and require `taskset` and at least two available CPUs. They retain the TCP control and raw results. Use a separate output file for each mode.
+For larger latency samples, add `--latency` (five pairs, 10,000 RTT samples each, no loss) or `--wan-latency` (three pairs, 2,000 samples each, 1% loss and 5 ms each way). These modes pin the client and server to opposite ends of the available CPU affinity list and require `taskset` and at least two available CPUs. TCP uses the same repetition count as RakNet in each mode. Add `--latency-unpinned` for the same clean latency sample count without CPU pinning; keep pinned and unpinned results separate. Add `--throughput-long` to extend the clean bursts to 200,000 / 300,000 / 50,000 messages at 800 / 64 / 4,096 bytes respectively. That mode retains the three loss profiles, using 10,000 burst messages for 5% loss. Use a separate output file for each mode and set `TOKIO_WORKER_THREADS=4` for the worker count used in the latest validation.
+
+## Concurrent proxy validation
+
+Build `examples/concurrency.rs`, the echo benchmark server, and `example/proxy` in task copies with private caches. Start the server and proxy inside the same disposable network namespace, then run:
+
+```sh
+/path/to/task/target/release/examples/concurrency 127.0.0.1:19201 1024 30
+```
+
+The driver establishes connections with eight concurrent handshakes, keeps all connections open before sending, and validates 64 / 800 / 4,096-byte echoes with unique connection/message IDs. The receiving application pauses for 30 ms to exercise buffering. This is a transport workload, not 1,024 authenticated Minecraft players. The timeout is 120 seconds. Apply any loss rules only to the disposable namespace and inspect its UDP receive-buffer errors as well as netem counters.

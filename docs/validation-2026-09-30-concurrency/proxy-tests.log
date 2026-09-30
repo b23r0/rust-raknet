@@ -1,0 +1,9 @@
+   Compiling rust-raknet v0.14.2 (/tmp/codex-raknet-concurrency-3389irgc/work)
+   Compiling proxy v0.1.0 (/tmp/codex-raknet-concurrency-3389irgc/work/example/proxy)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.29s
+     Running unittests src/main.rs (/tmp/codex-raknet-concurrency-3389irgc/target/debug/deps/proxy-3ab175dfe76a0178)
+
+running 1 test
+test tests::relay_keeps_both_directions_moving_under_backpressure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s

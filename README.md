@@ -82,11 +82,11 @@ The example/bedrock_ping program sends an unconnected RakNet ping and prints the
 
     cargo run --manifest-path example/bedrock_ping/Cargo.toml -- play.example.com:19132
 
-This example covers server-list status discovery. Game login and gameplay packets are outside the crate's current APIs.
+This example covers server-list status discovery. The crate forwards opaque Bedrock packets; it does not implement Xbox authentication or decode game packets.
 
 ## Bedrock transport compatibility
 
-The `example/proxy` program is a RakNet/UDP proxy. It works with Bedrock servers configured as `transport=raknet`; it cannot accept the TCP/WebRTC transport that recent Bedrock Dedicated Server versions use by default. The RakNet proxy negotiates the upstream RakNet version accepted from its client.
+The `example/proxy` program is a RakNet/UDP proxy. It works with Bedrock servers configured as `transport=raknet`; it cannot accept the TCP/WebRTC transport that recent Bedrock Dedicated Server versions use by default. The RakNet proxy negotiates the upstream RakNet version accepted from its client. Both forwarding directions run concurrently so backpressure in one direction does not block receiving in the other. Upstream handshakes time out after 10 seconds.
 
 For servers configured as `transport=nethernet`, the library exposes `NetherNetProxy` to forward the HTTP signaling connection:
 
@@ -109,49 +109,48 @@ This API forwards only NetherNet's TCP signaling connection. After SDP signaling
 
 ## Transport limits and shutdown
 
-Application sends wait for the connected handshake and apply asynchronous backpressure when the send queue is full. Reliable delivery keeps a 64-datagram flight window. A burst normally queues up to 256 KiB including frame overhead; a single larger `ReliableOrdered` message can be admitted when the queue is empty, up to a 64 MiB queue budget that charges payload bytes plus 128 bytes per frame. This accounting limit is not a process RSS limit.
+Application sends wait for the connected handshake and apply asynchronous backpressure when the send queue is full. Reliable delivery keeps a 64-datagram flight window. A burst normally queues up to 256 KiB including frame overhead; a single larger `ReliableOrdered` message can be admitted when the queue is empty, up to a 64 MiB queue budget that charges payload bytes plus 128 bytes per frame. Messages are also limited to 65,536 fragments so a local receiver can reassemble every message the sender admits. This accounting limit is not a process RSS limit.
 
 Receive reordering is limited to 65,536 reliable indexes and 64 MiB of ordered payload. Fragment reassembly allows at most 1,024 concurrent groups, 65,536 fragments per group, and 64 MiB including frame overhead. An incomplete group that makes no progress for 60 seconds closes the connection. Invalid or excessive receive state is disconnected rather than acknowledged and silently discarded. Applications should consume incoming messages concurrently with sustained sends.
+
+`RaknetListener::bind()` requests a 2 MiB receive buffer on its own UDP socket to absorb bursts from many connections. The OS can clamp this request to its existing limits. Use `bind_with_receive_buffer_size()` to request another size, or pass a socket configured by your application to `from_std()`, which preserves its buffer settings.
+
+A `RaknetListener` buffers up to 128 connections awaiting `accept()` by default. Call `with_accept_backlog(NonZeroUsize)` before `listen()` to configure this bound. A full backlog defers new offline handshakes until their next retry, instead of completing negotiation and immediately disconnecting them. The backlog limits pending accepts, not active sessions; keep accepting and consume each connection's data concurrently.
 
 `NetherNetProxy` limits active signaling connections to 1,024 by default; use `with_connection_limit(NonZeroUsize)` to choose another limit. Upstream connection attempts time out after 10 seconds. Cancelling `run()` also cancels its active forwarding tasks.
 
 # Benchmark
 
-Measured on **2026-09-30**, comparing the RakNet implementation in this tree with TCP. RakNet uses `ReliableOrdered`; TCP uses length-prefixed records with `TCP_NODELAY`. The client measures sequential request/echo RTT, then sends a pipelined burst while receiving echoes concurrently.
+Measured on **2026-09-30**, comparing this tree with TCP. RakNet uses `ReliableOrdered`; TCP uses length-prefixed records with `TCP_NODELAY`. Sequential request/echo RTT sampling precedes a pipelined burst with concurrent reception.
 
-Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1, Tokio 1.53.1, release builds. Network tests ran in a private user/network namespace with `tc netem` applied only to its loopback. MTU was 1,500 bytes, with GSO/GRO aggregation limited to one packet. The host network configuration was unchanged.
+Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1, Tokio 1.53.1, release builds, four Tokio workers per process. Tests ran in a private user/network namespace: MTU 1,500 bytes, GSO/GRO aggregation limited to one packet, and `tc netem` on its own loopback. Host network settings were unchanged. CPU affinity does not reserve a core exclusively.
 
 ### Throughput
 
-**Higher is better.** Throughput is measured in MiB/s (1 MiB = 1,048,576 bytes).
+**Higher is better.** Values count echoed application payload per direction in MiB/s (1 MiB = 1,048,576 bytes), excluding headers and ACKs. Both protocols have three runs per profile; cells show the median and range. Each run has 100 warmups and 300 RTT samples before the burst.
 
-MiB/s counts echoed application payload **per direction**, excluding headers and ACKs. Each run used 100 warmup rounds and 300 RTT samples before its measured burst. RakNet values are medians of three successful runs, with ranges shown in parentheses. **TCP has one control run per profile**, so its values are single observations.
-
-| Network profile | Payload size / burst count | TCP throughput (single run) | RakNet throughput (median, range) |
+| Network profile | Payload / burst count | TCP throughput (median, range) | RakNet throughput (median, range) |
 | --- | ---: | ---: | ---: |
-| 0% loss | 800 B / 20,000 messages | 114.83 MiB/s | **75.28 MiB/s** (74.27–75.74 MiB/s) |
-| 1% loss | 800 B / 20,000 messages | 19.89 MiB/s | **74.94 MiB/s** (71.74–78.15 MiB/s) |
-| 5% loss | 800 B / 20,000 messages | 1.07 MiB/s | **68.86 MiB/s** (47.49–73.01 MiB/s) |
-| 0% loss, small packets | 64 B / 30,000 messages | 10.10 MiB/s | **4.02 MiB/s** (3.91–5.40 MiB/s) |
-| 0% loss, fragmented messages | 4,096 B / 5,000 messages | 262.76 MiB/s | **86.64 MiB/s** (83.17–93.61 MiB/s) |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s | **4.46 MiB/s** (4.26–4.56 MiB/s) |
+| 0% loss | 800 B / 200,000 messages | 110.51 MiB/s (97.91–118.01 MiB/s) | 74.76 MiB/s (72.45–77.43 MiB/s) |
+| 1% loss | 800 B / 20,000 messages | 9.59 MiB/s (9.29–9.94 MiB/s) | 78.91 MiB/s (63.40–80.28 MiB/s) |
+| 5% loss | 800 B / 10,000 messages | 0.78 MiB/s (0.76–1.24 MiB/s) | 65.55 MiB/s (48.09–69.90 MiB/s) |
+| 0% loss, small packets | 64 B / 300,000 messages | 9.27 MiB/s (9.25–9.31 MiB/s) | 6.59 MiB/s (6.14–6.59 MiB/s) |
+| 0% loss, fragmented messages | 4,096 B / 50,000 messages | 259.88 MiB/s (256.73–264.91 MiB/s) | 102.49 MiB/s (81.58–112.06 MiB/s) |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.06 MiB/s (0.96–1.42 MiB/s) | 4.43 MiB/s (4.38–4.53 MiB/s) |
 
-RakNet completed **18/18** throughput runs, and TCP completed all six control runs. See the [raw results](docs/validation-2026-09-30/comparison.jsonl) for the individual measurements.
+RakNet and TCP each completed **18/18** throughput runs. [Raw throughput measurements](docs/validation-2026-09-30-concurrency/buffer-throughput.jsonl) retain every observation.
 
 ### Latency
 
-**Lower is better.** RTT is round-trip latency; µs means microseconds and ms means milliseconds (1 ms = 1,000 µs). Each cell lists p50 / p95 / p99 in that order.
+**Lower is better.** RTT is round-trip latency. Each cell lists p50 / p95 / p99, as medians of run-level percentiles. Clean profiles have five runs per protocol, 10,000 samples after 1,000 warmups. The delayed profile has three runs per protocol, 2,000 samples after 100 warmups. The pinned profiles use separate client/server CPU affinities.
 
-The separate focused checks use fixed client/server CPU affinities. The clean check has five RakNet runs of 10,000 measured RTTs after 1,000 warmups; the delayed 1% loss check has three runs of 2,000 RTTs after 100 warmups. RakNet entries below are medians of the **run-level percentiles**; each TCP entry is one control run with the same sample count per run.
-
-| Network profile | TCP RTT (single run) | RakNet RTT |
+| Network profile | TCP RTT (p50 / p95 / p99) | RakNet RTT (p50 / p95 / p99) |
 | --- | ---: | ---: |
-| 0% loss | 16.2 µs / 30.7 µs / 82.0 µs | 25.6 µs / 43.3 µs / 128.1 µs |
-| 1% loss + 5 ms each way | 10.361 ms / 13.332 ms / 221.831 ms | 10.431 ms / 12.902 ms / 77.670 ms |
+| 0% loss, CPU affinity | 16.200 µs / 24.100 µs / 49.500 µs | 25.600 µs / 39.400 µs / 68.400 µs |
+| 0% loss, no CPU affinity | 16.900 µs / 25.600 µs / 65.400 µs | 19.500 µs / 32.700 µs / 76.300 µs |
+| 1% loss + 5 ms each way, CPU affinity | 10.354 ms / 12.421 ms / 36.637 ms | 10.405 ms / 12.445 ms / 85.924 ms |
 
-Random loss and scheduling affect tail latencies; the TCP measurements are single-run controls.
-
-These results describe a local, single-connection echo workload. Random loss applies in both directions, including ACKs, and is not an identical packet-loss trace across runs. The [validation report](docs/optimization-report.md) includes per-run data, CPU/memory measurements, latency ranges, binary hashes, and compatibility limits. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction and the [benchmark source](example/test_benchmark/src/main.rs) for implementation details.
+These are local single-connection echo measurements. Random loss includes ACKs in both directions and does not reproduce an identical trace between runs. Scheduling and retransmissions affect tail latency. The [validation report](docs/concurrency-and-bedrock-report.md) includes repeat checks, concurrency measurements, limitations, and binary hashes. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction.
 
 ## Contributing
 
