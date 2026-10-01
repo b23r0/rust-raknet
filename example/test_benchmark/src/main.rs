@@ -47,6 +47,7 @@ struct Config {
     payload_size: usize,
     warmup_count: usize,
     latency_samples: usize,
+    raknet_mtu: u16,
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -73,7 +74,7 @@ fn parse_count(value: Option<&str>, option: &str, default: usize) -> io::Result<
 
 fn print_help() {
     println!(
-        "Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT> [--packets N] [--payload-size BYTES] [--warmup N] [--latency-samples N]\n\n\
+        "Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT> [--packets N] [--payload-size BYTES] [--warmup N] [--latency-samples N] [--raknet-mtu BYTES]\n\n\
          Client defaults: --packets {DEFAULT_PACKET_COUNT}, --payload-size {DEFAULT_PAYLOAD_SIZE}, --warmup {DEFAULT_WARMUP_COUNT}, --latency-samples {DEFAULT_LATENCY_SAMPLES}.\n\
          The client measures request/echo RTT samples, then pipelined echo throughput.\n\
          For TCP, each record is length-prefixed. RakNet uses ReliableOrdered packets."
@@ -88,6 +89,7 @@ fn parse_args() -> io::Result<Config> {
     let mut payload_size = None;
     let mut warmup_count = None;
     let mut latency_samples = None;
+    let mut raknet_mtu = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(option) = args.next() {
@@ -107,6 +109,7 @@ fn parse_args() -> io::Result<Config> {
             "--payload-size" => set_once(&mut payload_size, value, &option)?,
             "--warmup" => set_once(&mut warmup_count, value, &option)?,
             "--latency-samples" => set_once(&mut latency_samples, value, &option)?,
+            "--raknet-mtu" => set_once(&mut raknet_mtu, value, &option)?,
             _ => return Err(invalid_input(format!("unknown option: {option}"))),
         }
     }
@@ -137,6 +140,14 @@ fn parse_args() -> io::Result<Config> {
         DEFAULT_LATENCY_SAMPLES,
     )?;
 
+    let raknet_mtu = u16::try_from(parse_count(raknet_mtu.as_deref(), "--raknet-mtu", 1400)?)
+        .map_err(|_| invalid_input("--raknet-mtu must be between 61 and 1492 bytes"))?;
+    if !(61..=1492).contains(&raknet_mtu) {
+        return Err(invalid_input(
+            "--raknet-mtu must be between 61 and 1492 bytes",
+        ));
+    }
+
     if packet_count == 0 {
         return Err(invalid_input("--packets must be greater than zero"));
     }
@@ -159,6 +170,7 @@ fn parse_args() -> io::Result<Config> {
         payload_size,
         warmup_count,
         latency_samples,
+        raknet_mtu,
     })
 }
 
@@ -215,6 +227,7 @@ async fn tcp_round_trip(
 
 async fn echo_tcp_client(mut client: TcpStream) -> io::Result<()> {
     client.set_nodelay(true)?;
+    let mut record = Vec::new();
     loop {
         let mut header = [0; TCP_RECORD_HEADER_SIZE];
         match client.read_exact(&mut header).await {
@@ -230,14 +243,16 @@ async fn echo_tcp_client(mut client: TcpStream) -> io::Result<()> {
             )));
         }
 
-        let mut payload = vec![0; payload_size];
-        client.read_exact(&mut payload).await?;
-        client.write_all(&header).await?;
-        client.write_all(&payload).await?;
+        record.resize(TCP_RECORD_HEADER_SIZE + payload_size, 0);
+        record[..TCP_RECORD_HEADER_SIZE].copy_from_slice(&header);
+        client
+            .read_exact(&mut record[TCP_RECORD_HEADER_SIZE..])
+            .await?;
+        client.write_all(&record).await?;
     }
 }
 
-async fn run_tcp_client(config: &Config) -> Result<(), Box<dyn Error>> {
+async fn run_tcp_client(config: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut client = TcpStream::connect(&config.address).await?;
     client.set_nodelay(true)?;
 
@@ -258,28 +273,33 @@ async fn run_tcp_client(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let started = Instant::now();
     let (mut reader, mut writer) = client.into_split();
+    let window = tokio::sync::Semaphore::new(64);
     let send_burst = async {
         for _ in 0..config.packet_count {
+            let permit = window
+                .acquire()
+                .await
+                .expect("benchmark window remains open");
             writer.write_all(&record).await?;
+            permit.forget();
         }
         Ok::<(), io::Error>(())
     };
     let receive_burst = async {
         for _ in 0..config.packet_count {
             read_tcp_record(&mut reader, &payload, &mut response).await?;
+            window.add_permits(1);
         }
         Ok::<(), io::Error>(())
     };
-    let (send_result, receive_result) = tokio::join!(send_burst, receive_burst);
-    send_result?;
-    receive_result?;
+    tokio::try_join!(send_burst, receive_burst)?;
     let elapsed = started.elapsed();
 
     print_summary(config, &latencies, elapsed);
     Ok(())
 }
 
-async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error>> {
+async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind(address).await?;
     println!("TCP echo benchmark listening on {address}");
 
@@ -293,16 +313,20 @@ async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn raknet_round_trip(client: &RaknetSocket, payload: &[u8]) -> Result<(), Box<dyn Error>> {
+async fn raknet_round_trip(
+    client: &RaknetSocket,
+    payload: &[u8],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     client.send(payload, Reliability::ReliableOrdered).await?;
     let response = client.recv().await?;
     ensure_echo(&response, payload)?;
     Ok(())
 }
 
-async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error>> {
+async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
     let address: SocketAddr = config.address.parse()?;
-    let client = RaknetSocket::connect(&address).await?;
+    let client =
+        RaknetSocket::connect_with_version_and_mtu(&address, 10, config.raknet_mtu).await?;
     let payload = vec![0xfe; config.payload_size];
 
     for _ in 0..config.warmup_count {
@@ -317,31 +341,39 @@ async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error>> {
     }
 
     let started = Instant::now();
+    let window = tokio::sync::Semaphore::new(64);
     let send_burst = async {
         for _ in 0..config.packet_count {
+            let permit = window
+                .acquire()
+                .await
+                .expect("benchmark window remains open");
             client.send(&payload, Reliability::ReliableOrdered).await?;
+            permit.forget();
         }
-        Ok::<(), Box<dyn Error>>(())
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
     };
     let receive_burst = async {
         for _ in 0..config.packet_count {
             let response = client.recv().await?;
             ensure_echo(&response, &payload)?;
+            window.add_permits(1);
         }
-        Ok::<(), Box<dyn Error>>(())
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
     };
-    let (send_result, receive_result) = tokio::join!(send_burst, receive_burst);
-    send_result?;
-    receive_result?;
+    tokio::try_join!(send_burst, receive_burst)?;
     let elapsed = started.elapsed();
 
     print_summary(config, &latencies, elapsed);
     Ok(())
 }
 
-async fn run_raknet_server(address: &str) -> Result<(), Box<dyn Error>> {
+async fn run_raknet_server(
+    address: &str,
+    maximum_mtu: u16,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let address: SocketAddr = address.parse()?;
-    let mut listener = RaknetListener::bind(&address).await?;
+    let mut listener = RaknetListener::bind_with_maximum_mtu(&address, maximum_mtu).await?;
     listener.listen().await;
     println!("RakNet echo benchmark listening on {address}");
 
@@ -424,15 +456,55 @@ fn print_summary(config: &Config, latencies: &[Duration], elapsed: Duration) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if std::env::var_os("RAKNET_DEBUG").is_some() {
         rust_raknet::enable_raknet_log(7);
     }
     let config = parse_args()?;
-    match (config.protocol, config.mode) {
-        (Protocol::Tcp, Mode::Client) => run_tcp_client(&config).await,
-        (Protocol::Tcp, Mode::Server) => run_tcp_server(&config.address).await,
-        (Protocol::RakNet, Mode::Client) => run_raknet_client(&config).await,
-        (Protocol::RakNet, Mode::Server) => run_raknet_server(&config.address).await,
+    tokio::spawn(async move {
+        match (config.protocol, config.mode) {
+            (Protocol::Tcp, Mode::Client) => run_tcp_client(&config).await,
+            (Protocol::Tcp, Mode::Server) => run_tcp_server(&config.address).await,
+            (Protocol::RakNet, Mode::Client) => run_raknet_client(&config).await,
+            (Protocol::RakNet, Mode::Server) => {
+                run_raknet_server(&config.address, config.raknet_mtu).await
+            }
+        }
+    })
+    .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tcp_echo_reuses_records_across_payload_sizes() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let echo = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                echo_tcp_client(socket).await.unwrap();
+            });
+            let mut client = TcpStream::connect(address).await.unwrap();
+            client.set_nodelay(true).unwrap();
+            let mut response = Vec::new();
+            for size in [0, 64, 800, 4096, 64] {
+                let payload: Vec<_> = (0..size).map(|index| index as u8).collect();
+                client
+                    .write_all(&encode_tcp_record(&payload))
+                    .await
+                    .unwrap();
+                read_tcp_record(&mut client, &payload, &mut response)
+                    .await
+                    .unwrap();
+                assert_eq!(response, payload);
+            }
+            drop(client);
+            echo.await.unwrap();
+        })
+        .await
+        .expect("TCP echo stalled");
     }
 }

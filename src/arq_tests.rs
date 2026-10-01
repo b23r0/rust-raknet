@@ -221,3 +221,46 @@ fn ack_history_allocates_only_after_retransmission_and_accepts_old_ids() {
         assert_eq!(queue.buffered_bytes, 0);
     }
 }
+
+#[test]
+fn batch_ack_releases_only_matching_frames_and_retries_only_real_gaps() {
+    let mut send = SendQ::new(1400);
+    for index in 0..64 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    send.flush(0, &peer());
+    send.ack_ranges(&[(1, 31), (33, 63)], 1);
+    assert_eq!(send.get_sent_queue_size(), 2);
+    assert_eq!(send.buffered_bytes, 2 * (2 + SendQ::FRAME_BUDGET));
+    let retries = send.flush(1, &peer());
+    assert_eq!(
+        retries
+            .iter()
+            .map(|frame| frame.ordered_frame_index)
+            .collect::<Vec<_>>(),
+        vec![0, 32]
+    );
+    // Delayed ACKs for the original datagrams release retransmitted frames once.
+    send.ack_ranges(&[(0, 63)], 2);
+    assert!(send.is_empty());
+    assert_eq!(send.buffered_bytes, 0);
+    send.ack_ranges(&[(0, 63)], 3);
+    assert_eq!(send.buffered_bytes, 0);
+}
+
+#[test]
+fn batch_ack_preserves_fragment_budget_and_ignores_unsent_ranges() {
+    let mut send = SendQ::new(1400);
+    send.insert(Reliability::ReliableOrdered, &[0xfe; 4096])
+        .unwrap();
+    let frames = send.flush(0, &peer());
+    let initial = send.buffered_bytes;
+    send.ack_ranges(&[(100, 200)], 1);
+    assert_eq!(send.buffered_bytes, initial);
+    send.ack_ranges(&[(0, 2)], 2);
+    assert_eq!(send.buffered_bytes, 4096 + SendQ::FRAME_BUDGET);
+    send.ack_ranges(&[(0, frames.last().unwrap().sequence_number)], 3);
+    assert_eq!(send.buffered_bytes, 0);
+    assert!(send.is_empty());
+}

@@ -2,6 +2,7 @@ pub const RAKNET_PROTOCOL_VERSION: u8 = 10;
 pub const RAKNET_PROTOCOL_VERSION_LIST: [u8; 2] = [10, 11];
 // Keep the initial MTU below the common 1500-byte Ethernet limit.
 pub const RAKNET_CLIENT_MTU: u16 = 1400;
+pub(crate) const RAKNET_MAX_MTU: u16 = 1492;
 
 pub const RECEIVE_TIMEOUT: i64 = 60000;
 

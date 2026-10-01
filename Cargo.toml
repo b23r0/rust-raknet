@@ -15,6 +15,6 @@ keywords = ["raknet", "networking", "game"]
 
 [dependencies]
 bytes = "1.2.1"
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 rand = { version = "0.8.5", features = ["std"] }
-tokio = { version = "1.21", features = ["full"] }
+tokio = { version = "1.38", features = ["full"] }

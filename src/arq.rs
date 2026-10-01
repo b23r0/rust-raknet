@@ -1,11 +1,17 @@
 use crate::sequence::{self, ReliableWindow};
-use bytes::Bytes;
+
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use crate::{datatype::*, error::*, fragment::FragmentQ, raknet_log_debug, utils::*};
+
+pub(crate) type OutgoingFrames = Vec<FrameSetPacket>;
 
 /// Delivery and ordering guarantees for a RakNet frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +57,82 @@ impl TryFrom<u8> for Reliability {
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
 const CONTINUOUS_SEND_FLAG: u8 = 0x8;
 
+// Received payloads move into the application without another allocation.
+// Reliable sends share their backing allocation with retransmission frames.
+#[derive(Clone, Debug)]
+pub(crate) enum FramePayload {
+    Owned(Vec<u8>),
+    Shared {
+        owner: Arc<[u8]>,
+        start: u32,
+        length: u16,
+    },
+}
+
+impl Default for FramePayload {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl FramePayload {
+    fn copy_shared(data: &[u8]) -> Self {
+        Self::Shared {
+            owner: Arc::from(data),
+            start: 0,
+            length: data.len() as u16,
+        }
+    }
+}
+
+impl std::ops::Deref for FramePayload {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => data,
+            Self::Shared {
+                owner,
+                start,
+                length,
+            } => &owner[*start as usize..*start as usize + usize::from(*length)],
+        }
+    }
+}
+
+impl AsRef<[u8]> for FramePayload {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl From<Vec<u8>> for FramePayload {
+    fn from(data: Vec<u8>) -> Self {
+        Self::Owned(data)
+    }
+}
+
+impl From<FramePayload> for Vec<u8> {
+    fn from(data: FramePayload) -> Self {
+        match data {
+            FramePayload::Owned(data) => data,
+            shared => shared.to_vec(),
+        }
+    }
+}
+
+impl PartialEq for FramePayload {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+// A fragmented send retains its complete allocation until the final fragment
+// is acknowledged. Charge that allocation once, independently of frame clones.
+struct SharedPayload {
+    remaining: AtomicUsize,
+    bytes: usize,
+}
+
 #[derive(Clone)]
 pub struct FrameSetPacket {
     pub sequence_number: u32,
@@ -63,11 +145,16 @@ pub struct FrameSetPacket {
     pub compound_size: u32,
     pub compound_id: u16,
     pub fragment_index: u32,
-    pub data: Bytes,
+    pub data: FramePayload,
+    shared_payload: Option<Arc<SharedPayload>>,
 }
 
 impl FrameSetPacket {
     pub fn new(r: Reliability, data: Vec<u8>) -> Self {
+        Self::from_payload(r, data.into())
+    }
+
+    fn from_payload(r: Reliability, data: FramePayload) -> Self {
         let flag = r.to_u8() << 5;
 
         Self {
@@ -81,7 +168,8 @@ impl FrameSetPacket {
             compound_size: 0,
             compound_id: 0,
             fragment_index: 0,
-            data: data.into(),
+            data,
+            shared_payload: None,
         }
     }
 
@@ -101,7 +189,8 @@ impl FrameSetPacket {
             compound_size: 0,
             compound_id: 0,
             fragment_index: 0,
-            data: Bytes::new(),
+            data: FramePayload::default(),
+            shared_payload: None,
         };
 
         let packet_id = reader.read_u8()?;
@@ -148,6 +237,25 @@ impl FrameSetPacket {
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer)?;
+        Ok(buffer)
+    }
+
+    pub(crate) fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
+        self.validate()?;
+        let size = self._size()?;
+        buffer.clear();
+        buffer.reserve(size);
+        let mut writer = RaknetWriter::from_buffer(std::mem::take(buffer));
+        let result = self
+            .write_header(&mut writer)
+            .and_then(|()| writer.write(self.data.as_ref()));
+        *buffer = writer.get_raw_payload();
+        result
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.data.len() != usize::from(self.length_in_bytes)
             || self.data.len() > usize::from(u16::MAX / 8)
             || (self.is_fragment()
@@ -156,7 +264,18 @@ impl FrameSetPacket {
             return Err(RaknetError::PacketParseError);
         }
 
-        let mut writer = RaknetWriter::with_capacity(self._size()?);
+        self._size()?;
+        Ok(())
+    }
+
+    pub(crate) fn encode_header(&self, header: &mut [u8; 32]) -> Result<usize> {
+        self.validate()?;
+        let mut writer = RaknetWriter::from_buffer(header.as_mut_slice());
+        self.write_header(&mut writer)?;
+        Ok(32 - writer.remaining_mut())
+    }
+
+    fn write_header<B: bytes::BufMut>(&self, writer: &mut RaknetWriter<B>) -> Result<()> {
         let mut id = 0x80 | NEEDS_B_AND_AS_FLAG;
 
         // Set the continuation bit for all fragments after the first.
@@ -189,9 +308,7 @@ impl FrameSetPacket {
             writer.write_u16(self.compound_id, Endian::Big)?;
             writer.write_u32(self.fragment_index, Endian::Big)?;
         }
-        writer.write(self.data.as_ref())?;
-
-        Ok(writer.get_raw_payload())
+        Ok(())
     }
 
     pub fn is_fragment(&self) -> bool {
@@ -261,11 +378,42 @@ impl FrameSetPacket {
 }
 
 pub struct FrameVec {
+    #[cfg(test)]
     pub frames: Vec<FrameSetPacket>,
 }
 
 impl FrameVec {
+    #[cfg(test)]
     pub fn new(buf: &[u8]) -> Result<Self> {
+        let mut frames = Vec::new();
+        Self::decode_into(buf, &mut frames)?;
+        Ok(Self { frames })
+    }
+
+    // Reuse the frame metadata allocation across incoming datagrams.
+    pub(crate) fn decode_into(buf: &[u8], frames: &mut Vec<FrameSetPacket>) -> Result<()> {
+        Self::decode(buf, frames, false)
+    }
+
+    pub(crate) fn decode_owned_into(
+        mut buf: Vec<u8>,
+        frames: &mut Vec<FrameSetPacket>,
+    ) -> Result<()> {
+        Self::decode(&buf, frames, true)?;
+        if let [frame] = frames.as_mut_slice() {
+            // A single-frame datagram can reuse its allocation for the payload.
+            // Compact the body in place without a shared slice owner.
+            let length = usize::from(frame.length_in_bytes);
+            let offset = buf.len() - length;
+            buf.copy_within(offset.., 0);
+            buf.truncate(length);
+            frame.data = buf.into();
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &[u8], frames: &mut Vec<FrameSetPacket>, owned: bool) -> Result<()> {
+        frames.clear();
         let mut reader = RaknetReader::new(buf);
         let id = reader.read_u8()?;
         if !(0x80..=0x8d).contains(&id) {
@@ -275,8 +423,6 @@ impl FrameVec {
         if reader.pos() == buf.len() as u64 {
             return Err(RaknetError::PacketParseError);
         }
-        let mut frames = Vec::new();
-
         while reader.pos() < buf.len() as u64 {
             let mut frame = FrameSetPacket {
                 sequence_number,
@@ -289,7 +435,8 @@ impl FrameVec {
                 compound_size: 0,
                 compound_id: 0,
                 fragment_index: 0,
-                data: Bytes::new(),
+                data: FramePayload::default(),
+                shared_payload: None,
             };
 
             frame.flags = reader.read_u8()?;
@@ -319,11 +466,15 @@ impl FrameVec {
             }
 
             let data = reader.read_slice(usize::from(frame.length_in_bytes))?;
-            frame.data = Bytes::copy_from_slice(data);
+            // Multi-frame datagrams retain independent payload allocations.
+            // The owned single-frame path moves the original allocation below.
+            if !owned || !frames.is_empty() || reader.pos() != buf.len() as u64 {
+                frame.data = data.to_vec().into();
+            }
             frames.push(frame);
         }
 
-        Ok(Self { frames })
+        Ok(())
     }
 }
 
@@ -544,17 +695,22 @@ impl RecvQ {
         self.sequence_number_ackset.get_nack()
     }
 
+    #[cfg(test)]
     pub fn flush(&mut self, _peer_addr: &SocketAddr) -> Vec<FrameSetPacket> {
-        let mut ret = std::mem::take(&mut self.ready_ordered);
+        let mut frames = Vec::new();
+        self.flush_into(&mut frames);
+        frames
+    }
+
+    pub(crate) fn flush_into(&mut self, frames: &mut Vec<FrameSetPacket>) {
+        frames.append(&mut self.ready_ordered);
         self.ready_bytes = 0;
         if self.packets.is_empty() {
-            return ret;
+            return;
         }
-
         let mut packets: Vec<_> = self.packets.drain().map(|(_, frame)| frame).collect();
         packets.sort_unstable_by_key(|frame| frame.sequence_number);
-        ret.extend(packets);
-        ret
+        frames.extend(packets);
     }
     pub fn fragments_expired(&self) -> bool {
         self.fragment_queue.expired()
@@ -592,6 +748,7 @@ pub struct SendQ {
     rto: i64,
     srtt: i64,
     sent_packet: Vec<(FrameSetPacket, bool, i64, u32, Vec<u32>)>,
+    flight_order_dirty: bool,
 }
 
 impl SendQ {
@@ -613,6 +770,7 @@ impl SendQ {
             queued_unreliable: 0,
             buffered_bytes: 0,
             sent_packet: vec![],
+            flight_order_dirty: false,
             reliable_frame_index: 0,
             sequenced_frame_indexes: ChannelIndexes::default(),
             ordered_frame_indexes: ChannelIndexes::default(),
@@ -704,14 +862,16 @@ impl SendQ {
                     return Err(RaknetError::PacketSizeExceedMTU);
                 }
 
-                let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                let mut frame =
+                    FrameSetPacket::from_payload(reliability, FramePayload::copy_shared(buf));
                 frame.reliable_frame_index = self.reliable_frame_index;
                 self.packets.push_back(frame);
                 self.reliable_frame_index = sequence::next(self.reliable_frame_index);
             }
             Reliability::ReliableOrdered => {
                 if buf.len() <= max_payload {
-                    let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                    let mut frame =
+                        FrameSetPacket::from_payload(reliability, FramePayload::copy_shared(buf));
                     frame.order_channel = order_channel;
                     frame.reliable_frame_index = self.reliable_frame_index;
                     frame.ordered_frame_index = *self.ordered_frame_indexes.get_mut(order_channel);
@@ -723,8 +883,22 @@ impl SendQ {
                         .map_err(|_| RaknetError::PacketSizeExceedMTU)?;
                     let ordered_frame_index = *self.ordered_frame_indexes.get_mut(order_channel);
 
+                    let data: Arc<[u8]> = Arc::from(buf);
+                    let shared_payload = Arc::new(SharedPayload {
+                        remaining: AtomicUsize::new(compound_size as usize),
+                        bytes: data.len(),
+                    });
                     for (fragment_index, chunk) in buf.chunks(max_payload).enumerate() {
-                        let mut frame = FrameSetPacket::new(reliability, chunk.to_vec());
+                        let start = fragment_index * max_payload;
+                        let mut frame = FrameSetPacket::from_payload(
+                            reliability,
+                            FramePayload::Shared {
+                                owner: data.clone(),
+                                start: start as u32,
+                                length: chunk.len() as u16,
+                            },
+                        );
+                        frame.shared_payload = Some(shared_payload.clone());
                         frame.flags |= 16;
                         frame.compound_size = compound_size;
                         frame.compound_id = self.compound_id;
@@ -752,7 +926,8 @@ impl SendQ {
                     current
                 };
                 let ordered_frame_index = self.ordered_frame_indexes.get(order_channel);
-                let mut frame = FrameSetPacket::new(reliability, buf.to_vec());
+                let mut frame =
+                    FrameSetPacket::from_payload(reliability, FramePayload::copy_shared(buf));
                 frame.order_channel = order_channel;
                 frame.reliable_frame_index = self.reliable_frame_index;
                 frame.sequenced_frame_index = sequenced_frame_index;
@@ -772,8 +947,15 @@ impl SendQ {
     }
 
     fn update_rto(&mut self, rtt: i64) {
-        self.srtt = (self.srtt * 4 + rtt) / 5;
-        self.rto = (self.srtt * 3 / 2).clamp(Self::RTO_LBOUND, Self::RTO_UBOUND);
+        (self.srtt, self.rto) = Self::latency_sample(self.srtt, rtt);
+    }
+
+    fn latency_sample(srtt: i64, rtt: i64) -> (i64, i64) {
+        let srtt = (srtt * 4 + rtt) / 5;
+        (
+            srtt,
+            (srtt * 3 / 2).clamp(Self::RTO_LBOUND, Self::RTO_UBOUND),
+        )
     }
 
     pub fn get_rto(&self) -> i64 {
@@ -792,6 +974,7 @@ impl SendQ {
                     item.3 + 1
                 );
                 let previous = item.0.sequence_number;
+                self.flight_order_dirty = true;
                 item.0.sequence_number = self.sequence_number;
                 self.sequence_number = sequence::next(self.sequence_number);
                 item.1 = false;
@@ -815,7 +998,14 @@ impl SendQ {
             return;
         };
         let item = self.sent_packet.remove(index);
-        self.buffered_bytes -= item.0.data.len() + Self::FRAME_BUDGET;
+        let released_payload = match &item.0.shared_payload {
+            Some(payload) if payload.remaining.fetch_sub(1, Ordering::Relaxed) == 1 => {
+                payload.bytes
+            }
+            Some(_) => 0,
+            None => item.0.data.len(),
+        };
+        self.buffered_bytes -= released_payload + Self::FRAME_BUDGET;
         if sequence::newer(sequence, self.ack_sequence_number) {
             let span = sequence::distance(sequence, self.ack_sequence_number);
             let missing: Vec<_> = self
@@ -845,21 +1035,56 @@ impl SendQ {
                 return;
             }
         }
-        let acknowledged: Vec<_> = self
-            .sent_packet
-            .iter()
-            .filter_map(|item| {
-                std::iter::once(item.0.sequence_number)
-                    .chain(item.4.iter().copied())
-                    .find(|id| {
-                        ranges
-                            .iter()
-                            .any(|&(start, end)| start <= *id && *id <= end)
-                    })
-            })
-            .collect();
-        for id in acknowledged {
-            self.ack(id, tick);
+        // Compact the bounded flight window once. Removing each acknowledged
+        // frame separately repeatedly shifts the remaining frame metadata.
+        let previous = self.ack_sequence_number;
+        let mut newest = previous;
+        let mut latency = (self.srtt, self.rto);
+        let mut released_bytes = 0;
+        self.sent_packet.retain_mut(|item| {
+            let acknowledged_id = std::iter::once(item.0.sequence_number)
+                .chain(item.4.iter().copied())
+                .find(|id| {
+                    ranges
+                        .iter()
+                        .any(|&(start, end)| start <= *id && *id <= end)
+                });
+            let Some(id) = acknowledged_id else {
+                return true;
+            };
+            let payload_bytes = match &item.0.shared_payload {
+                Some(payload) if payload.remaining.fetch_sub(1, Ordering::Relaxed) == 1 => {
+                    payload.bytes
+                }
+                Some(_) => 0,
+                None => item.0.data.len(),
+            };
+            released_bytes += payload_bytes + Self::FRAME_BUDGET;
+            if sequence::newer(id, newest) {
+                newest = id;
+            }
+            if item.3 == 0 {
+                latency = Self::latency_sample(latency.0, tick.saturating_sub(item.2).max(0));
+            }
+            false
+        });
+        self.buffered_bytes -= released_bytes;
+
+        (self.srtt, self.rto) = latency;
+        if newest != previous {
+            let span = sequence::distance(newest, previous);
+            let missing: Vec<_> = self
+                .sent_packet
+                .iter()
+                .filter_map(|item| {
+                    let distance = sequence::distance(item.0.sequence_number, previous);
+                    (distance > 0 && distance < span).then_some(item.0.sequence_number)
+                })
+                .collect();
+            for id in missing {
+                self.nack(id, tick);
+            }
+            self.ack_sequence_number = newest;
         }
     }
 
@@ -899,6 +1124,7 @@ impl SendQ {
 
             if p.1 && tick - p.2 >= cur_rto {
                 let previous = p.0.sequence_number;
+                self.flight_order_dirty = true;
                 p.0.sequence_number = self.sequence_number;
                 self.sequence_number = sequence::next(self.sequence_number);
                 p.1 = false;
@@ -910,12 +1136,23 @@ impl SendQ {
         }
     }
 
-    pub fn flush(&mut self, tick: i64, peer_addr: &SocketAddr) -> Vec<FrameSetPacket> {
+    pub fn flush(&mut self, tick: i64, peer_addr: &SocketAddr) -> OutgoingFrames {
         self.tick(tick);
 
-        let mut ret = Vec::new();
-        self.sent_packet
-            .sort_unstable_by_key(|packet| packet.0.sequence_number);
+        // Reserve queued batches once; a full reliable flight window reserves
+        // nothing. The compact vector keeps async frame transfers cheap.
+        let capacity = self.packets.len().min(
+            Self::MAX_IN_FLIGHT_PACKETS.saturating_sub(self.sent_packet.len())
+                + self.queued_unreliable,
+        );
+        let mut ret = OutgoingFrames::with_capacity(capacity);
+        // New sends preserve numeric order until the 24-bit sequence wraps.
+        // ACK removal preserves it too; only resequencing requires sorting.
+        if self.flight_order_dirty {
+            self.sent_packet
+                .sort_unstable_by_key(|packet| packet.0.sequence_number);
+            self.flight_order_dirty = false;
+        }
 
         for packet in &mut self.sent_packet {
             if !packet.1 {
@@ -954,6 +1191,13 @@ impl SendQ {
 
             if reliable {
                 ret.push(packet.clone());
+                if self
+                    .sent_packet
+                    .last()
+                    .is_some_and(|previous| previous.0.sequence_number > packet.sequence_number)
+                {
+                    self.flight_order_dirty = true;
+                }
                 self.sent_packet.push((packet, true, tick, 0, Vec::new()));
             } else {
                 self.queued_unreliable -= 1;
@@ -1147,7 +1391,7 @@ async fn test_recvq_fragment() {
 
     let ret = r.flush(&"0.0.0.0:0".parse().unwrap());
     assert!(ret.len() == 1);
-    assert!(ret[0].data == vec![1, 2, 3]);
+    assert_eq!(ret[0].data.as_ref(), &[1, 2, 3]);
     assert_eq!(ret[0].order_channel, 7);
 }
 
@@ -1570,4 +1814,232 @@ fn exact_mtu_payload_is_not_marked_as_split() {
     sendq.ack(frames[0].sequence_number, 1);
     assert!(sendq.is_empty());
     assert_eq!(sendq.buffered_bytes, 0);
+}
+
+#[cfg(test)]
+mod allocation_regressions {
+    use super::*;
+
+    #[test]
+    fn frame_decoder_reuses_storage_and_discards_previous_frames() {
+        let packet = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0xfe; 800]);
+        let encoded = packet.serialize().unwrap();
+        let mut frames = Vec::new();
+        FrameVec::decode_into(&encoded, &mut frames).unwrap();
+        let capacity = frames.capacity();
+        assert_eq!(frames[0].data.as_ref(), &[0xfe; 800]);
+        frames.clear();
+        FrameVec::decode_into(&encoded, &mut frames).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames.capacity(), capacity);
+        assert!(FrameVec::decode_into(&[0x84], &mut frames).is_err());
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn ordered_delivery_retains_the_receive_queue_allocation() {
+        let mut queue = RecvQ::new();
+        let mut delivered = Vec::new();
+        for index in 0..16 {
+            let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0xfe]);
+            frame.sequence_number = index;
+            frame.reliable_frame_index = index;
+            frame.ordered_frame_index = index;
+            queue.insert(frame).unwrap();
+            queue.flush_into(&mut delivered);
+            assert_eq!(delivered.len(), 1);
+            delivered.clear();
+            assert!(queue.ready_ordered.capacity() > 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod serialization_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn reused_fragment_buffer_preserves_the_wire_format() {
+        let mut frame = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0xfe; 16]);
+        frame.flags |= 16;
+        frame.sequence_number = 0xabcdef;
+        frame.reliable_frame_index = 0x123456;
+        frame.ordered_frame_index = 0x654321;
+        frame.order_channel = 7;
+        frame.compound_size = 3;
+        frame.compound_id = 0x1234;
+        frame.fragment_index = 1;
+        let mut expected = vec![
+            0x8c, 0xef, 0xcd, 0xab, 0x70, 0, 0x80, 0x56, 0x34, 0x12, 0x21, 0x43, 0x65, 7, 0, 0, 0,
+            3, 0x12, 0x34, 0, 0, 0, 1,
+        ];
+        expected.extend_from_slice(&[0xfe; 16]);
+        let mut buffer = Vec::with_capacity(128);
+        buffer.extend_from_slice(&[0xff; 64]);
+        for _ in 0..100 {
+            frame.serialize_into(&mut buffer).unwrap();
+            assert_eq!(buffer, expected);
+            assert_eq!(buffer.capacity(), 128);
+        }
+        frame.compound_size = 0;
+        assert!(frame.serialize_into(&mut buffer).is_err());
+        assert_eq!(buffer, expected);
+    }
+}
+
+#[cfg(test)]
+mod shared_fragment_tests {
+    use super::*;
+
+    #[test]
+    fn retransmitted_fragment_accepts_old_ack_without_releasing_the_budget_twice() {
+        let peer = "127.0.0.1:19132".parse().unwrap();
+        let mut queue = SendQ::new(1400);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe; 4096])
+            .unwrap();
+        let frames = queue.flush(0, &peer);
+        let old_id = frames[3].sequence_number;
+        queue.nack(old_id, 1);
+        let retry = queue.flush(1, &peer);
+        assert_eq!(retry.len(), 1);
+        let new_id = retry[0].sequence_number;
+        queue.ack(old_id, 2);
+        let budget = queue.buffered_bytes;
+        queue.ack(old_id, 2);
+        queue.ack(new_id, 2);
+        assert_eq!(queue.buffered_bytes, budget);
+        for frame in &frames[..3] {
+            queue.ack(frame.sequence_number, 2);
+        }
+        assert_eq!(queue.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn fragment_slices_share_one_allocation_and_keep_its_budget_until_final_ack() {
+        let peer = "127.0.0.1:19132".parse().unwrap();
+        let mut queue = SendQ::new(1400);
+        let payload = vec![0xfe; 4096];
+        queue
+            .insert(Reliability::ReliableOrdered, &payload)
+            .unwrap();
+        let frames = queue.flush(0, &peer);
+        assert_eq!(frames.len(), 4);
+        let owner = frames[0].shared_payload.as_ref().unwrap();
+        for frame in &frames {
+            assert!(Arc::ptr_eq(owner, frame.shared_payload.as_ref().unwrap()));
+        }
+        let restored: Vec<_> = frames
+            .iter()
+            .flat_map(|frame| frame.data.iter().copied())
+            .collect();
+        assert_eq!(restored, payload);
+        let initial = queue.buffered_bytes;
+        for (index, frame) in frames.iter().enumerate() {
+            queue.ack(frame.sequence_number, 1);
+            queue.ack(frame.sequence_number, 1);
+            if index + 1 < frames.len() {
+                assert_eq!(
+                    queue.buffered_bytes,
+                    initial - (index + 1) * SendQ::FRAME_BUDGET
+                );
+            }
+        }
+        assert_eq!(queue.buffered_bytes, 0);
+        assert_eq!(owner.remaining.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod flight_order_tests {
+    use super::*;
+
+    #[test]
+    fn retries_and_sequence_wrap_keep_the_existing_numeric_order() {
+        let peer = "127.0.0.1:19132".parse().unwrap();
+        let mut queue = SendQ::new(1400);
+        queue.sequence_number = sequence::MASK;
+        queue.insert(Reliability::ReliableOrdered, &[0xfe]).unwrap();
+        queue.insert(Reliability::ReliableOrdered, &[0xfe]).unwrap();
+        let initial = queue.flush(0, &peer);
+        assert_eq!(
+            initial
+                .iter()
+                .map(|frame| frame.sequence_number)
+                .collect::<Vec<_>>(),
+            [sequence::MASK, 0]
+        );
+        assert!(queue.flight_order_dirty);
+        assert!(queue.flush(1, &peer).is_empty());
+        assert_eq!(
+            queue
+                .sent_packet
+                .iter()
+                .map(|packet| packet.0.sequence_number)
+                .collect::<Vec<_>>(),
+            [0, sequence::MASK]
+        );
+        assert!(!queue.flight_order_dirty);
+        queue.nack(sequence::MASK, 2);
+        assert!(queue.flight_order_dirty);
+        let retry = queue.flush(2, &peer);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].sequence_number, 1);
+        assert!(!queue.flight_order_dirty);
+        assert_eq!(
+            queue
+                .sent_packet
+                .iter()
+                .map(|packet| packet.0.sequence_number)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        queue.ack(sequence::MASK, 3);
+        queue.ack(0, 3);
+        assert!(queue.is_empty());
+        assert_eq!(queue.buffered_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod owned_decode_tests {
+    use super::*;
+
+    #[test]
+    fn a_single_frame_moves_the_udp_allocation_into_its_payload() {
+        let frame = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0xfe; 800]);
+        let packet = frame.serialize().unwrap();
+        let pointer = packet.as_ptr();
+        let mut decoded = Vec::new();
+        FrameVec::decode_owned_into(packet, &mut decoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].data.as_ptr(), pointer);
+        assert_eq!(decoded[0].data.as_ref(), frame.data.as_ref());
+        let data: Vec<u8> = decoded.pop().unwrap().data.into();
+        assert_eq!(data.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn multiple_frames_and_invalid_lengths_keep_the_borrowed_decoder_contract() {
+        let first = FrameSetPacket::new(Reliability::ReliableOrdered, vec![0xfe; 800]);
+        let second = FrameSetPacket::new(Reliability::Unreliable, vec![0xfe; 64]);
+        let mut packet = first.serialize().unwrap();
+        packet.extend_from_slice(&second.serialize().unwrap()[4..]);
+        let mut expected = Vec::new();
+        FrameVec::decode_into(&packet, &mut expected).unwrap();
+        let mut actual = Vec::new();
+        FrameVec::decode_owned_into(packet.clone(), &mut actual).unwrap();
+        assert_eq!(actual.len(), 2);
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.serialize().unwrap(), expected.serialize().unwrap());
+        }
+        for length in 0..packet.len() {
+            let mut borrowed = Vec::new();
+            let mut owned = Vec::new();
+            assert_eq!(
+                FrameVec::decode_into(&packet[..length], &mut borrowed).is_ok(),
+                FrameVec::decode_owned_into(packet[..length].to_vec(), &mut owned).is_ok()
+            );
+        }
+    }
 }

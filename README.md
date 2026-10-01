@@ -5,7 +5,7 @@ Raknet is a reliable udp transport protocol that is generally used for communica
 
 Raknet protocol supports various reliability options, and has better transmission performance than TCP in unstable network environments. This project is an incomplete implementation of the protocol by reverse engineering.
 
-Requires *Tokio 1.21 or newer* asynchronous runtime support.
+Requires *Tokio 1.38 or newer* asynchronous runtime support.
 
 Reference : http://www.jenkinssoftware.com/raknet/manual/index.html
 
@@ -29,7 +29,7 @@ _This project is not affiliated with Jenkins Software LLC nor RakNet._
 ```toml
 # Cargo.toml
 [dependencies]
-rust-raknet = "0.14"
+rust-raknet = "0.15"
 ```
 
 Documentation : https://docs.rs/rust-raknet/latest/rust_raknet/
@@ -74,6 +74,67 @@ async fn connect(){
     }
     socket.close().await.unwrap();
 }
+```
+
+## Explicit MTU negotiation
+
+The optional MTU and Linux sharding APIs below are available in the current
+repository source.
+
+The ordinary client and listener APIs retain their 1,400-byte nominal MTU.
+Applications that know their network path can opt into another limit:
+
+```rust
+use rust_raknet::{RaknetListener, RaknetSocket};
+
+async fn configured_connection() -> rust_raknet::error::Result<()> {
+    let address = "127.0.0.1:19132".parse().unwrap();
+    let mut listener = RaknetListener::bind_with_maximum_mtu(&address, 1428).await?;
+    listener.listen().await;
+    let client = RaknetSocket::connect_with_version_and_mtu(&address, 11, 1428).await?;
+    assert_eq!(client.mtu(), 1428);
+    client.close().await?;
+    listener.close().await
+}
+```
+
+Both limits must be 61–1,492 bytes. Negotiation uses the smaller peer limit;
+`mtu()` returns the negotiated value. The nominal RakNet MTU reserves 28 bytes
+for IPv4/UDP headers. Choose a value the actual path can carry, accounting for
+IPv6 or tunnel overhead when applicable. Larger MTUs can reduce fragmentation;
+this API does not discover path MTU or change the host interface configuration.
+
+## Linux receive socket sharding
+
+High-concurrency servers can opt into a fixed group of receive sockets:
+
+```rust
+use std::num::NonZeroUsize;
+use rust_raknet::RaknetListener;
+
+async fn listen() -> rust_raknet::error::Result<RaknetListener> {
+    let address = "127.0.0.1:19132".parse().unwrap();
+    let mut listener = RaknetListener::bind_with_socket_shards(
+        &address,
+        NonZeroUsize::new(4).unwrap(),
+    ).await?;
+    listener.listen().await;
+    Ok(listener)
+}
+```
+
+This Linux API uses `SO_REUSEPORT` to distribute peer flows. The group shares one
+server GUID, MOTD and accept backlog, and closes as one listener. Its size is fixed
+until shutdown. One shard uses the ordinary `bind` path; the default API continues
+to use one socket. The runtime needs enough worker threads to process the shards. Measure the
+workload before choosing a shard count: a proxy feeding a single upstream socket
+can be slower with several frontend shards. The proxy default remains one.
+
+The RakNet proxy example accepts `--socket-shards 4` on Linux:
+
+```sh
+cargo run --release --manifest-path example/proxy/Cargo.toml -- \
+    -l 127.0.0.1:19144 -r 127.0.0.1:19142 --socket-shards 4
 ```
 
 # Bedrock server discovery
@@ -121,36 +182,99 @@ A `RaknetListener` buffers up to 128 connections awaiting `accept()` by default.
 
 # Benchmark
 
-Measured on **2026-09-30**, comparing this tree with TCP. RakNet uses `ReliableOrdered`; TCP uses length-prefixed records with `TCP_NODELAY`. Sequential request/echo RTT sampling precedes a pipelined burst with concurrent reception.
+Measured on **2026-10-01–02**, comparing this tree with TCP and the
+[official C KCP implementation](example/test_benchmark/kcp/README.md). RakNet uses
+`ReliableOrdered`; TCP uses length-prefixed records, `TCP_NODELAY`, whole-record
+writes and a reused server buffer. Both C and Rust drivers verify complete echoes
+and reuse payload templates. The upstream KCP core is unchanged.
 
-Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1, Tokio 1.53.1, release builds, four Tokio workers per process. Tests ran in a private user/network namespace: MTU 1,500 bytes, GSO/GRO aggregation limited to one packet, and `tc netem` on its own loopback. Host network settings were unchanged. CPU affinity does not reserve a core exclusively.
+Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1,
+Tokio 1.53.1, GCC 13.3.0, release builds. Tests ran in a private user/network
+namespace: loopback MTU 1,500 B, GSO/GRO limited to one packet, namespace-local
+`tc netem`, and process priority `nice 10`. Host network settings were unchanged.
+CPU affinity does not reserve a core exclusively.
 
-### Throughput
+### Single-connection throughput
 
-**Higher is better.** Values count echoed application payload per direction in MiB/s (1 MiB = 1,048,576 bytes), excluding headers and ACKs. Both protocols have three runs per profile; cells show the median and range. Each run has 100 warmups and 300 RTT samples before the burst.
+**Higher is better.** Values count echoed application payload per direction in
+MiB/s (1 MiB = 1,048,576 B), excluding headers and ACKs. Cells show the median and
+range of three runs, alternating protocol order. Each run has 100 warmups and
+300 sequential RTT samples before the measured burst. Every driver keeps at most
+64 messages awaiting verified echoes, refilling available slots without an idle
+poll between batches. Throughput runs have no CPU affinity.
 
-| Network profile | Payload / burst count | TCP throughput (median, range) | RakNet throughput (median, range) |
+The Rust processes use four Tokio workers; the single-connection C adapter uses
+one event loop per process. These are throughput comparisons of those configured
+applications, not comparisons at equal CPU consumption.
+
+For equal IPv4 packet budgets, this table explicitly configures RakNet's nominal
+MTU to **1,428 B**, including 28 B of IPv4/UDP overhead. KCP's UDP MTU is
+**1,400 B**, excluding that overhead. The ordinary RakNet APIs retain their
+**1,400 B** default. The configured size lets a 4,096 B message use three
+fragments in both protocols; the default RakNet size needs four. KCP uses message
+mode, send/receive windows of 64/128 segments, `nodelay(1, 10, 2, 1)`, immediate
+writes/ACKs, and no FEC or encryption. RakNet keeps its normal 64-datagram flight
+window and retry timings.
+
+| Network profile | Payload / burst count | TCP throughput (median, range) | RakNet throughput (median, range) | C KCP throughput (median, range) |
+| --- | ---: | ---: | ---: | ---: |
+| No injected loss | 800 B / 200,000 messages | 150.97 MiB/s (150.44–153.57 MiB/s) | 188.42 MiB/s (184.14–189.43 MiB/s) | 153.20 MiB/s (151.82–154.32 MiB/s) |
+| 1% loss | 800 B / 200,000 messages | 20.08 MiB/s (18.88–43.51 MiB/s) | 174.84 MiB/s (171.90–186.40 MiB/s) | 143.60 MiB/s (143.42–147.77 MiB/s) |
+| 5% loss | 800 B / 200,000 messages | 1.07 MiB/s (1.02–1.08 MiB/s) | 168.94 MiB/s (150.75–170.40 MiB/s) | 120.06 MiB/s (118.66–122.54 MiB/s) |
+| No injected loss, small packets | 64 B / 300,000 messages | 13.75 MiB/s (13.49–13.81 MiB/s) | 16.60 MiB/s (15.94–16.79 MiB/s) | 12.38 MiB/s (12.18–12.42 MiB/s) |
+| No injected loss, fragmented messages | 4,096 B / 50,000 messages | 344.51 MiB/s (343.29–350.93 MiB/s) | 316.13 MiB/s (313.54–317.18 MiB/s) | 254.99 MiB/s (250.86–259.83 MiB/s) |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.12 MiB/s (1.07–1.19 MiB/s) | 2.94 MiB/s (2.71–3.10 MiB/s) | 2.95 MiB/s (2.86–2.97 MiB/s) |
+
+All three protocols completed **18/18** throughput runs. In this configuration,
+RakNet's median exceeds C KCP in the clean, small, fragmented and 1%/5% loss
+profiles. With delay and loss their medians are effectively equal; this does not
+establish a performance ordering across other networks or CPU budgets.
+
+### Single-connection latency
+
+**Lower is better.** RTT is round-trip latency. Each cell lists p50 / p95 / p99 as
+medians of run-level percentiles. Each protocol has three runs, 3,000 sequential
+samples after 300 warmups, with separate client/server CPU affinities. Rust uses
+four workers pinned to the same per-process CPU; C uses one event loop.
+
+| Network profile | TCP RTT (p50 / p95 / p99) | RakNet RTT (p50 / p95 / p99) | C KCP RTT (p50 / p95 / p99) |
 | --- | ---: | ---: | ---: |
-| 0% loss | 800 B / 200,000 messages | 110.51 MiB/s (97.91–118.01 MiB/s) | 74.76 MiB/s (72.45–77.43 MiB/s) |
-| 1% loss | 800 B / 20,000 messages | 9.59 MiB/s (9.29–9.94 MiB/s) | 78.91 MiB/s (63.40–80.28 MiB/s) |
-| 5% loss | 800 B / 10,000 messages | 0.78 MiB/s (0.76–1.24 MiB/s) | 65.55 MiB/s (48.09–69.90 MiB/s) |
-| 0% loss, small packets | 64 B / 300,000 messages | 9.27 MiB/s (9.25–9.31 MiB/s) | 6.59 MiB/s (6.14–6.59 MiB/s) |
-| 0% loss, fragmented messages | 4,096 B / 50,000 messages | 259.88 MiB/s (256.73–264.91 MiB/s) | 102.49 MiB/s (81.58–112.06 MiB/s) |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.06 MiB/s (0.96–1.42 MiB/s) | 4.43 MiB/s (4.38–4.53 MiB/s) |
+| No injected loss, CPU affinity | 16.1 µs / 75.2 µs / 87.1 µs | 17.6 µs / 22.4 µs / 48.0 µs | 13.8 µs / 57.5 µs / 62.0 µs |
 
-RakNet and TCP each completed **18/18** throughput runs.
+### Concurrent throughput
 
-### Latency
+Both protocols use four workers, four server receive sockets with `SO_REUSEPORT`,
+separate sets of four client/server CPUs, 800 B messages, and a sliding application
+window of 16 messages per connection. Each run verifies **1,048,576 ordered
+echoes** in its measured burst. Cells show the median and range of three runs,
+alternating protocol order. Setup and 20 preceding sequential RTTs per connection
+are excluded from throughput; every connection stays open until all bursts finish.
+These are synthetic transport sessions, not authenticated Minecraft players.
 
-**Lower is better.** RTT is round-trip latency. Each cell lists p50 / p95 / p99, as medians of run-level percentiles. Clean profiles have five runs per protocol, 10,000 samples after 1,000 warmups. The delayed profile has three runs per protocol, 2,000 samples after 100 warmups. The pinned profiles use separate client/server CPU affinities.
+This table uses the ordinary nominal RakNet MTU of **1,400 B** and KCP UDP MTU of
+**1,400 B**. Their IPv4 budgets differ by 28 B, but each 800 B message fits one
+datagram in both protocols. Do not extrapolate this table to fragmented traffic.
 
-| Network profile | TCP RTT (p50 / p95 / p99) | RakNet RTT (p50 / p95 / p99) |
-| --- | ---: | ---: |
-| 0% loss, CPU affinity | 16.200 µs / 24.100 µs / 49.500 µs | 25.600 µs / 39.400 µs / 68.400 µs |
-| 0% loss, no CPU affinity | 16.900 µs / 25.600 µs / 65.400 µs | 19.500 µs / 32.700 µs / 76.300 µs |
-| 1% loss + 5 ms each way, CPU affinity | 10.354 ms / 12.421 ms / 36.637 ms | 10.405 ms / 12.445 ms / 85.924 ms |
+| Connections | Injected loss | RakNet throughput (median, range) | C KCP throughput (median, range) | RakNet / C KCP median |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 connections | 0% | 564.93 MiB/s (562.26–581.05 MiB/s) | 396.07 MiB/s (387.85–399.02 MiB/s) | 142.6% |
+| 256 connections | 0% | 542.09 MiB/s (537.90–583.91 MiB/s) | 421.80 MiB/s (411.35–430.18 MiB/s) | 128.5% |
+| 1,024 connections | 0% | 507.85 MiB/s (499.11–537.84 MiB/s) | 422.22 MiB/s (412.15–422.54 MiB/s) | 120.3% |
+| 2,048 connections | 0% | 429.29 MiB/s (425.11–436.89 MiB/s) | 333.14 MiB/s (321.37–353.58 MiB/s) | 128.9% |
+| 64 connections | 1% | 553.59 MiB/s (512.34–555.89 MiB/s) | 409.35 MiB/s (317.50–409.88 MiB/s) | 135.2% |
+| 256 connections | 1% | 491.77 MiB/s (479.02–530.03 MiB/s) | 408.24 MiB/s (369.61–427.65 MiB/s) | 120.5% |
+| 1,024 connections | 1% | 408.88 MiB/s (375.69–443.87 MiB/s) | 343.07 MiB/s (301.44–408.38 MiB/s) | 119.2% |
+| 2,048 connections | 1% | 368.64 MiB/s (359.22–385.89 MiB/s) | 323.07 MiB/s (322.47–335.00 MiB/s) | 114.1% |
 
-These are local single-connection echo measurements. Random loss includes ACKs in both directions and does not reproduce an identical trace between runs. Scheduling and retransmissions affect tail latency. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction.
+Both protocols completed **24/24** concurrent runs. RakNet's throughput median
+exceeds C KCP in all eight measured groups. Random loss affects data and ACKs in
+both directions, and traces differ between runs. Even with no injected loss,
+namespace-local UDP receive buffers can overflow under saturation. Scheduling,
+queueing and retransmissions affect the ranges and tail latency; inspect UDP
+error counters as well as netem counters when reproducing results.
+
+See the [benchmark instructions](example/test_benchmark/README.md) and
+[C adapters](example/test_benchmark/kcp/README.md) for isolated reproduction.
 
 ## Contributing
 

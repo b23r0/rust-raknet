@@ -69,11 +69,11 @@ def run_case(profile, repeat, variant, *, warmup=100, samples=300, pin=False):
                  "--payload-size", str(size), "--warmup", str(warmup), "--latency-samples", str(samples)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             try:
-                stdout, stderr = client.communicate(timeout=150)
+                stdout, stderr = client.communicate(timeout=300)
             except subprocess.TimeoutExpired:
                 os.killpg(client.pid, signal.SIGKILL)
                 stdout, stderr = client.communicate()
-                record["error"] = "Client exceeded 150 seconds"
+                record["error"] = "Client exceeded 300 seconds"
             record.update(returncode=client.returncode, stdout=stdout, stderr=stderr,
                           wall=time.monotonic() - started)
             if client.returncode == 0:
@@ -121,8 +121,8 @@ def main():
             ("clean-long", 0, 0, 800, 200000),
             ("small-long", 0, 0, 64, 300000),
             ("fragment-long", 0, 0, 4096, 50000),
-            ("loss1", 1, 0, 800, 20000),
-            ("loss5", 5, 0, 800, 10000),
+            ("loss1", 1, 0, 800, 200000),
+            ("loss5", 5, 0, 800, 200000),
             ("wan", 1, 5, 800, 3000),
         ]
     elif sys.argv[1:] == ["--wan-latency"]:

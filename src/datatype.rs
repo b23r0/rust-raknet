@@ -7,8 +7,8 @@ use std::{
 };
 
 #[derive(Clone, Default)]
-pub struct RaknetWriter {
-    buf: Vec<u8>,
+pub struct RaknetWriter<B = Vec<u8>> {
+    buf: B,
 }
 
 impl RaknetWriter {
@@ -16,10 +16,22 @@ impl RaknetWriter {
         Self::default()
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-        }
+    pub fn _pos(&self) -> u64 {
+        self.buf.len() as u64
+    }
+
+    pub fn get_raw_payload(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl<B: BufMut> RaknetWriter<B> {
+    pub(crate) fn from_buffer(buf: B) -> Self {
+        Self { buf }
+    }
+
+    pub(crate) fn remaining_mut(&self) -> usize {
+        self.buf.remaining_mut()
     }
 
     pub fn write(&mut self, v: &[u8]) -> Result<()> {
@@ -163,14 +175,6 @@ impl RaknetWriter {
                 self.write_i32(0, Endian::Big)
             }
         }
-    }
-
-    pub fn get_raw_payload(self) -> Vec<u8> {
-        self.buf
-    }
-
-    pub fn _pos(&self) -> u64 {
-        self.buf.len() as u64
     }
 }
 

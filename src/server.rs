@@ -20,12 +20,78 @@ struct SessionSender {
     mtu: u16,
 }
 
+// The authoritative session map handles handshakes and shutdown. This bounded,
+// direct-mapped cache avoids hashing the common dispatch path. A slot collision
+// is only a cache miss: the complete peer address is always checked.
+struct SessionDispatchCache {
+    entries: Vec<Option<CachedSession>>,
+}
+
+struct CachedSession {
+    address: SocketAddr,
+    sender: Sender<Vec<u8>>,
+    close: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for SessionDispatchCache {
+    fn default() -> Self {
+        Self {
+            entries: std::iter::repeat_with(|| None).take(Self::LIMIT).collect(),
+        }
+    }
+}
+
+impl SessionDispatchCache {
+    const LIMIT: usize = 4096;
+
+    fn slot(address: &SocketAddr) -> usize {
+        usize::from(address.port()) % Self::LIMIT
+    }
+
+    fn sender(&self, address: &SocketAddr) -> Option<&Sender<Vec<u8>>> {
+        self.entries[Self::slot(address)]
+            .as_ref()
+            .filter(|entry| {
+                entry.address == *address && !entry.close.is_closed() && !entry.sender.is_closed()
+            })
+            .map(|entry| &entry.sender)
+    }
+
+    fn remember(&mut self, address: SocketAddr, session: &SessionSender) {
+        self.entries[Self::slot(&address)] = Some(CachedSession {
+            address,
+            sender: session.sender.clone(),
+            close: session.close.clone(),
+        });
+    }
+
+    fn forget(&mut self, address: &SocketAddr) {
+        let slot = &mut self.entries[Self::slot(address)];
+        if slot.as_ref().is_some_and(|entry| entry.address == *address) {
+            *slot = None;
+        }
+    }
+
+    fn prune(&mut self) {
+        for slot in &mut self.entries {
+            if slot
+                .as_ref()
+                .is_some_and(|entry| entry.close.is_closed() || entry.sender.is_closed())
+            {
+                *slot = None;
+            }
+        }
+    }
+}
+
 /// A RakNet UDP server that accepts incoming connections.
 pub struct RaknetListener {
     motd: String,
+    shards: Vec<Self>,
     socket: Option<Arc<UdpSocket>>,
     guid: u64,
     listened: bool,
+    maximum_mtu: u16,
     connection_receiver: Receiver<RaknetSocket>,
     connection_sender: Sender<RaknetSocket>,
     sessions: Arc<Mutex<HashMap<SocketAddr, SessionSender>>>,
@@ -49,6 +115,69 @@ impl RaknetListener {
             raknet_log_debug!("could not enlarge the listener receive buffer: {error}");
         }
         Self::from_std(socket).await
+    }
+
+    /// Bind a listener with an explicit maximum nominal MTU in bytes.
+    ///
+    /// The maximum must be between 61 and 1,492 bytes. Offline negotiation
+    /// chooses the smaller of this limit and the client's request. Ordinary
+    /// listeners retain their 1,400-byte maximum.
+    pub async fn bind_with_maximum_mtu(sockaddr: &SocketAddr, maximum_mtu: u16) -> Result<Self> {
+        if !(61..=RAKNET_MAX_MTU).contains(&maximum_mtu) {
+            return Err(RaknetError::PacketSizeExceedMTU);
+        }
+        let mut listener = Self::bind(sockaddr).await?;
+        listener.maximum_mtu = maximum_mtu;
+        Ok(listener)
+    }
+
+    /// Bind a fixed group of UDP receive sockets on Linux.
+    ///
+    /// All shards use the same address, server GUID, MOTD and accept backlog.
+    /// Linux `SO_REUSEPORT` distributes peer flows across the fixed group. Create
+    /// every shard before listening and retain the group for the listener's lifetime.
+    /// The count must be at most 64; one shard uses the ordinary binding path.
+    /// This changes only these sockets and does not alter system network limits.
+    #[cfg(target_os = "linux")]
+    pub async fn bind_with_socket_shards(
+        sockaddr: &SocketAddr,
+        count: std::num::NonZeroUsize,
+    ) -> Result<Self> {
+        if count.get() == 1 {
+            return Self::bind(sockaddr).await;
+        }
+        if count.get() > 64 {
+            return Err(RaknetError::SocketError);
+        }
+        fn bind_socket(address: &SocketAddr) -> Result<std::net::UdpSocket> {
+            let socket = socket2::Socket::new(
+                socket2::Domain::for_address(*address),
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .map_err(|_| RaknetError::BindAddressError)?;
+            socket
+                .set_reuse_port(true)
+                .map_err(|_| RaknetError::SocketError)?;
+            socket
+                .set_recv_buffer_size(2 * 1024 * 1024)
+                .map_err(|_| RaknetError::SocketError)?;
+            socket
+                .bind(&(*address).into())
+                .map_err(|_| RaknetError::BindAddressError)?;
+            Ok(socket.into())
+        }
+        let mut listener = Self::from_std(bind_socket(sockaddr)?).await?;
+        let address = listener.local_addr()?;
+        for _ in 1..count.get() {
+            let mut shard = Self::from_std(bind_socket(&address)?).await?;
+            shard.guid = listener.guid;
+            shard.connection_sender = listener.connection_sender.clone();
+            shard.motd_sender = listener.motd_sender.clone();
+            shard.motd_receiver = listener.motd_receiver.clone();
+            listener.shards.push(shard);
+        }
+        Ok(listener)
     }
 
     /// Bind with a requested per-socket UDP receive buffer size.
@@ -84,6 +213,9 @@ impl RaknetListener {
             "configure the accept backlog before listening"
         );
         let (sender, receiver) = channel(backlog.get());
+        for shard in &mut self.shards {
+            shard.connection_sender = sender.clone();
+        }
         self.connection_sender = sender;
         self.connection_receiver = receiver;
         self
@@ -104,9 +236,11 @@ impl RaknetListener {
         let (motd_sender, motd_receiver) = watch::channel(String::new());
         let listener = Self {
             motd: String::new(),
+            shards: Vec::new(),
             socket: Some(Arc::new(socket)),
             guid: rand::random(),
             listened: false,
+            maximum_mtu: RAKNET_CLIENT_MTU,
             connection_receiver,
             connection_sender,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -152,7 +286,12 @@ impl RaknetListener {
                 }
 
                 let mut sessions = sessions.lock().await;
-                if sessions.contains_key(&addr) {
+                // A late collector message from an old peer must not remove
+                // a replacement connection that reused the same address.
+                if sessions
+                    .get(&addr)
+                    .is_some_and(|session| session.close.is_closed())
+                {
                     match socket.send_to(&[PacketID::Disconnect.to_u8()], addr).await {
                         Ok(_) => {}
                         Err(e) => {
@@ -217,6 +356,22 @@ impl RaknetListener {
         if self.close_notifier.is_closed() || self.listened {
             return;
         }
+        for shard in &mut self.shards {
+            // Only the parent owns discovery metadata. Prevent a shard from
+            // replacing the shared MOTD with its default during startup.
+            shard.motd = self.motd.clone();
+        }
+        self.listen_single().await;
+        for shard in &mut self.shards {
+            shard.motd = self.motd.clone();
+            shard.listen_single().await;
+        }
+    }
+
+    async fn listen_single(&mut self) {
+        if self.close_notifier.is_closed() || self.listened {
+            return;
+        }
 
         let Some(socket) = self.socket.as_ref().cloned() else {
             return;
@@ -243,6 +398,7 @@ impl RaknetListener {
         }
 
         let guid = self.guid;
+        let maximum_mtu = self.maximum_mtu;
         let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
 
@@ -260,6 +416,7 @@ impl RaknetListener {
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             let mut pending_versions = HashMap::<SocketAddr, (u8, std::time::Instant)>::new();
+            let mut dispatch_cache = SessionDispatchCache::default();
             let mut cleanup = tokio::time::interval(std::time::Duration::from_secs(30));
 
             raknet_log_debug!("start listen worker : {}", local_addr);
@@ -283,6 +440,7 @@ impl RaknetListener {
                     },
                     _ = cleanup.tick() => {
                         pending_versions.retain(|_, (_, time)| time.elapsed().as_secs() < 60);
+                        dispatch_cache.prune();
                         continue;
                     },
                     changed = motd_receiver.changed() => {
@@ -401,7 +559,7 @@ impl RaknetListener {
                             guid,
                             // Encryption is not negotiated by this implementation.
                             use_encryption: 0x00,
-                            mtu_size: RAKNET_CLIENT_MTU,
+                            mtu_size: req.mtu_size.min(maximum_mtu),
                         };
 
                         let reply = match write_packet_connection_open_reply_1(&packet) {
@@ -418,12 +576,13 @@ impl RaknetListener {
                         continue;
                     }
                     PacketID::OpenConnectionRequest2 => {
+                        dispatch_cache.forget(&addr);
                         let req = match read_packet_connection_open_request_2(&buf[..size]) {
                             Ok(p) => p,
                             Err(_) => continue,
                         };
 
-                        if !(61..=RAKNET_CLIENT_MTU).contains(&req.mtu) {
+                        if !(61..=maximum_mtu).contains(&req.mtu) {
                             continue;
                         }
                         let existing = sessions
@@ -508,6 +667,7 @@ impl RaknetListener {
                         accept_slot.send(raknet_socket);
                     }
                     PacketID::Disconnect => {
+                        dispatch_cache.forget(&addr);
                         let session_sender = sessions
                             .lock()
                             .await
@@ -519,24 +679,30 @@ impl RaknetListener {
                         }
                     }
                     _ => {
-                        let session_sender = {
-                            sessions
-                                .lock()
-                                .await
-                                .get(&addr)
-                                .map(|session| session.sender.clone())
+                        let result = if let Some(sender) = dispatch_cache.sender(&addr) {
+                            // Preserve the cooperative budget consumed by the map
+                            // lock on the uncached path. A busy UDP listener must
+                            // still give protocol and application tasks time to run.
+                            tokio::task::consume_budget().await;
+                            Some(sender.try_send(buf[..size].to_vec()))
+                        } else {
+                            dispatch_cache.forget(&addr);
+                            let sessions = sessions.lock().await;
+                            sessions.get(&addr).map(|session| {
+                                let result = session.sender.try_send(buf[..size].to_vec());
+                                dispatch_cache.remember(addr, session);
+                                result
+                            })
                         };
-
-                        if let Some(session_sender) = session_sender {
-                            match session_sender.try_send(buf[..size].to_vec()) {
-                                Ok(()) => {}
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                    raknet_log_debug!("session receive queue full for {}", addr);
-                                }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                    sessions.lock().await.remove(&addr);
-                                    version_map.lock().await.remove(&addr);
-                                }
+                        match result {
+                            Some(Ok(())) | None => {}
+                            Some(Err(tokio::sync::mpsc::error::TrySendError::Full(_))) => {
+                                raknet_log_debug!("session receive queue full for {}", addr);
+                            }
+                            Some(Err(tokio::sync::mpsc::error::TrySendError::Closed(_))) => {
+                                dispatch_cache.forget(&addr);
+                                sessions.lock().await.remove(&addr);
+                                version_map.lock().await.remove(&addr);
                             }
                         }
                     }
@@ -650,14 +816,27 @@ impl RaknetListener {
     /// socket.close().await;
     /// ```
     pub async fn close(&mut self) -> Result<()> {
-        if self.close_notifier.is_closed() {
+        // Signal the whole group before releasing any socket. Active flows must
+        // never be remapped onto a shard that is still accepting new sessions.
+        self.close_notifier.close();
+        for shard in &self.shards {
+            shard.close_notifier.close();
+        }
+        self.close_single().await?;
+        for shard in &mut self.shards {
+            shard.close_single().await?;
+        }
+        Ok(())
+    }
+
+    async fn close_single(&mut self) -> Result<()> {
+        if self.socket.is_none() {
             return Ok(());
         }
         self.close_notifier.close();
         if self.listened {
             self.all_session_closed_notifier.notified().await;
         }
-
         if let Some(socket) = self.socket.as_ref() {
             while Arc::strong_count(socket) != 1 {
                 tokio::task::yield_now().await;
@@ -665,7 +844,6 @@ impl RaknetListener {
         }
         self.socket = None;
         self.listened = false;
-
         Ok(())
     }
 
@@ -683,9 +861,15 @@ impl RaknetListener {
     }
 
     pub async fn get_peer_raknet_version(&self, peer: &SocketAddr) -> Result<u8> {
-        let version_map = self.version_map.lock().await;
-        let ver = version_map.get(peer);
-        Ok(*ver.unwrap_or(&RAKNET_PROTOCOL_VERSION))
+        if let Some(version) = self.version_map.lock().await.get(peer).copied() {
+            return Ok(version);
+        }
+        for shard in &self.shards {
+            if let Some(version) = shard.version_map.lock().await.get(peer).copied() {
+                return Ok(version);
+            }
+        }
+        Ok(RAKNET_PROTOCOL_VERSION)
     }
 }
 
@@ -730,4 +914,240 @@ async fn custom_receive_buffer_binds_and_rejects_unrepresentable_sizes() {
         .await,
         Err(RaknetError::SocketError)
     ));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod shard_tests {
+    use super::*;
+    use crate::arq::Reliability;
+    use std::{num::NonZeroUsize, time::Duration};
+    use tokio::{task::JoinSet, time::timeout};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shards_share_discovery_backlog_versions_and_close_all_sessions() {
+        timeout(Duration::from_secs(10), async {
+            let mut listener = RaknetListener::bind_with_socket_shards(
+                &"127.0.0.1:0".parse().unwrap(),
+                NonZeroUsize::new(4).unwrap(),
+            )
+            .await
+            .unwrap()
+            .with_accept_backlog(NonZeroUsize::new(64).unwrap());
+            let address = listener.local_addr().unwrap();
+            let guid = listener.get_guid();
+            listener
+                .set_full_motd("shared discovery".into())
+                .await
+                .unwrap();
+            listener.listen().await;
+            listener
+                .set_full_motd("updated discovery".into())
+                .await
+                .unwrap();
+            for _ in 0..32 {
+                let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let packet =
+                    write_packet_ping(&PacketUnconnectedPing { time: 1, guid: 2 }).unwrap();
+                socket.send_to(&packet, address).await.unwrap();
+                let mut buffer = [0; 2048];
+                let (size, _) = socket.recv_from(&mut buffer).await.unwrap();
+                let pong = read_packet_pong(&buffer[..size]).unwrap();
+                assert_eq!(pong.guid, guid);
+                assert_eq!(pong.motd, "updated discovery");
+            }
+            let mut tasks = JoinSet::new();
+            for index in 0..32 {
+                tasks.spawn(async move {
+                    let version = if index % 2 == 0 { 10 } else { 11 };
+                    RaknetSocket::connect_with_version(&address, version)
+                        .await
+                        .unwrap()
+                });
+            }
+            let mut servers = Vec::new();
+            for _ in 0..32 {
+                let server = listener.accept().await.unwrap();
+                assert_eq!(
+                    listener
+                        .get_peer_raknet_version(&server.peer_addr().unwrap())
+                        .await
+                        .unwrap(),
+                    server.raknet_version().unwrap()
+                );
+                servers.push(server);
+            }
+            let mut clients = Vec::new();
+            while let Some(client) = tasks.join_next().await {
+                clients.push(client.unwrap());
+            }
+            let mut occupied = usize::from(!listener.sessions.lock().await.is_empty());
+            for shard in &listener.shards {
+                occupied += usize::from(!shard.sessions.lock().await.is_empty());
+            }
+            assert!(occupied > 1, "flows did not reach multiple sockets");
+            for server in &servers {
+                server
+                    .send(&[0xfe, 42], Reliability::ReliableOrdered)
+                    .await
+                    .unwrap();
+            }
+            for client in &clients {
+                assert_eq!(client.recv().await.unwrap(), vec![0xfe, 42]);
+            }
+            listener.close().await.unwrap();
+            listener.close().await.unwrap();
+            assert!(listener.sessions.lock().await.is_empty());
+            assert!(listener.socket.is_none());
+            for shard in &listener.shards {
+                assert!(shard.sessions.lock().await.is_empty());
+                assert!(shard.socket.is_none());
+            }
+            for client in clients {
+                assert!(client.recv().await.is_err());
+            }
+        })
+        .await
+        .expect("sharded listener stalled");
+    }
+
+    #[tokio::test]
+    async fn shard_count_is_bounded_and_one_uses_the_normal_listener() {
+        let address = "127.0.0.1:0".parse().unwrap();
+        assert!(
+            RaknetListener::bind_with_socket_shards(&address, NonZeroUsize::new(65).unwrap(),)
+                .await
+                .is_err()
+        );
+        let mut listener = RaknetListener::bind_with_socket_shards(&address, NonZeroUsize::MIN)
+            .await
+            .unwrap();
+        assert!(listener.shards.is_empty());
+        listener.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dispatch_cache_tests {
+    use super::*;
+
+    fn session() -> (SessionSender, Receiver<Vec<u8>>) {
+        let (sender, receiver) = channel(2);
+        (
+            SessionSender {
+                sender,
+                close: Arc::new(tokio::sync::Semaphore::new(0)),
+                guid: 1,
+                mtu: 1400,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn cache_rejects_closed_sessions_and_replaces_reused_addresses() {
+        let address = "127.0.0.1:19132".parse().unwrap();
+        let (first, _first_receiver) = session();
+        let (second, second_receiver) = session();
+        let mut cache = SessionDispatchCache::default();
+        cache.remember(address, &first);
+        assert!(cache.sender(&address).unwrap().same_channel(&first.sender));
+        first.close.close();
+        assert!(cache.sender(&address).is_none());
+        cache.remember(address, &second);
+        assert!(cache.sender(&address).unwrap().same_channel(&second.sender));
+        drop(second_receiver);
+        assert!(cache.sender(&address).is_none());
+        cache.prune();
+        assert!(cache.entries.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn late_collection_does_not_remove_a_replacement_peer() {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let peer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let marker_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer = peer_socket.local_addr().unwrap();
+            let marker = marker_socket.local_addr().unwrap();
+            let (replacement, _replacement_receiver) = session();
+            let close = replacement.close.clone();
+            let (old_marker, _marker_receiver) = session();
+            old_marker.close.close();
+            listener.sessions.lock().await.insert(peer, replacement);
+            listener.sessions.lock().await.insert(marker, old_marker);
+            listener.version_map.lock().await.insert(peer, 11);
+            let (collect_sender, collect_receiver) = channel(2);
+            listener
+                .start_session_collect(
+                    listener.socket.as_ref().unwrap(),
+                    &listener.sessions,
+                    collect_receiver,
+                )
+                .await;
+            collect_sender.send(peer).await.unwrap();
+            // The marker makes it observable that the earlier notification was processed.
+            collect_sender.send(marker).await.unwrap();
+            while listener.sessions.lock().await.contains_key(&marker) {
+                tokio::task::yield_now().await;
+            }
+            assert!(listener.sessions.lock().await.contains_key(&peer));
+            assert_eq!(listener.version_map.lock().await.get(&peer), Some(&11));
+            let mut packet = [0; 32];
+            assert_eq!(
+                peer_socket.try_recv_from(&mut packet).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            close.close();
+            collect_sender.send(peer).await.unwrap();
+            while listener.sessions.lock().await.contains_key(&peer) {
+                tokio::task::yield_now().await;
+            }
+            let (length, _) = peer_socket.recv_from(&mut packet).await.unwrap();
+            assert_eq!(&packet[..length], &[PacketID::Disconnect.to_u8()]);
+            drop(collect_sender);
+            listener.close().await.unwrap();
+        })
+        .await
+        .expect("session collection stalled");
+    }
+
+    #[test]
+    fn collisions_never_dispatch_to_or_forget_another_peer() {
+        let (first, _first_receiver) = session();
+        let (second, _second_receiver) = session();
+        let first_address = SocketAddr::from(([127, 0, 0, 1], 19132));
+        let second_address = SocketAddr::from(([127, 0, 0, 2], 19132));
+        let third_address = "[::1]:19132".parse().unwrap();
+        let mut cache = SessionDispatchCache::default();
+        cache.remember(first_address, &first);
+        cache.remember(second_address, &second);
+        assert!(cache.sender(&first_address).is_none());
+        assert!(cache.sender(&third_address).is_none());
+        assert!(
+            cache
+                .sender(&second_address)
+                .unwrap()
+                .same_channel(&second.sender)
+        );
+        cache.forget(&first_address);
+        assert!(cache.sender(&second_address).is_some());
+        cache.remember(third_address, &first);
+        assert!(cache.sender(&second_address).is_none());
+        assert!(
+            cache
+                .sender(&third_address)
+                .unwrap()
+                .same_channel(&first.sender)
+        );
+        for port in 1..=u16::MAX {
+            cache.remember(SocketAddr::from(([127, 0, 0, 1], port)), &first);
+        }
+        assert_eq!(cache.entries.len(), SessionDispatchCache::LIMIT);
+        assert_eq!(
+            cache.entries.iter().filter(|entry| entry.is_some()).count(),
+            SessionDispatchCache::LIMIT
+        );
+    }
 }

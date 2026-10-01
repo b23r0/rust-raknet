@@ -3,11 +3,12 @@ use std::{
     error::Error,
     io::{self, ErrorKind},
     net::SocketAddr,
+    num::NonZeroUsize,
     process,
 };
 
 fn usage(program: &str) -> ! {
-    eprintln!("Usage: {program} -l <LOCAL_ADDR> -r <REMOTE_ADDR>");
+    eprintln!("Usage: {program} -l <LOCAL_ADDR> -r <REMOTE_ADDR> [--socket-shards <COUNT>]");
     process::exit(2);
 }
 
@@ -22,9 +23,10 @@ fn parse_socket_addr(value: String, option: &str) -> Result<SocketAddr, io::Erro
 
 fn parse_args(
     mut args: impl Iterator<Item = String>,
-) -> Result<(SocketAddr, SocketAddr), io::Error> {
+) -> Result<(SocketAddr, SocketAddr, NonZeroUsize), io::Error> {
     let mut local_address = None;
     let mut remote_address = None;
+    let mut shards = None;
 
     while let Some(option) = args.next() {
         let value = args.next().ok_or_else(|| {
@@ -33,6 +35,21 @@ fn parse_args(
                 format!("missing value for {option}"),
             )
         })?;
+        if option == "--socket-shards" {
+            let count = value.parse::<NonZeroUsize>().map_err(|error| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid shard count: {error}"),
+                )
+            })?;
+            if shards.replace(count).is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "duplicate shard count",
+                ));
+            }
+            continue;
+        }
         let address = parse_socket_addr(value, &option)?;
         let destination = match option.as_str() {
             "-l" | "--local_address" | "--local-address" => &mut local_address,
@@ -57,7 +74,11 @@ fn parse_args(
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "the local address is required"))?;
     let remote_address = remote_address
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "the remote address is required"))?;
-    Ok((local_address, remote_address))
+    Ok((
+        local_address,
+        remote_address,
+        shards.unwrap_or(NonZeroUsize::MIN),
+    ))
 }
 
 async fn relay(client: RaknetSocket, upstream: RaknetSocket) {
@@ -97,12 +118,22 @@ async fn relay(client: RaknetSocket, upstream: RaknetSocket) {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "raknet-proxy".to_owned());
-    let (local_address, remote_address) = parse_args(args).unwrap_or_else(|error| {
+    let (local_address, remote_address, shards) = parse_args(args).unwrap_or_else(|error| {
         eprintln!("{error}");
         usage(&program)
     });
 
-    let mut listener = RaknetListener::bind(&local_address).await?;
+    #[cfg(target_os = "linux")]
+    let mut listener = RaknetListener::bind_with_socket_shards(&local_address, shards).await?;
+    #[cfg(not(target_os = "linux"))]
+    let mut listener = {
+        if shards.get() != 1 {
+            return Err(
+                io::Error::new(ErrorKind::Unsupported, "socket sharding requires Linux").into(),
+            );
+        }
+        RaknetListener::bind(&local_address).await?
+    };
     listener.listen().await;
     loop {
         let client = listener.accept().await?;
@@ -145,6 +176,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn shard_option_defaults_to_one_and_rejects_invalid_or_duplicate_counts() {
+        fn args(extra: &[&str]) -> impl Iterator<Item = String> {
+            ["-l", "127.0.0.1:19144", "-r", "127.0.0.1:19142"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .into_iter()
+        }
+        assert_eq!(parse_args(args(&[])).unwrap().2.get(), 1);
+        assert_eq!(
+            parse_args(args(&["--socket-shards", "4"])).unwrap().2.get(),
+            4
+        );
+        assert!(parse_args(args(&["--socket-shards", "0"])).is_err());
+        assert!(parse_args(args(&["--socket-shards", "4", "--socket-shards", "2"])).is_err());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn relay_keeps_both_directions_moving_under_backpressure() {
