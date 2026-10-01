@@ -138,7 +138,7 @@ Environment: Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1, To
 | 0% loss, fragmented messages | 4,096 B / 50,000 messages | 259.88 MiB/s (256.73–264.91 MiB/s) | 102.49 MiB/s (81.58–112.06 MiB/s) |
 | 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.06 MiB/s (0.96–1.42 MiB/s) | 4.43 MiB/s (4.38–4.53 MiB/s) |
 
-RakNet and TCP each completed **18/18** throughput runs. [Raw throughput measurements](docs/validation-2026-09-30-concurrency/buffer-throughput.jsonl) retain every observation.
+RakNet and TCP each completed **18/18** throughput runs.
 
 ### Latency
 
@@ -150,7 +150,7 @@ RakNet and TCP each completed **18/18** throughput runs. [Raw throughput measure
 | 0% loss, no CPU affinity | 16.900 µs / 25.600 µs / 65.400 µs | 19.500 µs / 32.700 µs / 76.300 µs |
 | 1% loss + 5 ms each way, CPU affinity | 10.354 ms / 12.421 ms / 36.637 ms | 10.405 ms / 12.445 ms / 85.924 ms |
 
-These are local single-connection echo measurements. Random loss includes ACKs in both directions and does not reproduce an identical trace between runs. Scheduling and retransmissions affect tail latency. The [validation report](docs/concurrency-and-bedrock-report.md) includes repeat checks, concurrency measurements, limitations, and binary hashes. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction.
+These are local single-connection echo measurements. Random loss includes ACKs in both directions and does not reproduce an identical trace between runs. Scheduling and retransmissions affect tail latency. See the [benchmark instructions](example/test_benchmark/README.md) for isolated reproduction.
 
 ## Contributing
 

@@ -13,3 +13,7 @@ Cargo.lock
 # Added by cargo
 
 /target
+
+# Keep task-specific verification reports and raw measurements out of commits.
+/docs/*-report.md
+/docs/validation-*/

@@ -1,6 +1,0 @@
-PASS: direct worker invocation rejected before network changes
-PASS: ['default'] 54 synthetic cases; equal TCP repetitions
-PASS: ['--throughput-long'] 54 synthetic cases; equal TCP repetitions
-PASS: ['--latency'] 15 synthetic cases; equal TCP repetitions
-PASS: ['--latency-unpinned'] 15 synthetic cases; equal TCP repetitions
-PASS: ['--wan-latency'] 9 synthetic cases; equal TCP repetitions

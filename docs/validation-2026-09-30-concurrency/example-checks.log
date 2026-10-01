@@ -1,9 +1,0 @@
-    Checking rust-raknet v0.14.2 (/tmp/codex-raknet-concurrency-3389irgc/work)
-    Checking bedrock_ping v0.1.0 (/tmp/codex-raknet-concurrency-3389irgc/work/example/bedrock_ping)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.70s
-    Checking nethernet-signaling-proxy v0.1.0 (/tmp/codex-raknet-concurrency-3389irgc/work/example/nethernet_proxy)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
-    Checking proxy v0.1.0 (/tmp/codex-raknet-concurrency-3389irgc/work/example/proxy)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
-    Checking test_benchmark v0.1.0 (/tmp/codex-raknet-concurrency-3389irgc/work/example/test_benchmark)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
