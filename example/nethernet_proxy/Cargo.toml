@@ -1,8 +1,0 @@
-[package]
-name = "nethernet-signaling-proxy"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-rust-raknet = { path = "../.." }
-tokio = { version = "1.20.1", features = ["full"] }

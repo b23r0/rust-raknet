@@ -10,13 +10,12 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2)](https://discord.gg/ZKtYMvDFN4)
 
-[Get started](#get-started) · [Bedrock proxies](#minecraft-bedrock) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
+[Get started](#get-started) · [Bedrock proxy](#minecraft-bedrock) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
 
 </div>
 
 `rust-raknet` implements RakNet handshakes, reliability, ordering and fragmentation
 on top of Tokio. Use it to exchange messages over UDP or forward Bedrock traffic.
-The crate also has a separate TCP forwarder for NetherNet signaling.
 
 - Client and listener APIs, with all five RakNet reliability modes.
 - Bounded send queues, backpressure and selective retransmission.
@@ -91,12 +90,8 @@ See the [API docs](https://docs.rs/rust-raknet/latest/rust_raknet/) for
 ## Minecraft Bedrock
 
 The crate transports Bedrock packets as bytes. It does not implement Xbox login
-or decode the game protocol. Choose the proxy for the server's transport setting:
-
-| Server setting | Example | Traffic forwarded |
-| --- | --- | --- |
-| `transport=raknet` | [`example/proxy`](example/proxy) | RakNet/UDP game traffic |
-| `transport=nethernet` | [`example/nethernet_proxy`](example/nethernet_proxy) | TCP signaling only |
+or decode the game protocol. The [proxy example](example/proxy) forwards RakNet UDP
+game traffic and requires a backend server configured with `transport=raknet`.
 
 ### RakNet proxy
 
@@ -109,31 +104,6 @@ The proxy keeps the client's RakNet version when connecting upstream. Both
 forwarding directions run concurrently; upstream handshakes time out after 10 s.
 On Linux, add `--socket-shards 4` to opt into four receive sockets. The default is
 one; several frontend shards can be slower when they feed a single upstream socket.
-
-### NetherNet signaling
-
-```rust
-use rust_raknet::NetherNetProxy;
-
-async fn forward_signaling() -> std::io::Result<()> {
-    let proxy = NetherNetProxy::bind(
-        "127.0.0.1:19144".parse().unwrap(),
-        "127.0.0.1:19142".parse().unwrap(),
-    ).await?;
-    proxy.run().await
-}
-```
-
-After signaling, gameplay travels directly between client and server over WebRTC.
-It does **not** pass through `NetherNetProxy`. The client must be able to reach
-the server's advertised ICE candidate. See Mojang's
-[NetherNet guide](https://github.com/Mojang/bedrock-protocol-docs/blob/main/additional_docs/NetherNetOnboardingGuide.md)
-for the connection flow.
-
-```sh
-cargo run --manifest-path example/nethernet_proxy/Cargo.toml -- \
-  --listen 127.0.0.1:19144 --upstream 127.0.0.1:19142
-```
 
 ### Server discovery
 
@@ -215,9 +185,6 @@ your workload before changing the default of one socket.
 - The default accept backlog is 128. Set `with_accept_backlog(NonZeroUsize)` before
   `listen()` to change it. A full backlog defers new offline handshakes until
   their next retry. It does not cap active sessions.
-- `NetherNetProxy` accepts up to 1,024 active signaling connections by default.
-  Use `with_connection_limit(NonZeroUsize)` to change it. Upstream connects time
-  out after 10 s. Cancelling `run()` cancels its forwarding tasks too.
 
 </details>
 

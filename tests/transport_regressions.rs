@@ -1,10 +1,6 @@
-use rust_raknet::{NetherNetProxy, RaknetListener, RaknetSocket, Reliability};
+use rust_raknet::{RaknetListener, RaknetSocket, Reliability};
 use std::time::Duration;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
-    time::timeout,
-};
+use tokio::{net::UdpSocket, time::timeout};
 
 #[tokio::test]
 async fn foreign_udp_datagram_cannot_disconnect_a_client() {
@@ -103,33 +99,6 @@ async fn closing_listener_unblocks_a_stalled_application_receiver() {
     })
     .await
     .expect("shutdown blocked behind the full application receive queue");
-}
-
-#[tokio::test]
-async fn cancelling_nethernet_proxy_closes_active_forwarders() {
-    timeout(Duration::from_secs(5), async {
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy = NetherNetProxy::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            upstream.local_addr().unwrap(),
-        )
-        .await
-        .unwrap()
-        .with_connection_limit(std::num::NonZeroUsize::new(1).unwrap());
-        let address = proxy.local_addr().unwrap();
-        let proxy_task = tokio::spawn(async move { proxy.run().await });
-        let mut client = TcpStream::connect(address).await.unwrap();
-        let (mut backend, _) = upstream.accept().await.unwrap();
-        client.write_all(b"x").await.unwrap();
-        let mut byte = [0];
-        backend.read_exact(&mut byte).await.unwrap();
-        proxy_task.abort();
-        let _ = proxy_task.await;
-        assert_eq!(client.read(&mut byte).await.unwrap(), 0);
-        assert_eq!(backend.read(&mut byte).await.unwrap(), 0);
-    })
-    .await
-    .expect("a forwarding task survived its proxy");
 }
 
 #[tokio::test]
@@ -431,66 +400,4 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
     })
     .await
     .expect("accept backlog saturation broke an offline handshake");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn nethernet_concurrent_connections_obey_the_configured_limit() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    timeout(Duration::from_secs(10), async {
-        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = backend.local_addr().unwrap();
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let observed = peak.clone();
-        let backend_task = tokio::spawn(async move {
-            let mut tasks = tokio::task::JoinSet::new();
-            for _ in 0..64 {
-                let (mut socket, _) = backend.accept().await.unwrap();
-                let active = active.clone();
-                let peak = observed.clone();
-                tasks.spawn(async move {
-                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(current, Ordering::SeqCst);
-                    let mut request = Vec::new();
-                    socket.read_to_end(&mut request).await.unwrap();
-                    socket.write_all(&request).await.unwrap();
-                    socket.shutdown().await.unwrap();
-                    active.fetch_sub(1, Ordering::SeqCst);
-                });
-            }
-            while let Some(result) = tasks.join_next().await {
-                result.unwrap();
-            }
-        });
-        let proxy = NetherNetProxy::bind("127.0.0.1:0".parse().unwrap(), address)
-            .await
-            .unwrap()
-            .with_connection_limit(std::num::NonZeroUsize::new(8).unwrap());
-        let proxy_address = proxy.local_addr().unwrap();
-        let proxy_task = tokio::spawn(async move { proxy.run().await });
-        let mut clients = tokio::task::JoinSet::new();
-        for index in 0..64_u8 {
-            clients.spawn(async move {
-                let mut socket = TcpStream::connect(proxy_address).await.unwrap();
-                let payload = vec![index; 8192];
-                socket.write_all(&payload).await.unwrap();
-                socket.shutdown().await.unwrap();
-                let mut response = Vec::new();
-                socket.read_to_end(&mut response).await.unwrap();
-                assert_eq!(response, payload);
-            });
-        }
-        while let Some(result) = clients.join_next().await {
-            result.unwrap();
-        }
-        backend_task.await.unwrap();
-        assert!((1..=8).contains(&peak.load(Ordering::SeqCst)));
-        proxy_task.abort();
-        let _ = proxy_task.await;
-    })
-    .await
-    .expect("concurrent NetherNet signaling stalled or bypassed its limit");
 }

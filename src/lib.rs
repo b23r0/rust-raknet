@@ -2,8 +2,7 @@
 //!
 //! RakNet provides reliable and ordered delivery modes over UDP and is used by
 //! Minecraft Bedrock Edition. This library implements the connection handshake,
-//! packet reliability, fragmentation, and listener/client APIs. It also exposes
-//! a TCP forwarder for NetherNet signaling; gameplay traffic still uses WebRTC.
+//! packet reliability, fragmentation, and listener/client APIs.
 //!
 //! The library requires the Tokio 1.x asynchronous runtime.
 //!
@@ -13,7 +12,6 @@
 //! - Five RakNet reliability modes
 //! - Selective retransmission and fast acknowledgements
 //! - IPv4 and IPv6 socket addresses
-//! - NetherNet TCP signaling forwarding
 //!
 //! # Getting started
 //!
@@ -38,7 +36,6 @@ mod datatype;
 pub mod error;
 mod fragment;
 mod log;
-mod nethernet;
 mod packet;
 mod sequence;
 mod server;
@@ -47,7 +44,6 @@ mod utils;
 
 pub use crate::arq::Reliability;
 pub use crate::log::enable_raknet_log;
-pub use crate::nethernet::NetherNetProxy;
 pub use crate::server::*;
 pub use crate::socket::*;
 
