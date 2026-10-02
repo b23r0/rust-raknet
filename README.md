@@ -2,7 +2,7 @@
 
 # rust-raknet
 
-**Async RakNet transport for Rust, with Minecraft Bedrock proxy support.**
+**A high-performance implementation of the RakNet protocol in Rust.**
 
 [![Build](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml/badge.svg)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml)
 [![Crates.io](https://img.shields.io/crates/v/rust-raknet)](https://crates.io/crates/rust-raknet)
@@ -14,8 +14,10 @@
 
 </div>
 
-`rust-raknet` implements RakNet handshakes, reliability, ordering and fragmentation
-on top of Tokio. Use it to exchange messages over UDP or forward Bedrock traffic.
+`rust-raknet` provides reliable message delivery over UDP for Rust applications.
+Built on Tokio, it implements RakNet handshakes, acknowledgements, retransmission,
+ordering and fragmentation. Choose the delivery guarantees your application needs,
+or use it to proxy Minecraft Bedrock traffic over RakNet UDP.
 
 - Client and listener APIs, with all five RakNet reliability modes.
 - Bounded send queues, backpressure and selective retransmission.
@@ -93,12 +95,75 @@ The crate transports Bedrock packets as bytes. It does not implement Xbox login
 or decode the game protocol. The [proxy example](example/proxy) forwards RakNet UDP
 game traffic and requires a backend server configured with `transport=raknet`.
 
+### Enabling RakNet in Bedrock 26.52
+
+As of October 2, 2026, the latest stable Bedrock release is
+[26.52](https://feedback.minecraft.net/hc/en-us/articles/49175370527501-Minecraft-Bedrock-Edition-26-52-Hotfix-Changelog).
+The tested setup used a Windows 1.26.52 client and Bedrock Dedicated Server
+1.26.52.3, with game protocol 2193 and RakNet protocol 11. Joining, movement,
+placing and breaking blocks, and the proxy's server-list MOTD all worked through
+`rust-raknet` 0.16.0 over RakNet UDP.
+
+Dedicated servers default to NetherNet starting with
+[26.50](https://feedback.minecraft.net/hc/en-us/articles/48826825649933-Minecraft-Bedrock-Edition-26-50-Changelog-Wilderness-Bound).
+For the tested 26.52 setup, stop the server and edit its `server.properties`:
+
+```properties
+transport=raknet
+server-port=19142
+server-portv6=19143
+enable-lan-visibility=false
+```
+
+Restart the dedicated server after saving. Setting `transport=raknet` selects the
+legacy UDP transport. Disabling LAN visibility avoids the extra default-port
+listeners when using a custom port. Keep the backend and proxy in the same
+isolated test network; the proxy command below forwards to backend port 19142.
+
+Configure a matching Bedrock advertisement on the proxy listener before calling
+`listen()`. In `example/proxy/src/main.rs`, insert this before
+`listener.listen().await`:
+
+```rust
+listener.set_motd(
+    "Rust RakNet Bedrock proxy",
+    10,
+    "2193",
+    "1.26.52",
+    "Survival",
+    local_address.port(),
+).await?;
+```
+
+Use the backend's protocol, game version and game mode when adapting this setup.
+The listener's default advertisement describes an older Bedrock version. An
+incorrect advertisement can prevent a recent client from joining, even when the
+UDP handshake works.
+
+### RakNet deprecation in Bedrock
+
+Mojang is moving Bedrock networking to NetherNet. The
+[26.60.22/23 Preview changelog](https://feedback.minecraft.net/hc/en-us/articles/48740748263565-Minecraft-Beta-Preview-26-60-22-23)
+marks RakNet deprecated and changes the dedicated-server warning about using
+another transport into an error. Our 26.52 server also printed a NetherNet-only
+error, while the RakNet connection and gameplay tests still succeeded.
+
+The compatibility result above covers the tested 26.52 builds. It does not
+establish support for 26.60 or later, and the cited preview note does not give a
+confirmed final removal date. Check the release notes and retest before upgrading
+a deployment that depends on RakNet. `rust-raknet` implements RakNet UDP;
+NetherNet uses WebRTC and requires a different transport implementation.
+
 ### RakNet proxy
 
 ```sh
 cargo run --release --manifest-path example/proxy/Cargo.toml -- \
   -l 127.0.0.1:19144 -r 127.0.0.1:19142
 ```
+
+For a local test, add `127.0.0.1:19144` to the client's server list. On another
+machine, use the proxy's reachable address and frontend port. The client must
+join the proxy endpoint for its game traffic to pass through `rust-raknet`.
 
 The proxy keeps the client's RakNet version when connecting upstream. Both
 forwarding directions run concurrently; upstream handshakes time out after 10 s.
@@ -195,9 +260,10 @@ program, the official [C KCP implementation](https://github.com/skywind3000/kcp)
 and [quic-go](https://github.com/quic-go/quic-go).
 They are not measurements of the RakNet protocol in general.
 
-Measured **October 1–2, 2026** on an Intel Core i7-9700F (8 logical CPUs), Linux
-x86_64, Rust 1.98.1, Tokio 1.53.1, GCC 13.3.0 and Go 1.27.1, using optimized
-builds. Runs used an isolated loopback network with MTU 1,500 B, GSO/GRO limited to one packet,
+**Benchmark reference date: October 1, 2026.**
+
+Measured on an Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1,
+Tokio 1.53.1, GCC 13.3.0 and Go 1.27.1, using optimized builds. Runs used an isolated loopback network with MTU 1,500 B, GSO/GRO limited to one packet,
 `tc netem` and `nice 10`. Host network settings were unchanged.
 
 Throughput counts echoed application payload **per direction**, excluding headers
@@ -218,7 +284,7 @@ kernel rather than assigning TCP a project version. The TCP/KCP measurements
 predate the 0.16.0 version bump; the measured RakNet transport code is unchanged
 in revision `7f80c57`.
 
-The quic-go column was measured in a separate October 2 batch using the workloads
+The quic-go column was measured in a separate batch using the workloads
 specified in each table: a 64-message window for single connections and a
 16-message window per concurrent connection. Loss traces are independent across
 runs.
@@ -336,7 +402,7 @@ calling a winner.
 | 1,024 connections | 1% | 424.33 MiB/s (416.75–478.65 MiB/s) | 455.86 MiB/s (424.03–468.14 MiB/s) | 390.54 MiB/s (372.44–415.87 MiB/s) | 64.55 MiB/s (45.63–81.04 MiB/s) |
 | 2,048 connections | 1% | 423.78 MiB/s (114.57–465.28 MiB/s) | 389.14 MiB/s (360.29–395.85 MiB/s) | 335.09 MiB/s (323.29–356.21 MiB/s) | 31.48 MiB/s (29.59–35.89 MiB/s) |
 
-Measured October 2, 2026. Order rotates across TCP / `rust-raknet` / C KCP. Each
+Order rotates across TCP / `rust-raknet` / C KCP. Each
 connection completes 20 sequential RTT samples before a shared start barrier.
 Setup and those samples are outside the throughput timer; connections stay open
 until every burst finishes. All three implementations completed 24/24 runs each
