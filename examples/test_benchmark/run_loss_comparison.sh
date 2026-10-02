@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Require a binary built in an isolated development environment. Never build on the host.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BENCHMARK="${RAKNET_BENCHMARK:-$REPO_ROOT/example/test_benchmark/target/release/test_benchmark}"
+BENCHMARK="${RAKNET_BENCHMARK:-$REPO_ROOT/examples/test_benchmark/target/release/test_benchmark}"
 if (( $# != 0 )); then
     printf 'This runner accepts no worker or namespace-bypass arguments.\n' >&2
     exit 2

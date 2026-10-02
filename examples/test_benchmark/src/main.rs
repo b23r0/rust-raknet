@@ -48,6 +48,7 @@ struct Config {
     warmup_count: usize,
     latency_samples: usize,
     raknet_mtu: u16,
+    raknet_batch_size: usize,
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -74,7 +75,7 @@ fn parse_count(value: Option<&str>, option: &str, default: usize) -> io::Result<
 
 fn print_help() {
     println!(
-        "Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT> [--packets N] [--payload-size BYTES] [--warmup N] [--latency-samples N] [--raknet-mtu BYTES]\n\n\
+        "Usage: test_benchmark --protocol <tcp|raknet> --type <server|client> --address <IP:PORT> [--packets N] [--payload-size BYTES] [--warmup N] [--latency-samples N] [--raknet-mtu BYTES] [--raknet-batch-size N]\n\n\
          Client defaults: --packets {DEFAULT_PACKET_COUNT}, --payload-size {DEFAULT_PAYLOAD_SIZE}, --warmup {DEFAULT_WARMUP_COUNT}, --latency-samples {DEFAULT_LATENCY_SAMPLES}.\n\
          The client measures request/echo RTT samples, then pipelined echo throughput.\n\
          For TCP, each record is length-prefixed. RakNet uses ReliableOrdered packets."
@@ -90,6 +91,7 @@ fn parse_args() -> io::Result<Config> {
     let mut warmup_count = None;
     let mut latency_samples = None;
     let mut raknet_mtu = None;
+    let mut raknet_batch_size = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(option) = args.next() {
@@ -110,6 +112,7 @@ fn parse_args() -> io::Result<Config> {
             "--warmup" => set_once(&mut warmup_count, value, &option)?,
             "--latency-samples" => set_once(&mut latency_samples, value, &option)?,
             "--raknet-mtu" => set_once(&mut raknet_mtu, value, &option)?,
+            "--raknet-batch-size" => set_once(&mut raknet_batch_size, value, &option)?,
             _ => return Err(invalid_input(format!("unknown option: {option}"))),
         }
     }
@@ -148,6 +151,12 @@ fn parse_args() -> io::Result<Config> {
         ));
     }
 
+    let raknet_batch_size = parse_count(raknet_batch_size.as_deref(), "--raknet-batch-size", 1)?;
+    if !(1..=64).contains(&raknet_batch_size) {
+        return Err(invalid_input(
+            "--raknet-batch-size must be between 1 and 64",
+        ));
+    }
     if packet_count == 0 {
         return Err(invalid_input("--packets must be greater than zero"));
     }
@@ -171,6 +180,7 @@ fn parse_args() -> io::Result<Config> {
         warmup_count,
         latency_samples,
         raknet_mtu,
+        raknet_batch_size,
     })
 }
 
@@ -316,8 +326,15 @@ async fn run_tcp_server(address: &str) -> Result<(), Box<dyn Error + Send + Sync
 async fn raknet_round_trip(
     client: &RaknetSocket,
     payload: &[u8],
+    batch: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    client.send(payload, Reliability::ReliableOrdered).await?;
+    if batch {
+        client
+            .send_batch(&[payload], Reliability::ReliableOrdered)
+            .await?;
+    } else {
+        client.send(payload, Reliability::ReliableOrdered).await?;
+    }
     let response = client.recv().await?;
     ensure_echo(&response, payload)?;
     Ok(())
@@ -330,26 +347,57 @@ async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error + Send +
     let payload = vec![0xfe; config.payload_size];
 
     for _ in 0..config.warmup_count {
-        raknet_round_trip(&client, &payload).await?;
+        raknet_round_trip(&client, &payload, config.raknet_batch_size > 1).await?;
     }
 
     let mut latencies = Vec::with_capacity(config.latency_samples);
     for _ in 0..config.latency_samples {
         let started = Instant::now();
-        raknet_round_trip(&client, &payload).await?;
+        raknet_round_trip(&client, &payload, config.raknet_batch_size > 1).await?;
         latencies.push(started.elapsed());
     }
 
     let started = Instant::now();
     let window = tokio::sync::Semaphore::new(64);
     let send_burst = async {
-        for _ in 0..config.packet_count {
-            let permit = window
-                .acquire()
-                .await
-                .expect("benchmark window remains open");
-            client.send(&payload, Reliability::ReliableOrdered).await?;
-            permit.forget();
+        if config.raknet_batch_size == 1 {
+            for _ in 0..config.packet_count {
+                let permit = window
+                    .acquire()
+                    .await
+                    .expect("benchmark window remains open");
+                client.send(&payload, Reliability::ReliableOrdered).await?;
+                permit.forget();
+            }
+        } else {
+            let mut sent = 0;
+            let mut batch = Vec::with_capacity(config.raknet_batch_size);
+            while sent < config.packet_count {
+                let permit = window
+                    .acquire()
+                    .await
+                    .expect("benchmark window remains open");
+                permit.forget();
+                batch.clear();
+                batch.push(payload.as_slice());
+                while batch.len() < config.raknet_batch_size
+                    && sent + batch.len() < config.packet_count
+                {
+                    let Ok(permit) = window.try_acquire() else {
+                        break;
+                    };
+                    permit.forget();
+                    batch.push(payload.as_slice());
+                }
+                if config.raknet_batch_size == 1 {
+                    client.send(&payload, Reliability::ReliableOrdered).await?;
+                } else {
+                    client
+                        .send_batch(&batch, Reliability::ReliableOrdered)
+                        .await?;
+                }
+                sent += batch.len();
+            }
         }
         Ok::<(), Box<dyn Error + Send + Sync>>(())
     };
@@ -371,6 +419,7 @@ async fn run_raknet_client(config: &Config) -> Result<(), Box<dyn Error + Send +
 async fn run_raknet_server(
     address: &str,
     maximum_mtu: u16,
+    batch_size: usize,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let address: SocketAddr = address.parse()?;
     let mut listener = RaknetListener::bind_with_maximum_mtu(&address, maximum_mtu).await?;
@@ -380,17 +429,34 @@ async fn run_raknet_server(
     loop {
         let client = listener.accept().await?;
         tokio::spawn(async move {
-            loop {
-                let payload = match client.recv().await {
-                    Ok(payload) => payload,
-                    Err(_) => break,
-                };
-                if client
-                    .send(&payload, Reliability::ReliableOrdered)
+            if batch_size > 1 {
+                let mut messages = Vec::with_capacity(batch_size);
+                while client
+                    .recv_bytes_batch(&mut messages, batch_size)
                     .await
-                    .is_err()
+                    .is_ok()
                 {
-                    break;
+                    if client
+                        .send_bytes_batch(&messages, Reliability::ReliableOrdered)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            } else {
+                loop {
+                    let payload = match client.recv().await {
+                        Ok(payload) => payload,
+                        Err(_) => break,
+                    };
+                    if client
+                        .send(&payload, Reliability::ReliableOrdered)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         });
@@ -461,13 +527,28 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         rust_raknet::enable_raknet_log(7);
     }
     let config = parse_args()?;
+    if matches!(config.protocol, Protocol::RakNet) {
+        println!(
+            "Sending API: {}",
+            if config.raknet_batch_size == 1 {
+                "send (no batch API)"
+            } else {
+                "send_batch / send_bytes_batch (ready messages only)"
+            }
+        );
+        println!(
+            "Maximum messages per API batch: {}",
+            config.raknet_batch_size
+        );
+    }
     tokio::spawn(async move {
         match (config.protocol, config.mode) {
             (Protocol::Tcp, Mode::Client) => run_tcp_client(&config).await,
             (Protocol::Tcp, Mode::Server) => run_tcp_server(&config.address).await,
             (Protocol::RakNet, Mode::Client) => run_raknet_client(&config).await,
             (Protocol::RakNet, Mode::Server) => {
-                run_raknet_server(&config.address, config.raknet_mtu).await
+                run_raknet_server(&config.address, config.raknet_mtu, config.raknet_batch_size)
+                    .await
             }
         }
     })

@@ -388,7 +388,10 @@ fn read_sequence_records(
     Ok(sequences)
 }
 
-fn write_sequence_records(cursor: &mut RaknetWriter, sequences: &[(u32, u32)]) -> Result<()> {
+fn write_sequence_records<B: bytes::BufMut>(
+    cursor: &mut RaknetWriter<B>,
+    sequences: &[(u32, u32)],
+) -> Result<()> {
     for &(start, end) in sequences {
         let is_single = u8::from(start == end);
         cursor.write_u8(is_single)?;
@@ -398,6 +401,21 @@ fn write_sequence_records(cursor: &mut RaknetWriter, sequences: &[(u32, u32)]) -
         }
     }
     Ok(())
+}
+
+/// Encode control ranges into storage owned by the connection worker.
+pub(crate) fn write_control_ranges_into(
+    kind: PacketID,
+    sequences: &[(u32, u32)],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let count = u16::try_from(sequences.len()).map_err(|_| RaknetError::PacketParseError)?;
+    output.clear();
+    output.reserve(3 + sequences.len() * 7);
+    let mut cursor = RaknetWriter::from_buffer(output);
+    cursor.write_u8(kind.to_u8())?;
+    cursor.write_u16(count, Endian::Big)?;
+    write_sequence_records(&mut cursor, sequences)
 }
 
 pub fn read_packet_nack(buf: &[u8]) -> Result<Nack> {
@@ -412,6 +430,7 @@ pub fn read_packet_nack(buf: &[u8]) -> Result<Nack> {
     })
 }
 
+#[cfg(test)]
 pub fn write_packet_nack(packet: &Nack) -> Result<Vec<u8>> {
     let mut cursor = RaknetWriter::new();
     if usize::from(packet.record_count) != packet.sequences.len() {
@@ -436,6 +455,7 @@ pub fn read_packet_ack(buf: &[u8]) -> Result<Ack> {
     })
 }
 
+#[cfg(test)]
 pub fn write_packet_ack(packet: &Ack) -> Result<Vec<u8>> {
     let mut cursor = RaknetWriter::new();
     if usize::from(packet.record_count) != packet.sequences.len() {
@@ -646,4 +666,37 @@ fn accepts_captured_bedrock_linux_handshake_with_mixed_address_families() {
     assert_eq!(packet.system_index, 0);
     assert!(packet.request_timestamp > 0);
     assert!(packet.accepted_timestamp > 0);
+}
+
+#[cfg(test)]
+mod control_buffer_tests {
+    use super::*;
+    #[test]
+    fn reused_ack_and_nack_buffers_match_existing_encoders() {
+        let mut output = vec![42; 100];
+        for sequences in [vec![], vec![(0, 0)], vec![(0, 255), (65536, 0xffffff)]] {
+            let count = sequences.len() as u16;
+            write_control_ranges_into(PacketID::Ack, &sequences, &mut output).unwrap();
+            assert_eq!(
+                output,
+                write_packet_ack(&Ack {
+                    record_count: count,
+                    sequences: sequences.clone()
+                })
+                .unwrap()
+            );
+            write_control_ranges_into(PacketID::Nack, &sequences, &mut output).unwrap();
+            assert_eq!(
+                output,
+                write_packet_nack(&Nack {
+                    record_count: count,
+                    sequences
+                })
+                .unwrap()
+            );
+        }
+        assert!(
+            write_control_ranges_into(PacketID::Ack, &vec![(0, 0); 65536], &mut output).is_err()
+        );
+    }
 }

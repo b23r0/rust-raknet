@@ -5,25 +5,25 @@ Run these commands only in a disposable container or task copy with a private ne
 Start the TCP echo server in one terminal:
 
 ```sh
-cargo run --release --manifest-path example/test_benchmark/Cargo.toml -- \
+cargo run --release --manifest-path examples/test_benchmark/Cargo.toml -- \
   --protocol tcp --type server --address 127.0.0.1:19132
 ```
 
 Start the `rust-raknet` echo server in another terminal:
 
 ```sh
-cargo run --release --manifest-path example/test_benchmark/Cargo.toml -- \
+cargo run --release --manifest-path examples/test_benchmark/Cargo.toml -- \
   --protocol raknet --type server --address 127.0.0.1:19132
 ```
 
 Run both clients with matching options, one at a time:
 
 ```sh
-cargo run --release --manifest-path example/test_benchmark/Cargo.toml -- \
+cargo run --release --manifest-path examples/test_benchmark/Cargo.toml -- \
   --protocol tcp --type client --address 127.0.0.1:19132 \
   --packets 20000 --payload-size 800 --warmup 200 --latency-samples 300
 
-cargo run --release --manifest-path example/test_benchmark/Cargo.toml -- \
+cargo run --release --manifest-path examples/test_benchmark/Cargo.toml -- \
   --protocol raknet --type client --address 127.0.0.1:19132 \
   --packets 20000 --payload-size 800 --warmup 200 --latency-samples 300
 ```
@@ -40,13 +40,13 @@ regression checks separate from this explicitly configured comparison.
 
 ## Packet-loss comparison
 
-On Linux, run `example/test_benchmark/run_loss_comparison.sh` to compare 0%, 1%, and 5% packet loss, with three runs per protocol and profile. It starts both echo servers and clients inside a new user/network namespace, applies `tc netem` only to that namespace's loopback, limits loopback MTU to 1,500 bytes, and limits GSO/GRO to one packet. It prints `tc -s qdisc` counters after each run so the injected loss can be checked. If namespace creation is unavailable, the script fails before adding a loss rule; it has no host-network fallback.
+On Linux, run `examples/test_benchmark/run_loss_comparison.sh` to compare 0%, 1%, and 5% packet loss, with three runs per protocol and profile. It starts both echo servers and clients inside a new user/network namespace, applies `tc netem` only to that namespace's loopback, limits loopback MTU to 1,500 bytes, and limits GSO/GRO to one packet. It prints `tc -s qdisc` counters after each run so the injected loss can be checked. If namespace creation is unavailable, the script fails before adding a loss rule; it has no host-network fallback.
 
 The loss runner requires Linux `bwrap`, `ip`, `tc`, and `timeout`. It never builds on the host and accepts no worker/bypass arguments. Build the binary inside your isolated development environment first, then point the runner at that executable:
 
 ```sh
 RAKNET_BENCHMARK=/path/to/task/target/release/test_benchmark \
-  bash example/test_benchmark/run_loss_comparison.sh
+  bash examples/test_benchmark/run_loss_comparison.sh
 ```
 
 The runner copies that binary into a disposable directory, hides the host home directory, mounts the system read-only, and checks that the network namespace differs from its parent before changing the loopback. Each client run is bounded to 180 seconds. It requires no root privileges on the host. If the required namespace capabilities are unavailable, use a disposable VM instead; do not apply loss rules to a host interface.
@@ -56,7 +56,7 @@ The runner copies that binary into a disposable directory, hides the host home d
 Build this benchmark against the baseline and candidate in separate disposable copies using identical Rust versions and resolved dependencies. Then run:
 
 ```sh
-bash example/test_benchmark/compare_revisions.sh \
+bash examples/test_benchmark/compare_revisions.sh \
   /path/to/baseline/test_benchmark /path/to/candidate/test_benchmark \
   > comparison.jsonl
 ```
@@ -67,7 +67,7 @@ For larger latency samples, add `--latency` (five pairs, 10,000 RTT samples each
 
 ## Concurrent proxy validation
 
-Build `examples/concurrency.rs`, the echo benchmark server, and `example/proxy` in task copies with private caches. Start the server and proxy inside the same disposable network namespace, then run:
+Build `examples/concurrency.rs`, the echo benchmark server, and `examples/proxy` in task copies with private caches. Start the server and proxy inside the same disposable network namespace, then run:
 
 ```sh
 /path/to/task/target/release/examples/concurrency 127.0.0.1:19201 1024 30
@@ -135,3 +135,67 @@ order across repetitions. Apply `tc netem` only after confirming a private netwo
 namespace, with loopback MTU 1,500 B, GSO/GRO limited to one packet and queue limit
 100,000 packets. Record qdisc and UDP error counters for every run. Affinity does
 not reserve CPUs exclusively; report each protocol's median and full range.
+
+## Explicit message batching
+
+For a separate measurement of the batch API, pass `--raknet-batch-size 16` to
+both the RakNet server and client. The default is 1 and keeps individual sends.
+The client takes only currently available application-window slots: it never
+waits to fill a batch. The echo server drains only messages already available.
+The window stays at 64 messages, and every echoed payload is checked.
+
+For concurrent runs, use `sharded_echo ADDRESS 4 --batch-messages` and
+`concurrency_benchmark --batch ADDRESS CONNECTIONS MESSAGES PAYLOAD`.
+The application window stays at 16 messages per connection. The README reports two columns from the same library build:
+
+- **rust-raknet (`send`)**: neither endpoint calls a batch API. Use
+  `--raknet-batch-size 1` on the single-connection server and client, and omit
+  `--batch-messages` / `--batch` for concurrent runs.
+- **rust-raknet (batch APIs)**: use `--raknet-batch-size 16` on both single-connection
+  endpoints, or the concurrent flags above. The client uses `send_batch` for the
+  single-connection burst and `send_bytes_batch` for concurrent bursts; the server
+  uses `recv_bytes_batch` and `send_bytes_batch`.
+
+Start fresh servers and connections for each run. Batch mode is connection-wide:
+ordinary sends can participate after a batch call has enabled packing. Keeping
+both endpoints in one mode avoids mixing that state into the ordinary results.
+
+The configured API batch size is not the number of messages per UDP datagram.
+Packing is limited to eight non-fragmented `ReliableOrdered` messages and the
+negotiated MTU. At the tested MTUs, two 800 B messages do not fit together;
+4,096 B messages are fragmented and are not packed. Batch API results for these
+payloads therefore measure the API and receive-draining path, not packet merging.
+Any effective NACK or reliable retransmission timeout disables packing for the
+rest of that connection, including loss observed during warmup. Batch API calls
+continue to work after fallback, but send individual datagrams.
+
+Sequential latency samples in batch mode call `send_batch` with one message;
+there is no second message to merge. They measure sparse request/echo latency,
+not sustained-load latency. The concurrent throughput driver's RTT output also
+comes from the 20 pre-burst samples, not from the burst. Keep any separately
+instrumented delivery-latency measurements in their own table.
+
+Rotate TCP / ordinary `rust-raknet` / batch `rust-raknet` / C KCP / quic-go order
+across repetitions. Use the same application windows, message counts, network
+profiles and CPU placement for every implementation. Record namespace-local UDP
+errors and qdisc statistics with each result, including runs without injected loss.
+
+
+## Reading the current comparison
+
+The README's October 2, 2026 tables use three throughput repetitions per profile
+and five sparse-latency repetitions (1,000 warmups and 10,000 samples each).
+Single-connection windows stay at 64 messages; concurrent windows stay at 16.
+Concurrent bursts verify 1,048,576 unique ordered echoes at 64 / 256 / 1,024 /
+2,048 connections for 800 B, and 64 / 1,024 connections for 64 B. These run with
+0% / 1% injected loss. The single-connection tables also include 5% loss and
+1% loss plus 5 ms delay each way; message counts are shown with each row.
+
+The concurrent batch client constructs owned payloads for pending messages,
+while the ordinary client reuses a borrowed template. Results include these
+buffer choices and receive draining; they are not a pure packet-packing ablation.
+The separately instrumented loaded-latency driver timestamps messages before
+sending, verifies 262,144 burst echoes, and measures RTT as each echo is consumed
+throughout the burst. It retains the same 16-message window and CPU placement,
+and runs three repetitions at 64 / 1,024 connections for 64 B / 800 B and
+0% / 1% loss. Its instrumentation cost is excluded from throughput tables.

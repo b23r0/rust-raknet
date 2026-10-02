@@ -401,3 +401,118 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
     .await
     .expect("accept backlog saturation broke an offline handshake");
 }
+
+#[tokio::test]
+async fn batches_preserve_order_channels_fragments_and_recover_from_loss() {
+    timeout(Duration::from_secs(20), async {
+        for version in [10, 11] {
+            let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            listener.listen().await;
+            let mut client = RaknetSocket::connect_with_version(&addr, version)
+                .await
+                .unwrap();
+            let mut server = listener.accept().await.unwrap();
+            client.set_loss_rate(2);
+            server.set_loss_rate(2);
+            let messages: Vec<_> = (0..160u16)
+                .map(|index| {
+                    let mut message = vec![0xfe; if index % 17 == 0 { 4096 } else { 64 }];
+                    message[1..3].copy_from_slice(&index.to_le_bytes());
+                    rust_raknet::Bytes::from(message)
+                })
+                .collect();
+            let send = client.send_bytes_batch_with_order_channel(
+                &messages,
+                Reliability::ReliableOrdered,
+                7,
+            );
+            let receive = async {
+                let mut offset = 0;
+                let mut batch = Vec::with_capacity(16);
+                while offset < messages.len() {
+                    server.recv_bytes_batch(&mut batch, 16).await.unwrap();
+                    for actual in &batch {
+                        assert_eq!(actual, &messages[offset]);
+                        offset += 1;
+                    }
+                }
+            };
+            let (result, ()) = tokio::join!(send, receive);
+            result.unwrap();
+            client.flush().await.unwrap();
+            client.set_loss_rate(0);
+            server.set_loss_rate(0);
+            for mode in [
+                Reliability::Unreliable,
+                Reliability::UnreliableSequenced,
+                Reliability::Reliable,
+                Reliability::ReliableOrdered,
+                Reliability::ReliableSequenced,
+            ] {
+                let messages: [&[u8]; 2] = [&[0xfe, 1], &[0xfe, 2]];
+                server
+                    .send_batch_with_order_channel(&messages, mode, 3)
+                    .await
+                    .unwrap();
+                assert_eq!(client.recv().await.unwrap(), messages[0]);
+                assert_eq!(client.recv().await.unwrap(), messages[1]);
+            }
+            client.close().await.unwrap();
+            server.close().await.unwrap();
+            listener.close().await.unwrap();
+        }
+    })
+    .await
+    .expect("batched reliable delivery stalled");
+}
+
+#[tokio::test]
+async fn batch_validation_is_atomic_and_receiving_never_waits_to_fill() {
+    timeout(Duration::from_secs(5), async {
+        let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.listen().await;
+        let client = RaknetSocket::connect(&addr).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        assert!(
+            client
+                .send_batch(&[&[0xfe, 1], &[]], Reliability::ReliableOrdered)
+                .await
+                .is_err()
+        );
+        let oversized = vec![0xfe; 2000];
+        assert!(
+            client
+                .send_batch(&[&[0xfe, 2], &oversized], Reliability::Reliable)
+                .await
+                .is_err()
+        );
+        client
+            .send_batch(&[], Reliability::ReliableOrdered)
+            .await
+            .unwrap();
+        let mut messages = Vec::new();
+        assert_eq!(server.recv_batch(&mut messages, 0).await.unwrap(), 0);
+        client
+            .send(&[0xfe, 3], Reliability::ReliableOrdered)
+            .await
+            .unwrap();
+        assert_eq!(server.recv_batch(&mut messages, 64).await.unwrap(), 1);
+        assert_eq!(messages, vec![vec![0xfe, 3]]);
+        assert!(
+            timeout(Duration::from_millis(30), server.recv())
+                .await
+                .is_err()
+        );
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+        listener.close().await.unwrap();
+    })
+    .await
+    .expect("batch validation or sparse receive stalled");
+}

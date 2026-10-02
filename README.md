@@ -2,6 +2,8 @@
 
 # rust-raknet
 
+**English** | [简体中文](README.zh-CN.md)
+
 **A high-performance implementation of the RakNet protocol in Rust.**
 
 [![Build](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml/badge.svg)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml)
@@ -88,10 +90,70 @@ sending sustained bursts so the other end can make progress.
 See the [API docs](https://docs.rs/rust-raknet/latest/rust_raknet/) for
 `send_with_order_channel`, `flush`, discovery and listener options.
 
+### Forwarding owned buffers
+
+`recv_bytes()` and `send_bytes()` let a relay share an immutable payload with
+its send and retry queues instead of copying the application bytes again:
+
+```rust
+use rust_raknet::{RaknetSocket, Reliability, error::Result};
+
+async fn forward(source: &RaknetSocket, destination: &RaknetSocket) -> Result<()> {
+    loop {
+        let payload = source.recv_bytes().await?;
+        destination.send_bytes(payload, Reliability::ReliableOrdered).await?;
+    }
+}
+```
+
+`send_bytes_with_order_channel()` selects an ordering channel. The existing
+slice-based send and `Vec<u8>` receive APIs remain available. Both paths use the
+same queue limits, fragmentation and delivery guarantees.
+
+### Batching ready messages
+
+`send_batch` and `send_bytes_batch` pack small `ReliableOrdered` messages into
+standard RakNet frame sets, without waiting to collect more messages. Other
+modes and fragmented messages stay in separate datagrams. Batches that cannot
+fit two messages in one packet retain the ordinary sending path. A datagram
+contains at most eight messages to limit the impact of a lost packet. Loss
+feedback or a retransmission timeout switches to individual sends for the
+rest of that connection. Each
+message keeps its own delivery indexes and ordering channel; a datagram ACK
+confirms every reliable member.
+
+```rust
+use rust_raknet::{Bytes, RaknetSocket, Reliability};
+
+async fn forward(
+    source: &RaknetSocket,
+    target: &RaknetSocket,
+) -> rust_raknet::error::Result<()> {
+    let mut messages = Vec::<Bytes>::with_capacity(16);
+    loop {
+        source.recv_bytes_batch(&mut messages, 16).await?;
+        target.send_bytes_batch(&messages, Reliability::ReliableOrdered).await?;
+    }
+}
+```
+
+Receive batches clear and reuse the supplied vector and contain at most 64
+messages. Channel-specific sending is available through
+`send_batch_with_order_channel` and `send_bytes_batch_with_order_channel`.
+Normal `send` calls still send immediately. All batch members are validated
+before any are queued; cancelling a send may leave a prefix queued for delivery.
+
+### Example layout
+
+All examples live under `examples/`. Single-file programs run with
+`cargo run --example NAME`. The `proxy`, `bedrock_ping` and `test_benchmark`
+subdirectories are standalone Cargo projects; run them with
+`cargo run --manifest-path examples/PROJECT/Cargo.toml`.
+
 ## Minecraft Bedrock
 
 The crate transports Bedrock packets as bytes. It does not implement Xbox login
-or decode the game protocol. The [proxy example](example/proxy) forwards RakNet UDP
+or decode the game protocol. The [proxy example](examples/proxy) forwards RakNet UDP
 game traffic and requires a backend server configured with `transport=raknet`.
 
 ### Enabling RakNet in Bedrock 26.52
@@ -120,7 +182,7 @@ listeners when using a custom port. Keep the backend and proxy in the same
 isolated test network; the proxy command below forwards to backend port 19142.
 
 Configure a matching Bedrock advertisement on the proxy listener before calling
-`listen()`. In `example/proxy/src/main.rs`, insert this before
+`listen()`. In `examples/proxy/src/main.rs`, insert this before
 `listener.listen().await`:
 
 ```rust
@@ -156,7 +218,7 @@ NetherNet uses WebRTC and requires a different transport implementation.
 ### RakNet proxy
 
 ```sh
-cargo run --release --manifest-path example/proxy/Cargo.toml -- \
+cargo run --release --manifest-path examples/proxy/Cargo.toml -- \
   -l 127.0.0.1:19144 -r 127.0.0.1:19142
 ```
 
@@ -168,11 +230,13 @@ The proxy keeps the client's RakNet version when connecting upstream. Both
 forwarding directions run concurrently; upstream handshakes time out after 10 s.
 On Linux, add `--socket-shards 4` to opt into four receive sockets. The default is
 one; several frontend shards can be slower when they feed a single upstream socket.
+Add `--batch-messages` to forward already-ready messages through the explicit
+batch API. This is opt-in and never waits to fill a batch.
 
 ### Server discovery
 
 ```sh
-cargo run --manifest-path example/bedrock_ping/Cargo.toml -- play.example.com:19132
+cargo run --manifest-path examples/bedrock_ping/Cargo.toml -- play.example.com:19132
 ```
 
 This sends an unconnected RakNet ping and prints the server name, game version,
@@ -228,13 +292,29 @@ MOTD and accept backlog, and close as one listener. The shard count stays fixed
 until shutdown. The runtime needs enough worker threads to use them; benchmark
 your workload before changing the default of one socket.
 
+For sustained traffic, Linux listeners can also opt into
+`listener.with_receive_batching(true)` before `listen()`. This receives up to
+16 already-ready datagrams per system call; it does not wait to fill a batch.
+The option applies to all shards and defaults to off because sparse traffic
+can have higher processing latency with batch reception. Compare your workload
+before enabling it. The sharded echo example accepts `--receive-batching` as
+an optional argument.
+
+For servers with many idle peers, `listener.with_idle_maintenance(true)` pauses
+periodic maintenance after 500 ms without incoming traffic and with empty
+queues. New work resumes maintenance. Connected clients can use
+`socket.set_idle_maintenance(true)` and switch it off at runtime. This option
+is also off by default: it saves idle CPU, but can change latency under load.
+Measure both busy and quiet traffic before enabling it. The sharded echo
+example accepts `--idle-maintenance`.
+
 </details>
 
 <details>
 <summary><b>Queues, receive limits and shutdown</b></summary>
 
 - Sends wait for the connected handshake and for space in a full send queue.
-  Reliable delivery uses a 64-datagram flight window. A normal burst queues up to
+  Reliable delivery allows at most 64 frames in flight, including fragments. A normal burst queues up to
   256 KiB including frame overhead. A larger `ReliableOrdered` message can enter
   an empty queue, subject to a 64 MiB budget and 65,536 fragments. The budget counts
   payload plus 128 B per frame; it is not a process memory limit.
@@ -254,183 +334,248 @@ your workload before changing the default of one socket.
 
 ## Benchmarks
 
-These measurements compare **this `rust-raknet` implementation** with a TCP echo
-program, the official [C KCP implementation](https://github.com/skywind3000/kcp),
-and [quic-go](https://github.com/quic-go/quic-go).
-They are not measurements of the RakNet protocol in general.
+These measurements compare this **rust-raknet implementation**, using either
+ordinary sends or explicit batch APIs, with TCP, the official C KCP core and
+quic-go. They do not measure the RakNet protocol in general.
 
-**Benchmark reference date: October 1, 2026.**
+**Measured on October 2, 2026.** Intel Core i7-9700F (8 logical CPUs), Linux
+x86_64, Rust 1.98.1, Tokio 1.53.1, GCC 13.3.0 and Go 1.27.1; optimized builds.
+All processes ran in a task copy with private caches and a private loopback
+network namespace. Loopback MTU was 1,500 B, GSO/GRO was limited to one packet,
+and netem's queue limit was 100,000 packets. Processes used `nice 10`.
+Host network settings were unchanged.
 
-Measured on an Intel Core i7-9700F (8 logical CPUs), Linux x86_64, Rust 1.98.1,
-Tokio 1.53.1, GCC 13.3.0 and Go 1.27.1, using optimized builds. Runs used an isolated loopback network with MTU 1,500 B, GSO/GRO limited to one packet,
-`tc netem` and `nice 10`. Host network settings were unchanged.
-
-Throughput counts echoed application payload **per direction**, excluding headers
-and ACKs. **Higher is better.** Tables show the median of three runs; expand the
-ranges to see the variation. 1 MiB = 1,048,576 B.
-
-### Implementations and versions
+### Implementations and API modes
 
 | Column | GitHub source | Tested version / revision |
 | --- | --- | --- |
-| TCP | [TCP echo driver](https://github.com/b23r0/rust-raknet/tree/main/example/test_benchmark), [Tokio](https://github.com/tokio-rs/tokio) | Driver 0.1.0; Tokio 1.53.1; Linux TCP stack 7.0.11-76070011-generic |
-| rust-raknet | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | 0.16.0, transport revision `7f80c57` |
-| C KCP | [skywind3000/kcp](https://github.com/skywind3000/kcp/tree/b1a7a2101dcbb96017681a500d6b82bbe5a88766) | Pinned commit `b1a7a21`; no release tag used |
+| TCP | [TCP echo driver](https://github.com/b23r0/rust-raknet/tree/main/examples/test_benchmark), [Tokio](https://github.com/tokio-rs/tokio) | Driver 0.1.0; Tokio 1.53.1; Linux TCP stack 7.0.11-76070011-generic |
+| rust-raknet (`send`) | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | 0.16.0 working tree based on `a957256`, including pending performance changes |
+| rust-raknet (batch APIs) | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | The same library build as the `send` column |
+| C KCP | [skywind3000/kcp](https://github.com/skywind3000/kcp/tree/b1a7a2101dcbb96017681a500d6b82bbe5a88766) | Pinned commit `b1a7a21`; upstream C core unchanged |
 | quic-go | [quic-go/quic-go](https://github.com/quic-go/quic-go/tree/v0.63.0) | v0.63.0; Go 1.27.1 |
 
-TCP is a protocol, so its column identifies the benchmark driver, runtime and
-kernel rather than assigning TCP a project version. The TCP/KCP measurements
-predate the 0.16.0 version bump; the measured RakNet transport code is unchanged
-in revision `7f80c57`.
+- **`send`**: both endpoints use ordinary `send` / `recv`, with no batch API calls.
+- **Batch APIs**: the single-connection client uses `send_batch`; the concurrent
+  client uses `send_bytes_batch`. Echo servers use `recv_bytes_batch` and
+  `send_bytes_batch`. Each call submits at most 16 already-ready messages;
+  neither endpoint waits to fill a batch.
 
-The quic-go column was measured in a separate batch using the workloads
-specified in each table: a 64-message window for single connections and a
-16-message window per concurrent connection. Loss traces are independent across
-runs.
+The concurrent batch client constructs owned payloads for its batches; the
+ordinary client reuses a borrowed payload template. The comparison includes
+buffer construction, send APIs and receive draining. It does not isolate the
+cost or benefit of packet packing alone.
 
-QUIC uses one bidirectional reliable, ordered stream per connection. Records have
-four-byte little-endian lengths and reuse their buffers. Encryption, stream flow
-control and congestion control are enabled. `rust-raknet` and C KCP do not provide
-those same features. Their costs are included in the QUIC numbers, so throughput
-alone does not capture the difference in guarantees.
+Each run starts fresh servers and connections. Both rust-raknet columns use
+`ReliableOrdered`, the normal 64-frame reliable flight limit and normal retry
+settings. Optional UDP receive batching and idle maintenance are disabled.
+Message batching is separate from UDP syscall batching, which both API modes
+can use.
+
+A UDP datagram packs at most **eight** non-fragmented messages, within the MTU.
+Two 800 B messages do not fit together at the tested MTUs; 4,096 B messages
+are fragmented and are not packed. Those batch columns measure the batch API
+and receive-draining path, not message coalescing. A matched NACK or reliable
+retransmission timeout disables packing for the rest of that connection,
+including loss seen during warmup. Thus **calling the batch API does not mean
+that every run actually merges messages**.
+
+TCP uses `TCP_NODELAY`, four-byte little-endian record lengths, complete-record
+writes and reused buffers. C KCP uses message mode, segment windows of 64/128,
+`nodelay(1, 10, 2, 1)`, immediate writes/ACKs, and no FEC or encryption.
+QUIC uses one bidirectional reliable ordered stream per connection with the
+same record framing as TCP. Encryption, congestion control and stream flow
+control remain enabled; rust-raknet and C KCP do not provide the same features.
+
+Throughput counts verified echoed application payload **per direction**, excluding
+headers and ACKs. **Higher is better.** Tables show medians of three runs, with
+rotating order across all five columns. 1 MiB = 1,048,576 B. Loss is independently
+randomized per run and affects data and ACKs in both directions.
 
 ### Single connection
 
-Rust and Go drivers use four workers; C KCP uses one event loop per process.
-All UDP implementations have equal IPv4 packet budgets here; details are below.
-These numbers do not compare CPU efficiency.
+All clients keep at most 64 application messages awaiting echoes. Each run has
+100 warmups and 300 sequential RTT samples before the measured burst. Rust and
+Go use four workers; C KCP uses one event loop per process. Throughput runs are
+not pinned to CPUs, so these are not equal-CPU-efficiency measurements.
 
-| Network profile | Payload / burst count | TCP | **rust-raknet** | C KCP | quic-go |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| No injected loss | 800 B / 200,000 messages | 150.97 MiB/s | 188.42 MiB/s | 153.20 MiB/s | 114.47 MiB/s |
-| 1% loss | 800 B / 200,000 messages | 20.08 MiB/s | 174.84 MiB/s | 143.60 MiB/s | 46.00 MiB/s |
-| 5% loss | 800 B / 200,000 messages | 1.07 MiB/s | 168.94 MiB/s | 120.06 MiB/s | 9.51 MiB/s |
-| No injected loss, small messages | 64 B / 300,000 messages | 13.75 MiB/s | 16.60 MiB/s | 12.38 MiB/s | 30.81 MiB/s |
-| No injected loss, fragmented messages | 4,096 B / 50,000 messages | 344.51 MiB/s | 316.13 MiB/s | 254.99 MiB/s | 173.02 MiB/s |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.12 MiB/s | 2.94 MiB/s | 2.95 MiB/s | 1.57 MiB/s |
+| Network profile | Payload / burst count | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| --- | --- | --- | --- | --- | --- | --- |
+| No injected loss | 800 B / 200,000 messages | 149.64 MiB/s | 188.84 MiB/s | 194.79 MiB/s | 150.33 MiB/s | 114.28 MiB/s |
+| 1% loss | 800 B / 50,000 messages | 17.87 MiB/s | 148.62 MiB/s | 150.42 MiB/s | 130.82 MiB/s | 73.61 MiB/s |
+| 5% loss | 800 B / 50,000 messages | 1.10 MiB/s | 138.58 MiB/s | 138.57 MiB/s | 104.44 MiB/s | 9.24 MiB/s |
+| No injected loss | 64 B / 300,000 messages | 13.45 MiB/s | 16.49 MiB/s | 19.81 MiB/s | 12.45 MiB/s | 19.07 MiB/s |
+| 1% loss | 64 B / 100,000 messages | 3.25 MiB/s | 14.82 MiB/s | 15.53 MiB/s | 11.23 MiB/s | 15.70 MiB/s |
+| 5% loss | 64 B / 100,000 messages | 0.12 MiB/s | 14.81 MiB/s | 11.98 MiB/s | 10.10 MiB/s | 3.46 MiB/s |
+| No injected loss | 4,096 B / 50,000 messages | 343.72 MiB/s | 313.39 MiB/s | 316.06 MiB/s | 255.39 MiB/s | 219.47 MiB/s |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s | 3.02 MiB/s | 2.96 MiB/s | 2.97 MiB/s | 1.57 MiB/s |
 
 <details>
-<summary>Throughput ranges and setup</summary>
+<summary>Single-connection throughput ranges</summary>
 
-| Network profile | Payload / burst count | TCP throughput (median, range) | rust-raknet throughput (median, range) | C KCP throughput (median, range) | quic-go throughput (median, range) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| No injected loss | 800 B / 200,000 messages | 150.97 MiB/s (150.44–153.57 MiB/s) | 188.42 MiB/s (184.14–189.43 MiB/s) | 153.20 MiB/s (151.82–154.32 MiB/s) | 114.47 MiB/s (108.74–114.96 MiB/s) |
-| 1% loss | 800 B / 200,000 messages | 20.08 MiB/s (18.88–43.51 MiB/s) | 174.84 MiB/s (171.90–186.40 MiB/s) | 143.60 MiB/s (143.42–147.77 MiB/s) | 46.00 MiB/s (43.25–46.66 MiB/s) |
-| 5% loss | 800 B / 200,000 messages | 1.07 MiB/s (1.02–1.08 MiB/s) | 168.94 MiB/s (150.75–170.40 MiB/s) | 120.06 MiB/s (118.66–122.54 MiB/s) | 9.51 MiB/s (8.56–10.09 MiB/s) |
-| No injected loss, small messages | 64 B / 300,000 messages | 13.75 MiB/s (13.49–13.81 MiB/s) | 16.60 MiB/s (15.94–16.79 MiB/s) | 12.38 MiB/s (12.18–12.42 MiB/s) | 30.81 MiB/s (28.72–31.12 MiB/s) |
-| No injected loss, fragmented messages | 4,096 B / 50,000 messages | 344.51 MiB/s (343.29–350.93 MiB/s) | 316.13 MiB/s (313.54–317.18 MiB/s) | 254.99 MiB/s (250.86–259.83 MiB/s) | 173.02 MiB/s (120.29–229.28 MiB/s) |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.12 MiB/s (1.07–1.19 MiB/s) | 2.94 MiB/s (2.71–3.10 MiB/s) | 2.95 MiB/s (2.86–2.97 MiB/s) | 1.57 MiB/s (1.54–2.05 MiB/s) |
-
-Each run has 100 warmups, 300 sequential RTT samples and the measured burst.
-All drivers keep at most 64 messages awaiting verified echoes and refill on each
-echo. TCP / `rust-raknet` / C KCP run order alternates; quic-go was measured in a
-separate batch with the same workload. `rust-raknet` uses `ReliableOrdered`; TCP uses
-`TCP_NODELAY`, length-prefixed records, whole-record writes and a reused buffer.
-The official C KCP core is unchanged, pinned to
-[`b1a7a21`](https://github.com/skywind3000/kcp/tree/b1a7a2101dcbb96017681a500d6b82bbe5a88766).
-
-The Rust processes use four Tokio workers and quic-go uses `GOMAXPROCS=4`;
-C KCP uses one event loop per process. All servers use one listening socket.
-Throughput runs have no CPU affinity. This is not an equal-CPU-cost comparison.
-
-`rust-raknet` uses a nominal MTU of 1,428 B here, including 28 B of IPv4/UDP
-headers. C KCP uses a 1,400 B UDP MTU, excluding those headers. Their IPv4 packet
-budgets match, and both split a 4,096 B message into three fragments. The default
-`rust-raknet` MTU is still 1,400 B, which needs four fragments for that message.
-C KCP uses message mode, send/receive windows of 64/128 segments,
-`nodelay(1, 10, 2, 1)`, immediate writes/ACKs, and no FEC or encryption.
-`rust-raknet` keeps its normal flight window and retry timings. quic-go uses a
-1,400 B UDP packet size with path MTU discovery disabled, matching the 1,428 B
-IPv4 budget. QUIC retains its normal congestion and flow control settings.
-
-All four implementations completed 18/18 throughput runs each. `rust-raknet`
-leads C KCP in five profiles; with delay and loss, they are effectively tied. TCP
-leads the 4 KiB profile, and quic-go leads the 64 B profile.
+| Network profile | Payload / burst count | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| --- | --- | --- | --- | --- | --- | --- |
+| No injected loss | 800 B / 200,000 messages | 149.64 MiB/s (149.44–157.64 MiB/s) | 188.84 MiB/s (186.11–189.02 MiB/s) | 194.79 MiB/s (191.36–195.96 MiB/s) | 150.33 MiB/s (146.79–153.49 MiB/s) | 114.28 MiB/s (85.89–115.88 MiB/s) |
+| 1% loss | 800 B / 50,000 messages | 17.87 MiB/s (14.64–25.13 MiB/s) | 148.62 MiB/s (148.36–150.92 MiB/s) | 150.42 MiB/s (125.54–166.60 MiB/s) | 130.82 MiB/s (125.84–149.80 MiB/s) | 73.61 MiB/s (64.52–87.73 MiB/s) |
+| 5% loss | 800 B / 50,000 messages | 1.10 MiB/s (1.02–1.12 MiB/s) | 138.58 MiB/s (73.17–168.10 MiB/s) | 138.57 MiB/s (85.28–143.16 MiB/s) | 104.44 MiB/s (95.78–122.29 MiB/s) | 9.24 MiB/s (8.35–10.51 MiB/s) |
+| No injected loss | 64 B / 300,000 messages | 13.45 MiB/s (13.18–14.03 MiB/s) | 16.49 MiB/s (16.47–16.58 MiB/s) | 19.81 MiB/s (16.45–35.17 MiB/s) | 12.45 MiB/s (12.39–12.70 MiB/s) | 19.07 MiB/s (13.44–31.32 MiB/s) |
+| 1% loss | 64 B / 100,000 messages | 3.25 MiB/s (2.81–3.69 MiB/s) | 14.82 MiB/s (14.52–16.11 MiB/s) | 15.53 MiB/s (14.44–16.70 MiB/s) | 11.23 MiB/s (10.53–11.92 MiB/s) | 15.70 MiB/s (13.10–21.80 MiB/s) |
+| 5% loss | 64 B / 100,000 messages | 0.12 MiB/s (0.12–0.14 MiB/s) | 14.81 MiB/s (10.86–15.24 MiB/s) | 11.98 MiB/s (6.26–13.47 MiB/s) | 10.10 MiB/s (9.99–10.23 MiB/s) | 3.46 MiB/s (2.88–3.82 MiB/s) |
+| No injected loss | 4,096 B / 50,000 messages | 343.72 MiB/s (308.23–348.77 MiB/s) | 313.39 MiB/s (312.68–314.14 MiB/s) | 316.06 MiB/s (310.03–316.51 MiB/s) | 255.39 MiB/s (249.93–259.25 MiB/s) | 219.47 MiB/s (218.10–227.73 MiB/s) |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s (0.98–1.16 MiB/s) | 3.02 MiB/s (2.84–3.27 MiB/s) | 2.96 MiB/s (2.94–3.01 MiB/s) | 2.97 MiB/s (2.95–3.04 MiB/s) | 1.57 MiB/s (1.55–1.64 MiB/s) |
 
 </details>
 
-### Single-connection latency
+Single-connection UDP packet budgets match: rust-raknet's nominal MTU is 1,428 B,
+including 28 B of IPv4/UDP overhead; C KCP and quic-go use a 1,400 B UDP packet
+budget. QUIC path MTU discovery is disabled. Each 4,096 B message uses three
+fragments in rust-raknet and C KCP. The library's default nominal MTU remains
+1,400 B.
 
-RTT is round-trip latency. **Lower is better.** Values are the medians of
-run-level p50 / p95 / p99 percentiles from three runs, each with 300 warmups and
-3,000 sequential samples.
+### Sparse request/echo latency
 
-| Network profile | TCP RTT (p50 / p95 / p99) | rust-raknet RTT (p50 / p95 / p99) | C KCP RTT (p50 / p95 / p99) | quic-go RTT (p50 / p95 / p99) |
-| --- | ---: | ---: | ---: | ---: |
-| No injected loss, CPU affinity | 16.1 µs / 75.2 µs / 87.1 µs | 17.6 µs / 22.4 µs / 48.0 µs | 13.8 µs / 57.5 µs / 62.0 µs | 62.7 µs / 99.9 µs / 140.9 µs |
+**Lower is better.** Values below are medians of run-level RTT percentiles from
+five runs, each with 1,000 warmups and 10,000 sequential samples, using 800 B
+messages and no injected loss. Client and server are pinned to different CPUs;
+each Rust/Go process has four workers on its assigned CPU, while C KCP uses one
+event loop. CPU affinity does not reserve the CPUs exclusively.
 
-Client and server are pinned to separate CPUs. Each Rust process has four workers
-on its assigned CPU; quic-go uses `GOMAXPROCS=4` on its assigned CPU, and C KCP
-has one event loop. These samples precede the burst and do not measure delivery
-latency under sustained load.
+| Implementation / API | Median RTT | 95th-percentile RTT | 99th-percentile RTT |
+| --- | --- | --- | --- |
+| TCP | 12.8 µs | 20.6 µs | 37.9 µs |
+| rust-raknet (`send`) | 17.6 µs | 22.7 µs | 47.9 µs |
+| rust-raknet (batch APIs) | 17.4 µs | 22.2 µs | 47.0 µs |
+| C KCP | 10.4 µs | 15.9 µs | 33.3 µs |
+| quic-go | 61.9 µs | 94.6 µs | 129.6 µs |
 
-### Concurrent connections
+The batch client calls `send_batch` with **one** message for these sparse samples;
+the batch server likewise replies without waiting for more messages. No messages
+are merged here. These results measure the sparse API path, not burst delivery
+latency. Concurrent throughput runs also report pre-burst RTTs; they are not
+used as loaded latency below.
 
-800 B messages, a sliding window of 16 per connection, and **1,048,576 verified
-ordered echoes** per run. All four implementations use four workers and four
-server sockets with `SO_REUSEPORT`, with separate sets of four client/server CPUs.
-These are transport sessions, not authenticated Minecraft players.
+### Concurrent throughput
 
-| Connections | Injected loss | TCP | **rust-raknet** | C KCP | quic-go |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 connections | 0% | 713.62 MiB/s | 543.43 MiB/s | 362.82 MiB/s | 220.49 MiB/s |
-| 256 connections | 0% | 598.00 MiB/s | 556.90 MiB/s | 415.87 MiB/s | 184.68 MiB/s |
-| 1,024 connections | 0% | 591.75 MiB/s | 497.71 MiB/s | 380.07 MiB/s | 164.48 MiB/s |
-| 2,048 connections | 0% | 586.90 MiB/s | 440.64 MiB/s | 361.93 MiB/s | 133.22 MiB/s |
-| 64 connections | 1% | 390.96 MiB/s | 520.11 MiB/s | 377.12 MiB/s | 216.83 MiB/s |
-| 256 connections | 1% | 519.37 MiB/s | 511.55 MiB/s | 384.26 MiB/s | 147.19 MiB/s |
-| 1,024 connections | 1% | 424.33 MiB/s | 455.86 MiB/s | 390.54 MiB/s | 64.55 MiB/s |
-| 2,048 connections | 1% | 423.78 MiB/s | 389.14 MiB/s | 335.09 MiB/s | 31.48 MiB/s |
+Each run verifies **1,048,576 ordered echoes**, with a 16-message application
+window per connection. Every echoed connection ID, message ID and payload is
+checked. Twenty sequential samples per connection precede a common start
+barrier; setup and those samples are excluded from the throughput timer.
+Connections stay open until every burst finishes.
 
-TCP leads all four clean groups. At 1% loss, `rust-raknet` leads TCP at 64 and
-1,024 connections; TCP leads at 256 and 2,048. `rust-raknet` leads C KCP in all
-eight groups. Small differences with overlapping ranges need more runs before
-calling a winner.
+All implementations use four workers and four server listeners/receive sockets
+with `SO_REUSEPORT`. Servers are pinned to four CPUs and clients to the other
+four. These are synthetic transport sessions, not authenticated Minecraft players.
+
+| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 800 B | 64 connections | 0% | 634.89 MiB/s | 573.33 MiB/s | 574.74 MiB/s | 390.10 MiB/s | 231.72 MiB/s |
+| 800 B | 256 connections | 0% | 602.00 MiB/s | 559.84 MiB/s | 580.24 MiB/s | 412.41 MiB/s | 189.96 MiB/s |
+| 800 B | 1,024 connections | 0% | 577.50 MiB/s | 495.19 MiB/s | 456.42 MiB/s | 351.83 MiB/s | 161.41 MiB/s |
+| 800 B | 2,048 connections | 0% | 560.90 MiB/s | 437.78 MiB/s | 317.01 MiB/s | 313.08 MiB/s | 127.58 MiB/s |
+| 800 B | 64 connections | 1% | 404.40 MiB/s | 486.37 MiB/s | 537.64 MiB/s | 342.39 MiB/s | 190.13 MiB/s |
+| 800 B | 256 connections | 1% | 492.03 MiB/s | 446.77 MiB/s | 476.44 MiB/s | 400.05 MiB/s | 178.44 MiB/s |
+| 800 B | 1,024 connections | 1% | 490.61 MiB/s | 439.75 MiB/s | 454.97 MiB/s | 362.80 MiB/s | 72.49 MiB/s |
+| 800 B | 2,048 connections | 1% | 480.96 MiB/s | 346.41 MiB/s | 353.56 MiB/s | 336.77 MiB/s | 38.47 MiB/s |
+| 64 B | 64 connections | 0% | 68.60 MiB/s | 47.59 MiB/s | 129.31 MiB/s | 32.87 MiB/s | 135.46 MiB/s |
+| 64 B | 1,024 connections | 0% | 55.39 MiB/s | 49.03 MiB/s | 148.73 MiB/s | 43.48 MiB/s | 110.25 MiB/s |
+| 64 B | 64 connections | 1% | 46.47 MiB/s | 44.86 MiB/s | 46.56 MiB/s | 32.54 MiB/s | 66.16 MiB/s |
+| 64 B | 1,024 connections | 1% | 47.38 MiB/s | 42.28 MiB/s | 46.91 MiB/s | 43.08 MiB/s | 80.70 MiB/s |
 
 <details>
-<summary>Concurrent throughput ranges and setup</summary>
+<summary>Concurrent throughput ranges</summary>
 
-| Connections | Injected loss | TCP throughput (median, range) | rust-raknet throughput (median, range) | C KCP throughput (median, range) | quic-go throughput (median, range) |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 connections | 0% | 713.62 MiB/s (700.90–714.45 MiB/s) | 543.43 MiB/s (536.83–572.64 MiB/s) | 362.82 MiB/s (361.95–377.37 MiB/s) | 220.49 MiB/s (217.91–220.77 MiB/s) |
-| 256 connections | 0% | 598.00 MiB/s (581.63–620.48 MiB/s) | 556.90 MiB/s (526.97–562.89 MiB/s) | 415.87 MiB/s (329.26–424.58 MiB/s) | 184.68 MiB/s (178.88–186.38 MiB/s) |
-| 1,024 connections | 0% | 591.75 MiB/s (562.39–594.38 MiB/s) | 497.71 MiB/s (466.01–523.55 MiB/s) | 380.07 MiB/s (378.09–415.04 MiB/s) | 164.48 MiB/s (158.35–166.63 MiB/s) |
-| 2,048 connections | 0% | 586.90 MiB/s (579.19–593.85 MiB/s) | 440.64 MiB/s (429.02–452.66 MiB/s) | 361.93 MiB/s (310.89–376.98 MiB/s) | 133.22 MiB/s (129.02–135.82 MiB/s) |
-| 64 connections | 1% | 390.96 MiB/s (388.32–424.96 MiB/s) | 520.11 MiB/s (491.58–583.39 MiB/s) | 377.12 MiB/s (358.86–406.28 MiB/s) | 216.83 MiB/s (212.02–220.87 MiB/s) |
-| 256 connections | 1% | 519.37 MiB/s (440.41–549.12 MiB/s) | 511.55 MiB/s (462.67–513.39 MiB/s) | 384.26 MiB/s (372.07–406.03 MiB/s) | 147.19 MiB/s (138.19–170.24 MiB/s) |
-| 1,024 connections | 1% | 424.33 MiB/s (416.75–478.65 MiB/s) | 455.86 MiB/s (424.03–468.14 MiB/s) | 390.54 MiB/s (372.44–415.87 MiB/s) | 64.55 MiB/s (45.63–81.04 MiB/s) |
-| 2,048 connections | 1% | 423.78 MiB/s (114.57–465.28 MiB/s) | 389.14 MiB/s (360.29–395.85 MiB/s) | 335.09 MiB/s (323.29–356.21 MiB/s) | 31.48 MiB/s (29.59–35.89 MiB/s) |
-
-Order rotates across TCP / `rust-raknet` / C KCP. Each
-connection completes 20 sequential RTT samples before a shared start barrier.
-Setup and those samples are outside the throughput timer; connections stay open
-until every burst finishes. All three implementations completed 24/24 runs each
-(72/72 total). The separate quic-go batch completed 24/24 concurrent runs with
-the same message counts, 16-message window, CPU affinity and start barriers.
-
-TCP uses `TCP_NODELAY`, complete-record writes and reused buffers. Its four
-listeners distribute accepts; accepted streams each have their own socket. UDP
-sockets distribute datagrams. `rust-raknet` uses the default nominal MTU of
-1,400 B; C KCP uses a 1,400 B UDP MTU. Their IPv4 budgets differ by 28 B, but an
-800 B message fits one datagram in both. TCP can combine several records in a
-segment, so packet loss percentages do not imply equal lost-message counts.
-quic-go uses a 1,372 B UDP packet size and disables path MTU discovery, matching
-the default 1,400 B `rust-raknet` IPv4 budget. It uses four `SO_REUSEPORT` receive
-sockets and `GOMAXPROCS=4` per process. Connections keep one stream open each.
-
-The 2,048-connection TCP loss case spans 114.57–465.28 MiB/s. Random loss affects
-data and ACKs in both directions, and each run has a different trace. UDP buffers
-can also overflow under saturation, even at 0% injected loss. Check UDP error
-counters alongside netem counters when reproducing these results. The quic-go
-batch also recorded receive-buffer drops at 2,048 connections without injected
-loss; its 64- and 256-connection clean runs had none. CPU affinity does not
-reserve the CPUs exclusively.
+| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 800 B | 64 connections | 0% | 634.89 MiB/s (604.49–691.88 MiB/s) | 573.33 MiB/s (549.30–578.24 MiB/s) | 574.74 MiB/s (573.26–583.02 MiB/s) | 390.10 MiB/s (331.71–391.23 MiB/s) | 231.72 MiB/s (224.07–232.60 MiB/s) |
+| 800 B | 256 connections | 0% | 602.00 MiB/s (599.13–632.16 MiB/s) | 559.84 MiB/s (515.24–567.53 MiB/s) | 580.24 MiB/s (553.57–585.65 MiB/s) | 412.41 MiB/s (410.23–418.18 MiB/s) | 189.96 MiB/s (189.17–194.65 MiB/s) |
+| 800 B | 1,024 connections | 0% | 577.50 MiB/s (455.40–585.45 MiB/s) | 495.19 MiB/s (490.50–506.24 MiB/s) | 456.42 MiB/s (406.09–509.81 MiB/s) | 351.83 MiB/s (302.39–407.08 MiB/s) | 161.41 MiB/s (148.02–168.02 MiB/s) |
+| 800 B | 2,048 connections | 0% | 560.90 MiB/s (485.08–571.37 MiB/s) | 437.78 MiB/s (397.60–440.29 MiB/s) | 317.01 MiB/s (295.58–443.27 MiB/s) | 313.08 MiB/s (295.83–346.13 MiB/s) | 127.58 MiB/s (81.90–137.95 MiB/s) |
+| 800 B | 64 connections | 1% | 404.40 MiB/s (375.90–484.43 MiB/s) | 486.37 MiB/s (449.86–503.03 MiB/s) | 537.64 MiB/s (519.54–558.08 MiB/s) | 342.39 MiB/s (325.80–373.99 MiB/s) | 190.13 MiB/s (185.66–197.30 MiB/s) |
+| 800 B | 256 connections | 1% | 492.03 MiB/s (490.61–544.03 MiB/s) | 446.77 MiB/s (374.17–495.70 MiB/s) | 476.44 MiB/s (472.61–514.43 MiB/s) | 400.05 MiB/s (390.22–420.57 MiB/s) | 178.44 MiB/s (177.19–178.79 MiB/s) |
+| 800 B | 1,024 connections | 1% | 490.61 MiB/s (325.94–510.10 MiB/s) | 439.75 MiB/s (430.81–468.65 MiB/s) | 454.97 MiB/s (431.67–458.71 MiB/s) | 362.80 MiB/s (358.80–382.40 MiB/s) | 72.49 MiB/s (60.68–111.68 MiB/s) |
+| 800 B | 2,048 connections | 1% | 480.96 MiB/s (437.30–493.70 MiB/s) | 346.41 MiB/s (336.19–367.02 MiB/s) | 353.56 MiB/s (328.69–389.72 MiB/s) | 336.77 MiB/s (319.42–346.90 MiB/s) | 38.47 MiB/s (33.38–46.39 MiB/s) |
+| 64 B | 64 connections | 0% | 68.60 MiB/s (67.87–73.23 MiB/s) | 47.59 MiB/s (47.32–47.99 MiB/s) | 129.31 MiB/s (113.26–157.07 MiB/s) | 32.87 MiB/s (28.76–35.58 MiB/s) | 135.46 MiB/s (133.70–137.00 MiB/s) |
+| 64 B | 1,024 connections | 0% | 55.39 MiB/s (54.94–55.73 MiB/s) | 49.03 MiB/s (47.57–51.86 MiB/s) | 148.73 MiB/s (124.90–149.36 MiB/s) | 43.48 MiB/s (40.99–43.67 MiB/s) | 110.25 MiB/s (108.30–111.87 MiB/s) |
+| 64 B | 64 connections | 1% | 46.47 MiB/s (43.87–54.31 MiB/s) | 44.86 MiB/s (44.67–46.52 MiB/s) | 46.56 MiB/s (46.21–47.98 MiB/s) | 32.54 MiB/s (31.50–34.95 MiB/s) | 66.16 MiB/s (63.31–66.84 MiB/s) |
+| 64 B | 1,024 connections | 1% | 47.38 MiB/s (44.98–51.74 MiB/s) | 42.28 MiB/s (42.08–42.58 MiB/s) | 46.91 MiB/s (45.06–47.80 MiB/s) | 43.08 MiB/s (35.78–43.10 MiB/s) | 80.70 MiB/s (76.90–83.43 MiB/s) |
 
 </details>
 
-Build instructions for the repository TCP/RakNet drivers and workload details are in
-[the benchmark README](example/test_benchmark/README.md) and
-[the C KCP adapters](example/test_benchmark/kcp/README.md).
+Concurrent runs use rust-raknet's default nominal MTU of 1,400 B. quic-go's UDP
+budget is 1,372 B, matching the 1,400 B IPv4 packet budget, with path MTU discovery
+disabled. C KCP uses a 1,400 B UDP MTU; its physical budget is 28 B larger, but
+both tested payload sizes fit without fragmentation. TCP may combine records
+in a segment, so equal packet-loss percentages do not imply equal lost-message
+counts across implementations.
+
+### Delivery latency during sustained load
+
+A separate instrumented driver timestamps messages before sending and measures
+RTT when their verified echoes arrive throughout the burst. It uses the same
+16-message window, worker counts, CPU placement and server modes, but verifies
+262,144 burst echoes per run. These latency measurements include client and
+server queueing. Instrumentation adds overhead, so its throughput is not mixed
+into the tables above. Values are medians of three runs; each cell shows
+**median RTT / 99th-percentile RTT**. Lower is better.
+
+| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) |
+| --- | --- | --- | --- | --- | --- |
+| 64 B | 64 connections | 0% | 0.94 ms / 5.28 ms | 1.00 ms / 7.84 ms | 0.45 ms / 3.71 ms |
+| 64 B | 1,024 connections | 0% | 19.12 ms / 38.37 ms | 15.99 ms / 42.99 ms | 4.21 ms / 22.42 ms |
+| 64 B | 64 connections | 1% | 0.65 ms / 3.74 ms | 0.94 ms / 5.83 ms | 0.95 ms / 4.85 ms |
+| 64 B | 1,024 connections | 1% | 15.71 ms / 37.28 ms | 15.44 ms / 62.46 ms | 10.22 ms / 51.70 ms |
+| 800 B | 64 connections | 0% | 1.15 ms / 9.62 ms | 1.10 ms / 8.51 ms | 1.11 ms / 9.22 ms |
+| 800 B | 1,024 connections | 0% | 20.37 ms / 40.35 ms | 19.24 ms / 124.51 ms | 17.59 ms / 113.04 ms |
+| 800 B | 64 connections | 1% | 0.66 ms / 3.95 ms | 0.99 ms / 5.90 ms | 1.05 ms / 5.92 ms |
+| 800 B | 1,024 connections | 1% | 18.34 ms / 48.50 ms | 18.23 ms / 71.80 ms | 20.38 ms / 100.26 ms |
+
+### What these runs show
+
+- For 64 B messages with no injected loss, batch APIs improve concurrent
+  throughput from 47.59 to 129.31 MiB/s at 64 connections and from 49.03 to
+  148.73 MiB/s at 1,024 connections. In the separate loaded-latency measurement
+  at 1,024 connections, median RTT falls from 15.99 to 4.21 ms and the
+  99th-percentile RTT from 42.99 to 22.42 ms.
+- The single-connection 64 B batch result is less stable: 19.81 MiB/s median,
+  with a 16.45–35.17 MiB/s range. It does not consistently reproduce the previous
+  batch's small-message gain. A separate diagnostic build observed matched NACKs
+  disabling packing in four of ten no-injected-loss runs, despite zero netem
+  drops and zero UDP receive-buffer drops. A NACK reports a sequence gap; it
+  does not by itself prove permanent packet loss. The current permanent fallback
+  makes batching sensitive to that feedback. Diagnostic results are excluded
+  from the tables.
+- Ordinary rust-raknet sends retain strong single-connection 800 B throughput,
+  including the 1% and 5% loss profiles. TCP leads the 4 KiB single-connection
+  profile and the 800 B concurrent groups without injected loss. quic-go leads
+  the 64 B / 64-connection group and both 64 B concurrent loss groups. There is
+  no winner across every workload.
+- Batch APIs are **not a general default-speedup switch**. At 800 B and 2,048
+  connections without injected loss, they measure 317.01 MiB/s versus
+  437.78 MiB/s for ordinary sends, about 28% lower. At 64 B and 5% loss on one
+  connection, they measure 11.98 versus 14.81 MiB/s, about 19% lower. The
+  API/draining and driver-buffer differences still matter when packing is
+  unavailable or has been disabled.
+- Sparse median RTT is similar between the two API modes: 17.6 µs for `send`
+  and 17.4 µs for batch APIs. Loaded latency is not uniformly better: at 800 B,
+  1,024 connections and 1% loss, the batch mode's 99th-percentile RTT is
+  100.26 ms versus 71.80 ms for ordinary sends. Select the mode using the
+  payload sizes, concurrency and latency distribution of the actual workload.
+
+
+Random netem loss and namespace-local UDP receive-buffer errors were recorded
+for every run. Saturated UDP sockets can drop packets even with no injected
+loss. Maximum receive-buffer drops in one throughput run: rust-raknet (`send`): 187,997 datagrams, rust-raknet (batch APIs): 375,102 datagrams, C KCP: 335,992 datagrams, quic-go: 6,124 datagrams.
+These are part of the measured workload. Random loss and shared CPU scheduling
+make the ranges relevant; a small median difference is not a universal ranking.
+
+All 397 measurements completed with verified echoes: 120 single-connection
+throughput runs, 25 sparse-latency runs, 180 concurrent-throughput runs and
+72 loaded-latency runs. This batch replaces the previous tables; it is not a
+controlled before/after comparison with an older library revision.
+
+Build commands, API flags and workload details are in
+[the benchmark README](examples/test_benchmark/README.md) and
+[the C KCP adapters](examples/test_benchmark/kcp/README.md).
 
 ## Contributing
 
@@ -451,7 +596,7 @@ workload and enough detail to reproduce it.
 
 To bump the crate version, run `python3 scripts/set-version.py NEW_VERSION` in the task
 copy, using the next release version (for example, `0.16.0`). This updates `Cargo.toml`, the
-Get Started dependency and the crate documentation together. CI checks they match.
+dependency snippets in both READMEs and the crate documentation together. CI checks they match.
 
 ### Contributors
 

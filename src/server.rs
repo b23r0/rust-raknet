@@ -21,8 +21,8 @@ struct SessionSender {
 }
 
 // The authoritative session map handles handshakes and shutdown. This bounded,
-// direct-mapped cache avoids hashing the common dispatch path. A slot collision
-// is only a cache miss: the complete peer address is always checked.
+// direct-mapped cache avoids the shared map on the common dispatch path.
+// A slot collision is only a cache miss: the complete peer address is checked.
 struct SessionDispatchCache {
     entries: Vec<Option<CachedSession>>,
 }
@@ -45,7 +45,19 @@ impl SessionDispatchCache {
     const LIMIT: usize = 4096;
 
     fn slot(address: &SocketAddr) -> usize {
-        usize::from(address.port()) % Self::LIMIT
+        // Include the IP: many unrelated clients use the same source port.
+        let ip = match address.ip() {
+            std::net::IpAddr::V4(ip) => u64::from(u32::from(ip)),
+            std::net::IpAddr::V6(ip) => {
+                let bits = u128::from(ip);
+                bits as u64 ^ (bits >> 64) as u64
+            }
+        };
+        let mut mixed = ip;
+        mixed ^= mixed >> 33;
+        mixed = mixed.wrapping_mul(0xff51afd7ed558ccd);
+        mixed ^= mixed >> 33;
+        (mixed as usize ^ usize::from(address.port())) & (Self::LIMIT - 1)
     }
 
     fn sender(&self, address: &SocketAddr) -> Option<&Sender<Vec<u8>>> {
@@ -92,6 +104,8 @@ pub struct RaknetListener {
     guid: u64,
     listened: bool,
     maximum_mtu: u16,
+    receive_batching: bool,
+    idle_maintenance: bool,
     connection_receiver: Receiver<RaknetSocket>,
     connection_sender: Sender<RaknetSocket>,
     sessions: Arc<Mutex<HashMap<SocketAddr, SessionSender>>>,
@@ -221,6 +235,46 @@ impl RaknetListener {
         self
     }
 
+    /// Enable idle maintenance for newly accepted connections on every shard.
+    ///
+    /// Disabled by default. See [`RaknetSocket::set_idle_maintenance`] for the
+    /// CPU savings and scheduling tradeoff. Configure before listening.
+    ///
+    /// # Panics
+    /// Panics if called after [`listen`](Self::listen).
+    pub fn with_idle_maintenance(mut self, enabled: bool) -> Self {
+        assert!(
+            !self.listened,
+            "configure idle maintenance before listening"
+        );
+        self.idle_maintenance = enabled;
+        for shard in &mut self.shards {
+            shard.idle_maintenance = enabled;
+        }
+        self
+    }
+
+    /// Enable Linux `recvmmsg` batches of up to 16 ready datagrams.
+    ///
+    /// Disabled by default: this can improve busy listeners' throughput but
+    /// costs extra work for sparse traffic. No timer waits to fill a batch.
+    /// The setting applies to every receive socket in a sharded listener.
+    ///
+    /// # Panics
+    /// Panics if called after [`listen`](Self::listen).
+    #[cfg(target_os = "linux")]
+    pub fn with_receive_batching(mut self, enabled: bool) -> Self {
+        assert!(
+            !self.listened,
+            "configure receive batching before listening"
+        );
+        self.receive_batching = enabled;
+        for shard in &mut self.shards {
+            shard.receive_batching = enabled;
+        }
+        self
+    }
+
     /// Creates a listener from a standard UDP socket.
     pub async fn from_std(socket: std::net::UdpSocket) -> Result<Self> {
         socket
@@ -241,6 +295,8 @@ impl RaknetListener {
             guid: rand::random(),
             listened: false,
             maximum_mtu: RAKNET_CLIENT_MTU,
+            receive_batching: false,
+            idle_maintenance: false,
             connection_receiver,
             connection_sender,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -399,6 +455,8 @@ impl RaknetListener {
 
         let guid = self.guid;
         let maximum_mtu = self.maximum_mtu;
+        let receive_batching = self.receive_batching;
+        let idle_maintenance = self.idle_maintenance;
         let sessions = self.sessions.clone();
         let connection_sender = self.connection_sender.clone();
 
@@ -415,6 +473,7 @@ impl RaknetListener {
 
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
+            let mut datagrams = crate::udp::DatagramReceiver::new(receive_batching);
             let mut pending_versions = HashMap::<SocketAddr, (u8, std::time::Instant)>::new();
             let mut dispatch_cache = SessionDispatchCache::default();
             let mut cleanup = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -426,7 +485,7 @@ impl RaknetListener {
                 let addr: SocketAddr;
 
                 tokio::select! {
-                    a = socket.recv_from(&mut buf) => {
+                    a = datagrams.recv_from(&socket, &mut buf) => {
                         match a {
                             Ok(p) => {
                                 size = p.0;
@@ -652,6 +711,9 @@ impl RaknetListener {
                             raknet_version,
                         )
                         .await;
+                        if idle_maintenance {
+                            raknet_socket.set_idle_maintenance(true);
+                        }
 
                         sessions.lock().await.insert(
                             addr,
@@ -932,7 +994,8 @@ mod shard_tests {
             )
             .await
             .unwrap()
-            .with_accept_backlog(NonZeroUsize::new(64).unwrap());
+            .with_accept_backlog(NonZeroUsize::new(64).unwrap())
+            .with_receive_batching(true);
             let address = listener.local_addr().unwrap();
             let guid = listener.get_guid();
             listener
@@ -1118,8 +1181,12 @@ mod dispatch_cache_tests {
         let (first, _first_receiver) = session();
         let (second, _second_receiver) = session();
         let first_address = SocketAddr::from(([127, 0, 0, 1], 19132));
-        let second_address = SocketAddr::from(([127, 0, 0, 2], 19132));
-        let third_address = "[::1]:19132".parse().unwrap();
+        let slot = SessionDispatchCache::slot(&first_address);
+        let mut collisions = (1..=u16::MAX)
+            .map(|port| SocketAddr::from(([127, 0, 0, 2], port)))
+            .filter(|address| SessionDispatchCache::slot(address) == slot);
+        let second_address = collisions.next().unwrap();
+        let third_address = collisions.next().unwrap();
         let mut cache = SessionDispatchCache::default();
         cache.remember(first_address, &first);
         cache.remember(second_address, &second);
@@ -1149,5 +1216,42 @@ mod dispatch_cache_tests {
             cache.entries.iter().filter(|entry| entry.is_some()).count(),
             SessionDispatchCache::LIMIT
         );
+    }
+
+    #[test]
+    fn equal_ports_on_different_ips_do_not_all_collide() {
+        let slots: std::collections::HashSet<_> = (1..=200)
+            .map(|last| SessionDispatchCache::slot(&SocketAddr::from(([10, 0, 0, last], 19132))))
+            .collect();
+        assert!(slots.len() > 180);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod receive_batch_configuration_tests {
+    use super::*;
+    #[tokio::test]
+    async fn batching_defaults_off_and_configuration_reaches_every_shard() {
+        let mut listener = RaknetListener::bind_with_socket_shards(
+            &"127.0.0.1:0".parse().unwrap(),
+            std::num::NonZeroUsize::new(4).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(!listener.idle_maintenance);
+        assert!(listener.shards.iter().all(|shard| !shard.idle_maintenance));
+        listener = listener.with_idle_maintenance(true);
+        assert!(listener.idle_maintenance);
+        assert!(listener.shards.iter().all(|shard| shard.idle_maintenance));
+        listener = listener.with_idle_maintenance(false);
+        assert!(listener.shards.iter().all(|shard| !shard.idle_maintenance));
+        assert!(!listener.receive_batching);
+        assert!(listener.shards.iter().all(|shard| !shard.receive_batching));
+        listener = listener.with_receive_batching(true);
+        assert!(listener.receive_batching);
+        assert!(listener.shards.iter().all(|shard| shard.receive_batching));
+        listener = listener.with_receive_batching(false);
+        assert!(listener.shards.iter().all(|shard| !shard.receive_batching));
+        listener.close().await.unwrap();
     }
 }

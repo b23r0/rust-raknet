@@ -8,7 +8,7 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-SNIPPETS = ("README.md", "src/lib.rs")
+SNIPPETS = ("README.md", "README.zh-CN.md", "src/lib.rs")
 DEPENDENCY = re.compile(r'(?m)^(?P<prefix>(?://! )?rust-raknet = ")(?P<version>[^"\n]+)(?P<suffix>"\s*)$')
 PACKAGE = re.compile(r'(?m)^(?P<prefix>version = ")(?P<version>[^"\n]+)(?P<suffix>")$')
 RELEASE = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')

@@ -36,9 +36,17 @@ async fn main() -> Result<(), BenchError> {
     if tcp {
         args.remove(1);
     }
+    let batch = args.get(1).is_some_and(|arg| arg == "--batch");
+    if batch {
+        args.remove(1);
+    }
+    if batch && tcp {
+        return Err("--batch is only supported for RakNet".into());
+    }
     if args.len() != 5 {
         return Err(
-            "usage: concurrency_benchmark [--tcp] ADDRESS CONNECTIONS MESSAGES PAYLOAD".into(),
+            "usage: concurrency_benchmark [--tcp | --batch] ADDRESS CONNECTIONS MESSAGES PAYLOAD"
+                .into(),
         );
     }
     let address = args[1].parse()?;
@@ -50,7 +58,7 @@ async fn main() -> Result<(), BenchError> {
     }
     tokio::time::timeout(
         Duration::from_secs(180),
-        run(address, count, messages, size, tcp),
+        run(address, count, messages, size, tcp, batch),
     )
     .await??;
     Ok(())
@@ -62,7 +70,18 @@ async fn run(
     messages: usize,
     size: usize,
     tcp: bool,
+    batch: bool,
 ) -> Result<(), BenchError> {
+    println!(
+        "Sending API: {}",
+        if tcp {
+            "TCP complete-record writes"
+        } else if batch {
+            "send_bytes_batch (ready messages only)"
+        } else {
+            "send (no batch API)"
+        }
+    );
     let setup = Instant::now();
     let dialing = Arc::new(Semaphore::new(8));
     let mut tasks = JoinSet::new();
@@ -104,22 +123,59 @@ async fn run(
             start_gate.wait().await;
             // Match the C reference's sliding application window. Refill a slot
             // as each echo arrives instead of waiting for a whole batch.
-            let mut sent = 0;
-            while sent < messages.min(16) {
-                outgoing[9..17].copy_from_slice(&((sent + 20) as u64).to_le_bytes());
-                socket.send(&outgoing).await?;
-                sent += 1;
-            }
-            for received in 0..messages {
-                expected[9..17].copy_from_slice(&((received + 20) as u64).to_le_bytes());
-                socket.recv(size, &mut actual).await?;
-                if actual != expected {
-                    return Err::<_, BenchError>("echo payload or order mismatch".into());
+            if batch {
+                let EchoConnection::RakNet(ref connection) = socket else {
+                    unreachable!()
+                };
+                let mut sent = 0;
+                let mut received = 0;
+                let mut incoming = Vec::with_capacity(16);
+                let mut pending = Vec::with_capacity(16);
+                for message in 0..messages.min(16) {
+                    pending.push(rust_raknet::Bytes::from(payload(id, message + 20, size)));
+                    sent += 1;
                 }
-                if sent < messages {
+                connection
+                    .send_bytes_batch(&pending, Reliability::ReliableOrdered)
+                    .await?;
+                while received < messages {
+                    connection.recv_bytes_batch(&mut incoming, 16).await?;
+                    for actual in &incoming {
+                        expected[9..17].copy_from_slice(&((received + 20) as u64).to_le_bytes());
+                        if actual.as_ref() != expected {
+                            return Err::<_, BenchError>("echo payload or order mismatch".into());
+                        }
+                        received += 1;
+                    }
+                    pending.clear();
+                    for _ in 0..incoming.len().min(messages - sent) {
+                        pending.push(rust_raknet::Bytes::from(payload(id, sent + 20, size)));
+                        sent += 1;
+                    }
+                    if !pending.is_empty() {
+                        connection
+                            .send_bytes_batch(&pending, Reliability::ReliableOrdered)
+                            .await?;
+                    }
+                }
+            } else {
+                let mut sent = 0;
+                while sent < messages.min(16) {
                     outgoing[9..17].copy_from_slice(&((sent + 20) as u64).to_le_bytes());
                     socket.send(&outgoing).await?;
                     sent += 1;
+                }
+                for received in 0..messages {
+                    expected[9..17].copy_from_slice(&((received + 20) as u64).to_le_bytes());
+                    socket.recv(size, &mut actual).await?;
+                    if actual != expected {
+                        return Err::<_, BenchError>("echo payload or order mismatch".into());
+                    }
+                    if sent < messages {
+                        outgoing[9..17].copy_from_slice(&((sent + 20) as u64).to_le_bytes());
+                        socket.send(&outgoing).await?;
+                        sent += 1;
+                    }
                 }
             }
             // Keep every connection open until all peers finish the measured burst.

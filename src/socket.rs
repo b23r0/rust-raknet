@@ -21,6 +21,15 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{arq::*, packet::*, raknet_log_debug, utils::*};
 
+const MAINTENANCE_IDLE_MILLIS: i64 = 500;
+
+#[derive(Default)]
+struct Maintenance {
+    wakeup: Notify,
+    idle: AtomicBool,
+    enabled: AtomicBool,
+}
+
 enum DatagramInput {
     Channel {
         receiver: Receiver<Vec<u8>>,
@@ -237,11 +246,25 @@ pub struct RaknetSocket {
     loss_rate: Arc<AtomicU8>,
     handshake_complete: Arc<tokio::sync::Semaphore>,
     send_capacity: Arc<Notify>,
+    maintenance: Arc<Maintenance>,
     raknet_version: u8,
     mtu: u16,
 }
 
 impl RaknetSocket {
+    /// Pause maintenance after 500 ms of quiet traffic and empty queues.
+    ///
+    /// Disabled by default to preserve the periodic schedule under load.
+    /// This can save CPU with many idle peers, but changes maintenance timing.
+    /// Sending or receiving work wakes a paused connection. Disabling this
+    /// option immediately resumes periodic maintenance.
+    pub fn set_idle_maintenance(&self, enabled: bool) {
+        self.maintenance.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            self.maintenance.wakeup.notify_one();
+        }
+    }
+
     /// Return the negotiated nominal RakNet MTU in bytes.
     pub fn mtu(&self) -> u16 {
         self.mtu
@@ -293,6 +316,7 @@ impl RaknetSocket {
             loss_rate: Arc::new(AtomicU8::new(0)),
             handshake_complete: Arc::new(tokio::sync::Semaphore::new(0)),
             send_capacity: Arc::new(Notify::new()),
+            maintenance: Arc::new(Maintenance::default()),
             raknet_version,
             mtu,
         };
@@ -385,7 +409,8 @@ impl RaknetSocket {
 
     async fn send_ack_ranges(
         socket: &UdpSocket,
-        sequences: Vec<(u32, u32)>,
+        sequences: &[(u32, u32)],
+        packet: &mut Vec<u8>,
         peer: &SocketAddr,
         enable_loss: bool,
         loss_rate: u8,
@@ -393,13 +418,8 @@ impl RaknetSocket {
         if sequences.is_empty() {
             return Ok(());
         }
-        let record_count =
-            u16::try_from(sequences.len()).map_err(|_| RaknetError::PacketParseError)?;
-        let packet = write_packet_ack(&Ack {
-            record_count,
-            sequences,
-        })?;
-        Self::sendto(socket, &packet, peer, enable_loss, loss_rate)
+        write_control_ranges_into(PacketID::Ack, sequences, packet)?;
+        Self::sendto(socket, packet, peer, enable_loss, loss_rate)
             .await
             .map(|_| ())
             .map_err(|_| RaknetError::SocketError)
@@ -413,19 +433,43 @@ impl RaknetSocket {
         loss_rate: u8,
     ) -> Result<()> {
         if frames.len() <= 1 {
-            for frame in frames {
-                Self::send_frame(socket, &frame, peer, enable_loss, loss_rate).await?;
+            for frame in &frames {
+                Self::send_frame(socket, frame, peer, enable_loss, loss_rate).await?;
             }
-        } else {
-            // Reuse one contiguous buffer for fragment batches. send_to is
-            // cheaper here than rebuilding vectored I/O for every fragment.
-            let mut packet = Vec::new();
-            for frame in frames {
-                frame.serialize_into(&mut packet)?;
-                Self::sendto(socket, &packet, peer, enable_loss, loss_rate)
+            return Ok(());
+        }
+        if frames.coalesced {
+            let mut wire = Vec::new();
+            let mut start = 0;
+            while start < frames.len() {
+                let mut end = start + 1;
+                while end < frames.len()
+                    && frames[end].sequence_number == frames[start].sequence_number
+                {
+                    end += 1;
+                }
+                FrameSetPacket::serialize_group_into(&frames[start..end], &mut wire)?;
+                Self::sendto(socket, &wire, peer, enable_loss, loss_rate)
                     .await
                     .map_err(|_| RaknetError::SocketError)?;
+                start = end;
             }
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if frames.len() > 1 && !enable_loss {
+            if let Err(error) = crate::udp::send_frames(socket, &frames, peer).await {
+                raknet_log_error!("UDP batch send failed: {}", error);
+            }
+            return Ok(());
+        }
+        // Reuse one contiguous buffer on platforms without batched syscalls.
+        let mut packet = Vec::new();
+        for frame in &frames {
+            frame.serialize_into(&mut packet)?;
+            Self::sendto(socket, &packet, peer, enable_loss, loss_rate)
+                .await
+                .map_err(|_| RaknetError::SocketError)?;
         }
         Ok(())
     }
@@ -442,6 +486,9 @@ impl RaknetSocket {
         // A fragment batch can keep the flight window full even when it is small.
         // Delegate it and larger queue drains so ACK reception can progress.
         // Ordinary connections allocate no send task until delegation is needed.
+        if frames.coalesced {
+            return Self::transmit_frames(socket, frames, peer, enable_loss, loss_rate).await;
+        }
         if bulk_sender.is_none()
             && frames.len() <= 8
             && frames.iter().all(|frame| !frame.is_fragment())
@@ -468,7 +515,7 @@ impl RaknetSocket {
             });
             sender
         });
-        for frame in frames {
+        for frame in &frames {
             // Queued datagrams own only their wire bytes, rather than retaining
             // an entire fragmented application's shared backing allocation.
             sender
@@ -780,6 +827,7 @@ impl RaknetSocket {
             loss_rate: Arc::new(AtomicU8::new(0)),
             handshake_complete: Arc::new(tokio::sync::Semaphore::new(0)),
             send_capacity: Arc::new(Notify::new()),
+            maintenance: Arc::new(Maintenance::default()),
             raknet_version,
             mtu: negotiated_mtu,
         };
@@ -818,6 +866,7 @@ impl RaknetSocket {
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         let handshake_complete = self.handshake_complete.clone();
         let send_capacity = self.send_capacity.clone();
+        let maintenance = self.maintenance.clone();
         let s = s.clone();
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
@@ -829,16 +878,19 @@ impl RaknetSocket {
             let mut received_since_ack = 0usize;
             let mut decoded_frames = Vec::new();
             let mut ready_frames = Vec::new();
+            let mut acks = Vec::new();
+            let mut ack_packet = Vec::new();
             loop {
                 // Coalesce ACKs only while datagrams are already queued. Never
                 // wait for a timer or another datagram to acknowledge accepted data.
                 if received_since_ack != 0
                     && (receiver.should_flush_ack() || received_since_ack >= 32)
                 {
-                    let acks = recvq.lock().await.get_ack();
+                    recvq.lock().await.take_ack_into(&mut acks);
                     if let Err(error) = Self::send_ack_ranges(
                         &s,
-                        acks,
+                        &acks,
+                        &mut ack_packet,
                         &peer_addr,
                         enable_loss.load(Ordering::Relaxed),
                         loss_rate.load(Ordering::Relaxed),
@@ -911,6 +963,7 @@ impl RaknetSocket {
                             continue;
                         }
                     };
+                    debug_assert_eq!(ack.record_count as usize, ack.sequences.len());
                     let now = monotonic_millis();
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
@@ -942,6 +995,7 @@ impl RaknetSocket {
                             continue;
                         }
                     };
+                    debug_assert_eq!(nack.record_count as usize, nack.sequences.len());
                     let now = monotonic_millis();
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
@@ -986,7 +1040,7 @@ impl RaknetSocket {
                     received_since_ack = 1;
                 }
                 ready_frames.clear();
-                let (acks, invalid) = {
+                let invalid = {
                     let mut recvq = recvq.lock().await;
                     let mut invalid = false;
                     for frame in decoded_frames.drain(..) {
@@ -1000,13 +1054,16 @@ impl RaknetSocket {
                         }
                         recvq.flush_into(&mut ready_frames);
                     }
-                    let acks = if receiver.should_flush_ack() || received_since_ack >= 32 {
+                    if receiver.should_flush_ack() || received_since_ack >= 32 {
                         received_since_ack = 0;
-                        recvq.get_ack()
+                        recvq.take_ack_into(&mut acks);
                     } else {
-                        Vec::new()
-                    };
-                    (acks, invalid)
+                        acks.clear();
+                    }
+                    if recvq.needs_maintenance() && maintenance.idle.swap(false, Ordering::AcqRel) {
+                        maintenance.wakeup.notify_one();
+                    }
+                    invalid
                 };
 
                 if invalid {
@@ -1054,6 +1111,10 @@ impl RaknetSocket {
                             // Flush control replies before exposing handshake readiness.
                             // Reliable frames remain queued until acknowledged.
                             let frames = sendq.write().await.flush(monotonic_millis(), &peer_addr);
+                            if !frames.is_empty() && maintenance.idle.swap(false, Ordering::AcqRel)
+                            {
+                                maintenance.wakeup.notify_one();
+                            }
                             if let Err(error) = Self::transmit_frames(
                                 &s,
                                 frames,
@@ -1089,7 +1150,8 @@ impl RaknetSocket {
 
                 if let Err(error) = Self::send_ack_ranges(
                     &s,
-                    acks,
+                    &acks,
+                    &mut ack_packet,
                     &peer_addr,
                     enable_loss.load(Ordering::Relaxed),
                     loss_rate.load(Ordering::Relaxed),
@@ -1114,41 +1176,56 @@ impl RaknetSocket {
         let peer_addr = self.peer_addr;
         let sendq = self.sendq.clone();
         let recvq = self.recvq.clone();
+        let maintenance = self.maintenance.clone();
         let mut last_monitor_tick = monotonic_millis();
         let enable_loss = self.enable_loss.clone();
         let loss_rate = self.loss_rate.clone();
         let last_heartbeat_time = self.last_heartbeat_time.clone();
         tokio::spawn(async move {
+            let mut nacks = Vec::new();
+            let mut nack_packet = Vec::new();
+            let mut idle = false;
             loop {
-                sleep(std::time::Duration::from_millis(
-                    SendQ::DEFAULT_TIMEOUT_MILLS as u64,
-                ))
-                .await;
+                let delay = if idle {
+                    (RECEIVE_TIMEOUT
+                        - (monotonic_millis() - last_heartbeat_time.load(Ordering::Relaxed)))
+                    .max(1) as u64
+                } else {
+                    SendQ::DEFAULT_TIMEOUT_MILLS as u64
+                };
+                tokio::select! {
+                    _ = sleep(std::time::Duration::from_millis(delay)) => {},
+                    _ = maintenance.wakeup.notified(), if idle => {},
+                    _ = connected.acquire() => {},
+                }
+                // Arm before the existing queue checks. A producer racing with
+                // an idle decision leaves a Notify permit for the next wait.
+                // A briefly empty queue does not make a busy connection idle.
+                // Keep the periodic schedule until traffic has been quiet for
+                // half a second, avoiding repeated sleep/wake transitions.
+                let quiet = maintenance.enabled.load(Ordering::Relaxed)
+                    && monotonic_millis() - last_heartbeat_time.load(Ordering::Relaxed)
+                        >= MAINTENANCE_IDLE_MILLIS;
+                if quiet {
+                    maintenance.idle.store(true, Ordering::Release);
+                }
 
                 // Send NACK ranges.
-                let nacks = {
+                let receive_idle = {
                     let mut recvq = recvq.lock().await;
                     if recvq.fragments_expired() {
                         connected.close();
                         break;
                     }
-                    recvq.get_nack()
+                    recvq.take_nack_into(&mut nacks);
+                    !recvq.needs_maintenance()
                 };
                 if !nacks.is_empty() {
-                    let Ok(record_count) = u16::try_from(nacks.len()) else {
-                        raknet_log_error!("too many NACK ranges to encode");
-                        continue;
-                    };
-                    let nack = Nack {
-                        record_count,
-                        sequences: nacks,
-                    };
-
-                    match write_packet_nack(&nack) {
-                        Ok(packet) => {
+                    match write_control_ranges_into(PacketID::Nack, &nacks, &mut nack_packet) {
+                        Ok(()) => {
                             if let Err(error) = RaknetSocket::sendto(
                                 &s,
-                                &packet,
+                                &nack_packet,
                                 &peer_addr,
                                 enable_loss.load(Ordering::Relaxed),
                                 loss_rate.load(Ordering::Relaxed),
@@ -1162,15 +1239,21 @@ impl RaknetSocket {
                     }
                 }
 
-                // Send queued frames.
-                let outgoing_frames = {
+                // Compute idleness while holding the locks already needed for
+                // maintenance, rather than adding two more locks per active tick.
+                let (outgoing_frames, send_idle) = {
                     let mut sendq = sendq.write().await;
-                    sendq.flush(monotonic_millis(), &peer_addr)
+                    let frames = sendq.flush(monotonic_millis(), &peer_addr);
+                    (frames, sendq.is_empty())
                 };
-                for frame in outgoing_frames {
+                idle = quiet && receive_idle && send_idle;
+                if !idle {
+                    maintenance.idle.store(false, Ordering::Release);
+                }
+                for frame in &outgoing_frames {
                     if let Err(error) = Self::send_frame(
                         &s,
-                        &frame,
+                        frame,
                         &peer_addr,
                         enable_loss.load(Ordering::Relaxed),
                         loss_rate.load(Ordering::Relaxed),
@@ -1360,6 +1443,194 @@ impl RaknetSocket {
         reliability: Reliability,
         order_channel: u8,
     ) -> Result<()> {
+        self.send_payload(buf, reliability, order_channel, None)
+            .await
+    }
+
+    /// Send an owned, immutable payload without copying it into the retry queue.
+    pub async fn send_bytes(&self, data: bytes::Bytes, reliability: Reliability) -> Result<()> {
+        self.send_bytes_with_order_channel(data, reliability, 0)
+            .await
+    }
+
+    /// Send an owned payload on a RakNet ordering channel.
+    pub async fn send_bytes_with_order_channel(
+        &self,
+        data: bytes::Bytes,
+        reliability: Reliability,
+        order_channel: u8,
+    ) -> Result<()> {
+        self.send_payload(&data, reliability, order_channel, Some(&data))
+            .await
+    }
+
+    /// Send an already available batch without waiting to collect more messages.
+    ///
+    /// Small ReliableOrdered messages can share standard RakNet frame sets up
+    /// to the negotiated MTU. Loss feedback or a retransmission timeout restores
+    /// individual sends for this connection. Other modes retain individual
+    /// datagrams. A batch is validated before sending any member.
+    /// Cancellation can send a prefix;
+    /// already queued reliable messages continue delivery. Empty batches are a no-op.
+    pub async fn send_batch(&self, messages: &[&[u8]], reliability: Reliability) -> Result<()> {
+        self.send_batch_with_order_channel(messages, reliability, 0)
+            .await
+    }
+
+    /// Send a borrowed batch on one ordering channel.
+    pub async fn send_batch_with_order_channel(
+        &self,
+        messages: &[&[u8]],
+        reliability: Reliability,
+        order_channel: u8,
+    ) -> Result<()> {
+        self.send_batch_payload(messages, &[], reliability, order_channel)
+            .await
+    }
+
+    /// Send owned buffers without copying their payload into the retry queue.
+    pub async fn send_bytes_batch(
+        &self,
+        messages: &[bytes::Bytes],
+        reliability: Reliability,
+    ) -> Result<()> {
+        self.send_bytes_batch_with_order_channel(messages, reliability, 0)
+            .await
+    }
+
+    /// Send an owned batch on one ordering channel.
+    pub async fn send_bytes_batch_with_order_channel(
+        &self,
+        messages: &[bytes::Bytes],
+        reliability: Reliability,
+        order_channel: u8,
+    ) -> Result<()> {
+        self.send_batch_payload(&[], messages, reliability, order_channel)
+            .await
+    }
+
+    async fn send_batch_payload(
+        &self,
+        borrowed: &[&[u8]],
+        owned: &[bytes::Bytes],
+        reliability: Reliability,
+        order_channel: u8,
+    ) -> Result<()> {
+        let count = borrowed.len() + owned.len();
+        if count == 0 {
+            return Ok(());
+        }
+        if count == 1 {
+            return match owned.first() {
+                Some(message) => {
+                    self.send_payload(message, reliability, order_channel, Some(message))
+                        .await
+                }
+                None => {
+                    self.send_payload(borrowed[0], reliability, order_channel, None)
+                        .await
+                }
+            };
+        }
+        let lengths = || {
+            borrowed
+                .iter()
+                .map(|message| message.len())
+                .chain(owned.iter().map(bytes::Bytes::len))
+        };
+        if borrowed
+            .iter()
+            .any(|message| message.first() != Some(&0xfe))
+            || owned.iter().any(|message| message.first() != Some(&0xfe))
+        {
+            return Err(RaknetError::PacketHeaderError);
+        }
+        // Validate every member before reserving memory or assigning indexes.
+        let can_coalesce = {
+            let queue = self.sendq.read().await;
+            queue.has_batch_capacity(reliability, lengths())?;
+            let mtu = usize::from(queue.mtu());
+            for length in lengths() {
+                if reliability != Reliability::ReliableOrdered && length > mtu.saturating_sub(60) {
+                    return Err(RaknetError::PacketSizeExceedMTU);
+                }
+            }
+            queue.allows_coalescing()
+                && reliability == Reliability::ReliableOrdered
+                && lengths().zip(lengths().skip(1)).any(|(a, b)| {
+                    a <= mtu.saturating_sub(60)
+                        && b <= mtu.saturating_sub(60)
+                        && a.saturating_add(b).saturating_add(24) <= mtu.saturating_sub(28)
+                })
+        };
+        // Avoid changing the pacing of ordinary messages when batching cannot
+        // reduce the datagram count. No extra task or timer is introduced.
+        if !can_coalesce {
+            for &message in borrowed {
+                self.send_payload(message, reliability, order_channel, None)
+                    .await?;
+            }
+            for message in owned {
+                self.send_payload(message, reliability, order_channel, Some(message))
+                    .await?;
+            }
+            return Ok(());
+        }
+        if self.close_notifier.is_closed() {
+            return Err(RaknetError::ConnectionClosed);
+        }
+        if self.handshake_complete.available_permits() == 0 {
+            self.wait_for_handshake().await?;
+        }
+        loop {
+            let available = self.send_capacity.notified();
+            tokio::pin!(available);
+            available.as_mut().enable();
+            let frames = {
+                let mut queue = self.sendq.write().await;
+                if queue.has_batch_capacity(reliability, lengths())? {
+                    if reliability == Reliability::ReliableOrdered {
+                        queue.enable_coalescing();
+                    }
+                    for &message in borrowed {
+                        queue.insert_with_order_channel(reliability, message, order_channel)?;
+                    }
+                    for message in owned {
+                        queue.insert_bytes(reliability, message, order_channel)?;
+                    }
+                    Some(queue.flush(monotonic_millis(), &self.peer_addr))
+                } else {
+                    None
+                }
+            };
+            if let Some(frames) = frames {
+                if self.maintenance.idle.swap(false, Ordering::AcqRel) {
+                    self.maintenance.wakeup.notify_one();
+                }
+                let udp = self.udp.upgrade().ok_or(RaknetError::ConnectionClosed)?;
+                return Self::transmit_frames(
+                    &udp,
+                    frames,
+                    &self.peer_addr,
+                    self.enable_loss.load(Ordering::Relaxed),
+                    self.loss_rate.load(Ordering::Relaxed),
+                )
+                .await;
+            }
+            tokio::select! {
+                _ = self.close_notifier.acquire() => return Err(RaknetError::ConnectionClosed),
+                _ = &mut available => {}
+            }
+        }
+    }
+
+    async fn send_payload(
+        &self,
+        buf: &[u8],
+        reliability: Reliability,
+        order_channel: u8,
+        owned: Option<&bytes::Bytes>,
+    ) -> Result<()> {
         if buf.is_empty() {
             return Err(RaknetError::PacketHeaderError);
         }
@@ -1381,13 +1652,21 @@ impl RaknetSocket {
             let frames = {
                 let mut sendq = self.sendq.write().await;
                 if sendq.has_capacity(reliability, buf.len())? {
-                    sendq.insert_with_order_channel(reliability, buf, order_channel)?;
+                    match owned {
+                        Some(data) => sendq.insert_bytes(reliability, data, order_channel)?,
+                        None => sendq.insert_with_order_channel(reliability, buf, order_channel)?,
+                    }
                     Some(sendq.flush(monotonic_millis(), &self.peer_addr))
                 } else {
                     None
                 }
             };
             if let Some(frames) = frames {
+                if self.maintenance.idle.load(Ordering::Relaxed)
+                    && self.maintenance.idle.swap(false, Ordering::AcqRel)
+                {
+                    self.maintenance.wakeup.notify_one();
+                }
                 // Send from the caller task to avoid an extra channel hop on
                 // the application path. Reliable frames remain in the send queue
                 // until acknowledged, including when this future is cancelled.
@@ -1471,6 +1750,56 @@ impl RaknetSocket {
                 Err(RaknetError::SocketError)
             }
         }
+    }
+
+    /// Receive a game payload as an immutable buffer that can be forwarded with
+    /// `send_bytes` without copying its application bytes.
+    pub async fn recv_bytes(&self) -> Result<bytes::Bytes> {
+        self.recv().await.map(bytes::Bytes::from)
+    }
+
+    /// Receive one message, then drain up to `limit` messages already available.
+    /// Clears `output` and never waits to fill a batch. Work is capped at 64
+    /// messages per call; a zero limit returns immediately.
+    pub async fn recv_batch(&self, output: &mut Vec<Vec<u8>>, limit: usize) -> Result<usize> {
+        self.recv_batch_map(output, limit, |message| message).await
+    }
+
+    /// Receive an immediately available batch for forwarding with send_bytes_batch.
+    pub async fn recv_bytes_batch(
+        &self,
+        output: &mut Vec<bytes::Bytes>,
+        limit: usize,
+    ) -> Result<usize> {
+        self.recv_batch_map(output, limit, bytes::Bytes::from).await
+    }
+
+    async fn recv_batch_map<T>(
+        &self,
+        output: &mut Vec<T>,
+        limit: usize,
+        map: impl Fn(Vec<u8>) -> T,
+    ) -> Result<usize> {
+        output.clear();
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut receiver = self.user_data_receiver.lock().await;
+        let first = receiver.recv().await.ok_or_else(|| {
+            if self.close_notifier.is_closed() {
+                RaknetError::ConnectionClosed
+            } else {
+                RaknetError::SocketError
+            }
+        })?;
+        output.push(map(first));
+        while output.len() < limit.min(64) {
+            match receiver.try_recv() {
+                Ok(message) => output.push(map(message)),
+                Err(_) => break,
+            }
+        }
+        Ok(output.len())
     }
 
     /// Return the remote peer's UDP address.
@@ -1878,5 +2207,122 @@ mod tuning_tests {
         })
         .await
         .expect("bulk sender did not stop");
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use crate::RaknetListener;
+
+    #[tokio::test]
+    async fn a_lost_control_reply_wakes_an_idle_connection_for_retries() {
+        timeout(std::time::Duration::from_secs(3), async {
+            let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let (input, receiver) = channel(1);
+            let (collector, _collected) = channel(1);
+            let mut socket = RaknetSocket::from(
+                &peer.local_addr().unwrap(),
+                &udp,
+                receiver,
+                1400,
+                Arc::new(Mutex::new(collector)),
+                11,
+            )
+            .await;
+            assert!(!socket.maintenance.enabled.load(Ordering::Acquire));
+            socket.set_idle_maintenance(true);
+            sleep(std::time::Duration::from_millis(600)).await;
+            assert!(socket.maintenance.idle.load(Ordering::Acquire));
+            socket.set_loss_rate(10);
+            let request = ConnectionRequest {
+                guid: 42,
+                time: cur_timestamp_millis(),
+                use_encryption: 0,
+            };
+            let frame = FrameSetPacket::new(
+                Reliability::ReliableOrdered,
+                write_packet_connection_request(&request).unwrap(),
+            );
+            input.send(frame.serialize().unwrap()).await.unwrap();
+            while socket.sendq.read().await.get_sent_queue_size() == 0 {
+                tokio::task::yield_now().await;
+            }
+            // The first reply and its ACK are deliberately lost. Recovery must
+            // come from the maintenance task, without another incoming packet.
+            sleep(std::time::Duration::from_millis(20)).await;
+            let mut packet = [0; 2048];
+            assert_eq!(
+                peer.try_recv_from(&mut packet).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            socket.set_loss_rate(0);
+            let (length, _) = timeout(
+                std::time::Duration::from_secs(1),
+                peer.recv_from(&mut packet),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let (reply, _) = FrameSetPacket::deserialize(&packet[..length]).unwrap();
+            assert_eq!(reply.data[0], PacketID::ConnectionRequestAccepted.to_u8());
+            read_packet_connection_request_accepted(&reply.data).unwrap();
+            socket.close().await.unwrap();
+        })
+        .await
+        .expect("lost control reply stalled idle maintenance");
+    }
+
+    #[tokio::test]
+    async fn idle_connections_wake_for_owned_sends_and_loss_recovery() {
+        timeout(std::time::Duration::from_secs(3), async {
+            let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap()
+                .with_idle_maintenance(true);
+            listener.listen().await;
+            let mut client = RaknetSocket::connect(&listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let server = listener.accept().await.unwrap();
+            assert!(!client.maintenance.enabled.load(Ordering::Acquire));
+            assert!(server.maintenance.enabled.load(Ordering::Acquire));
+            client.set_idle_maintenance(true);
+            client.flush().await.unwrap();
+            server.flush().await.unwrap();
+            sleep(std::time::Duration::from_millis(600)).await;
+            assert!(client.maintenance.idle.load(Ordering::Acquire));
+            client.set_loss_rate(10);
+            let payload = bytes::Bytes::from(vec![0xfe; 4096]);
+            client
+                .send_bytes_with_order_channel(payload.clone(), Reliability::ReliableOrdered, 7)
+                .await
+                .unwrap();
+            sleep(std::time::Duration::from_millis(10)).await;
+            client.set_loss_rate(0);
+            assert_eq!(
+                timeout(std::time::Duration::from_millis(500), server.recv_bytes())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                payload
+            );
+            client.flush().await.unwrap();
+            server
+                .send_bytes(payload.clone(), Reliability::ReliableOrdered)
+                .await
+                .unwrap();
+            assert_eq!(client.recv_bytes().await.unwrap(), payload);
+            client.set_idle_maintenance(false);
+            server.set_idle_maintenance(false);
+            sleep(std::time::Duration::from_millis(100)).await;
+            assert!(!client.maintenance.enabled.load(Ordering::Acquire));
+            assert!(!client.maintenance.idle.load(Ordering::Acquire));
+            assert!(!server.maintenance.idle.load(Ordering::Acquire));
+            listener.close().await.unwrap();
+        })
+        .await
+        .expect("idle maintenance or owned send stalled");
     }
 }

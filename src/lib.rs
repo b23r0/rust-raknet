@@ -40,12 +40,14 @@ mod packet;
 mod sequence;
 mod server;
 mod socket;
+mod udp;
 mod utils;
 
 pub use crate::arq::Reliability;
 pub use crate::log::enable_raknet_log;
 pub use crate::server::*;
 pub use crate::socket::*;
+pub use bytes::Bytes;
 
 #[test]
 fn test_raknet_error_implements_std_error() {

@@ -7,7 +7,7 @@ Build and run both programs only inside a disposable task environment with task-
 ```sh
 # Inside the isolated environment:
 cargo build --release --example interop
-cargo build --release --manifest-path example/test_benchmark/Cargo.toml
+cargo build --release --manifest-path examples/test_benchmark/Cargo.toml
 (cd tests/interop && go build -o /task/bin/interop-peer .)
 
 # Go server -> Rust client:

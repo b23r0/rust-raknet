@@ -264,3 +264,254 @@ fn batch_ack_preserves_fragment_budget_and_ignores_unsent_ranges() {
     assert_eq!(send.buffered_bytes, 0);
     assert!(send.is_empty());
 }
+
+#[test]
+fn coalesced_frame_sets_preserve_mtu_indexes_and_ack_all_members() {
+    for mtu in [576, 1400, 1492] {
+        let mut send = SendQ::new(mtu);
+        send.enable_coalescing();
+        for index in 0..64 {
+            send.insert_with_order_channel(Reliability::ReliableOrdered, &[0xfe, index], 3)
+                .unwrap();
+        }
+        let frames = send.flush(0, &peer());
+        let mut receive = RecvQ::new();
+        let mut wire = Vec::new();
+        let mut begin = 0;
+        let mut datagrams = 0;
+        while begin < frames.len() {
+            let mut end = begin + 1;
+            while end < frames.len() && frames[end].sequence_number == frames[begin].sequence_number
+            {
+                end += 1;
+            }
+            FrameSetPacket::serialize_group_into(&frames[begin..end], &mut wire).unwrap();
+            assert!(wire.len() <= usize::from(mtu) - 28);
+            for frame in FrameVec::new(&wire).unwrap().frames {
+                receive.insert(frame).unwrap();
+            }
+            send.ack(frames[begin].sequence_number, 1);
+            datagrams += 1;
+            begin = end;
+        }
+        assert!(datagrams < 64);
+        let delivered = receive.flush(&peer());
+        assert_eq!(delivered.len(), 64);
+        for (index, frame) in delivered.iter().enumerate() {
+            assert_eq!(frame.data.as_ref(), &[0xfe, index as u8]);
+            assert_eq!(frame.order_channel, 3);
+            assert_eq!(frame.reliable_frame_index, index as u32);
+        }
+        assert!(send.is_empty());
+        assert_eq!(send.buffered_bytes, 0);
+    }
+}
+
+#[test]
+fn coalesced_loss_retries_and_late_acks_preserve_exactly_once_delivery() {
+    for use_nack in [false, true] {
+        let mut send = SendQ::new(1400);
+        send.enable_coalescing();
+        for index in 0..16 {
+            send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+                .unwrap();
+        }
+        let initial = send.flush(0, &peer());
+        assert_eq!(initial[0].sequence_number, 0);
+        assert_eq!(initial[8].sequence_number, 1);
+        if use_nack {
+            send.nack(0, 1);
+            send.nack(1, 1);
+        }
+        let retry = send.flush(50, &peer());
+        assert_eq!(retry.len(), 16);
+        let mut receive = RecvQ::new();
+        for frame in retry {
+            receive.insert(frame).unwrap();
+        }
+        assert_eq!(receive.flush(&peer()).len(), 16);
+        for frame in initial {
+            receive.insert(frame).unwrap();
+        }
+        assert!(receive.flush(&peer()).is_empty());
+        send.ack(0, 51);
+        send.ack(1, 51);
+        assert!(send.is_empty());
+        assert_eq!(send.buffered_bytes, 0);
+    }
+}
+
+#[test]
+fn coalescing_respects_wrap_flight_limits_fragments_and_other_modes() {
+    let mut send = SendQ::new(1400);
+    send.enable_coalescing();
+    send.sequence_number = sequence::MASK;
+    for index in 0..80 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    let first = send.flush(0, &peer());
+    assert_eq!(first.len(), 64);
+    assert_eq!(first[0].sequence_number, sequence::MASK);
+    assert_eq!(first[8].sequence_number, 0);
+    for frames in first.chunks(8) {
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.sequence_number == frames[0].sequence_number)
+        );
+        send.ack(frames[0].sequence_number, 1);
+    }
+    let rest = send.flush(1, &peer());
+    assert_eq!(rest.len(), 16);
+    for frames in rest.chunks(8) {
+        send.ack(frames[0].sequence_number, 2);
+    }
+    assert!(send.is_empty());
+    for mode in [
+        Reliability::Unreliable,
+        Reliability::UnreliableSequenced,
+        Reliability::Reliable,
+        Reliability::ReliableSequenced,
+    ] {
+        let mut send = SendQ::new(1400);
+        send.enable_coalescing();
+        send.insert(mode, &[0xfe, 0]).unwrap();
+        send.insert(mode, &[0xfe, 1]).unwrap();
+        let frames = send.flush(0, &peer());
+        assert_ne!(frames[0].sequence_number, frames[1].sequence_number);
+    }
+    let mut send = SendQ::new(1400);
+    send.enable_coalescing();
+    send.insert(Reliability::ReliableOrdered, &[0xfe; 4096])
+        .unwrap();
+    let frames = send.flush(0, &peer());
+    assert!(frames.iter().all(FrameSetPacket::is_fragment));
+    assert!(
+        frames
+            .windows(2)
+            .all(|pair| pair[0].sequence_number != pair[1].sequence_number)
+    );
+}
+
+#[test]
+fn grouped_ack_samples_rtt_once_and_rejects_unsent_sequences() {
+    let mut grouped = SendQ::new(1400);
+    grouped.enable_coalescing();
+    for _ in 0..16 {
+        grouped
+            .insert(Reliability::ReliableOrdered, &[0xfe])
+            .unwrap();
+    }
+    grouped.flush(0, &peer());
+    grouped.ack(99, 1000);
+    assert_eq!(grouped.get_sent_queue_size(), 16);
+    grouped.ack(0, 1000);
+    let mut ordinary = SendQ::new(1400);
+    ordinary
+        .insert(Reliability::ReliableOrdered, &[0xfe])
+        .unwrap();
+    ordinary.flush(0, &peer());
+    ordinary.ack(0, 1000);
+    assert_eq!(grouped.get_rto(), ordinary.get_rto());
+    grouped.ack(1, 1000);
+    assert!(!grouped.grouped_acks);
+}
+
+#[test]
+fn later_coalesced_datagram_recovers_a_lost_group_before_the_timeout() {
+    let mut send = SendQ::new(1400);
+    send.enable_coalescing();
+    for index in 0..16 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    let initial = send.flush(0, &peer());
+    let mut receive = RecvQ::new();
+    for frame in initial.into_iter().skip(8) {
+        receive.insert(frame).unwrap();
+    }
+    assert!(receive.flush(&peer()).is_empty());
+    let gaps = receive.get_nack();
+    assert_eq!(gaps, vec![(0, 0)]);
+    send.nack_ranges(&gaps, 1);
+    let retry = send.flush(1, &peer());
+    assert_eq!(retry.len(), 8);
+    for frame in retry {
+        receive.insert(frame).unwrap();
+    }
+    let delivered = receive.flush(&peer());
+    assert_eq!(delivered.len(), 16);
+    for (index, frame) in delivered.iter().enumerate() {
+        assert_eq!(frame.data.as_ref(), &[0xfe, index as u8]);
+    }
+    send.ack_ranges(&receive.get_ack(), 2);
+    assert!(send.is_empty());
+}
+
+#[test]
+fn packed_timeout_permanently_restores_individual_datagrams() {
+    let mut send = SendQ::new(1400);
+    send.enable_coalescing();
+    for index in 0..16 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    let first = send.flush(0, &peer());
+    assert!(first.coalesced);
+    send.flush(SendQ::DEFAULT_TIMEOUT_MILLS, &peer());
+    assert!(!send.allows_coalescing());
+    send.ack_ranges(&[(0, 1)], 51);
+    assert!(send.is_empty());
+    send.enable_coalescing();
+    for index in 0..16 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    let ordinary = send.flush(52, &peer());
+    assert!(!ordinary.coalesced);
+    for pair in ordinary.windows(2) {
+        assert_ne!(pair[0].sequence_number, pair[1].sequence_number);
+    }
+}
+
+#[test]
+fn loss_feedback_before_batching_keeps_the_ordinary_path() {
+    let mut send = SendQ::new(1400);
+    send.insert(Reliability::ReliableOrdered, &[0xfe, 0])
+        .unwrap();
+    send.flush(0, &peer());
+    send.nack(99, 1);
+    assert!(send.allows_coalescing());
+    send.nack(0, 1);
+    assert!(!send.allows_coalescing());
+    send.flush(1, &peer());
+    send.ack(0, 2);
+    send.enable_coalescing();
+    for index in 0..16 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    let frames = send.flush(3, &peer());
+    assert!(!frames.coalesced);
+    for pair in frames.windows(2) {
+        assert_ne!(pair[0].sequence_number, pair[1].sequence_number);
+    }
+}
+
+#[test]
+fn timeout_before_batching_also_keeps_the_ordinary_path() {
+    let mut send = SendQ::new(1400);
+    send.insert(Reliability::ReliableOrdered, &[0xfe, 0])
+        .unwrap();
+    send.flush(0, &peer());
+    send.flush(SendQ::DEFAULT_TIMEOUT_MILLS, &peer());
+    assert!(!send.allows_coalescing());
+    send.ack(0, 51);
+    send.enable_coalescing();
+    for index in 0..16 {
+        send.insert(Reliability::ReliableOrdered, &[0xfe, index])
+            .unwrap();
+    }
+    assert!(!send.flush(52, &peer()).coalesced);
+}
