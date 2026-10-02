@@ -32,7 +32,7 @@ ordering and fragmentation. Choose the delivery guarantees your application need
 
 ```toml
 [dependencies]
-rust-raknet = "0.16.0"
+rust-raknet = "1.0.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -163,7 +163,7 @@ As of October 2, 2026, the latest stable Bedrock release is
 The tested setup used a Windows 1.26.52 client and Bedrock Dedicated Server
 1.26.52.3, with game protocol 2193 and RakNet protocol 11. Joining, movement,
 placing and breaking blocks, and the proxy's server-list MOTD all worked through
-`rust-raknet` 0.16.0 over RakNet UDP.
+`rust-raknet` 1.0.0 over RakNet UDP.
 
 Dedicated servers default to NetherNet starting with
 [26.50](https://feedback.minecraft.net/hc/en-us/articles/48826825649933-Minecraft-Bedrock-Edition-26-50-Changelog-Wilderness-Bound).
@@ -350,7 +350,7 @@ Host network settings were unchanged.
 | Column | GitHub source | Tested version / revision |
 | --- | --- | --- |
 | TCP | [TCP echo driver](https://github.com/b23r0/rust-raknet/tree/main/examples/test_benchmark), [Tokio](https://github.com/tokio-rs/tokio) | Driver 0.1.0; Tokio 1.53.1; Linux TCP stack 7.0.11-76070011-generic |
-| rust-raknet (`send`) | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | 0.16.0 working tree based on `a957256`, including pending performance changes |
+| rust-raknet (`send`) | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | 0.16.0 at `d65aee3`; benchmark instrumentation added |
 | rust-raknet (batch APIs) | [b23r0/rust-raknet](https://github.com/b23r0/rust-raknet) | The same library build as the `send` column |
 | C KCP | [skywind3000/kcp](https://github.com/skywind3000/kcp/tree/b1a7a2101dcbb96017681a500d6b82bbe5a88766) | Pinned commit `b1a7a21`; upstream C core unchanged |
 | quic-go | [quic-go/quic-go](https://github.com/quic-go/quic-go/tree/v0.63.0) | v0.63.0; Go 1.27.1 |
@@ -360,11 +360,6 @@ Host network settings were unchanged.
   client uses `send_bytes_batch`. Echo servers use `recv_bytes_batch` and
   `send_bytes_batch`. Each call submits at most 16 already-ready messages;
   neither endpoint waits to fill a batch.
-
-The concurrent batch client constructs owned payloads for its batches; the
-ordinary client reuses a borrowed payload template. The comparison includes
-buffer construction, send APIs and receive draining. It does not isolate the
-cost or benefit of packet packing alone.
 
 Each run starts fresh servers and connections. Both rust-raknet columns use
 `ReliableOrdered`, the normal 64-frame reliable flight limit and normal retry
@@ -381,7 +376,8 @@ including loss seen during warmup. Thus **calling the batch API does not mean
 that every run actually merges messages**.
 
 TCP uses `TCP_NODELAY`, four-byte little-endian record lengths, complete-record
-writes and reused buffers. C KCP uses message mode, segment windows of 64/128,
+writes and reused buffers. C KCP uses message mode, send/receive segment windows
+of 64/64 for single-connection runs and 64/128 for concurrent runs,
 `nodelay(1, 10, 2, 1)`, immediate writes/ACKs, and no FEC or encryption.
 QUIC uses one bidirectional reliable ordered stream per connection with the
 same record framing as TCP. Encryption, congestion control and stream flow
@@ -392,6 +388,17 @@ headers and ACKs. **Higher is better.** Tables show medians of three runs, with
 rotating order across all five columns. 1 MiB = 1,048,576 B. Loss is independently
 randomized per run and affects data and ACKs in both directions.
 
+Values are medians across repetitions; parentheses show the min–max range.
+Every value includes its unit. Throughput cells list throughput, then peak RSS
+for the client (**C**) and server (**S**). Latency tables include ranges and
+memory from their own measured workload.
+
+Linux `wait4` records whole-process peak RSS across startup, setup, warmup, load
+and teardown. This includes runtime, allocator and application buffers, excluding
+kernel socket buffers. TCP transport state lives in the kernel, so RSS is not
+total network memory. C / S peaks are measured separately, need not occur
+together, and are not per-connection footprints.
+
 ### Single connection
 
 All clients keep at most 64 application messages awaiting echoes. Each run has
@@ -399,32 +406,16 @@ All clients keep at most 64 application messages awaiting echoes. Each run has
 Go use four workers; C KCP uses one event loop per process. Throughput runs are
 not pinned to CPUs, so these are not equal-CPU-efficiency measurements.
 
-| Network profile | Payload / burst count | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| Network profile | Payload / burst count | TCP<br>Throughput (range)<br>RSS: C / S | rust-raknet (`send`)<br>Throughput (range)<br>RSS: C / S | rust-raknet (batch APIs)<br>Throughput (range)<br>RSS: C / S | C KCP<br>Throughput (range)<br>RSS: C / S | quic-go<br>Throughput (range)<br>RSS: C / S |
 | --- | --- | --- | --- | --- | --- | --- |
-| No injected loss | 800 B / 200,000 messages | 149.64 MiB/s | 188.84 MiB/s | 194.79 MiB/s | 150.33 MiB/s | 114.28 MiB/s |
-| 1% loss | 800 B / 50,000 messages | 17.87 MiB/s | 148.62 MiB/s | 150.42 MiB/s | 130.82 MiB/s | 73.61 MiB/s |
-| 5% loss | 800 B / 50,000 messages | 1.10 MiB/s | 138.58 MiB/s | 138.57 MiB/s | 104.44 MiB/s | 9.24 MiB/s |
-| No injected loss | 64 B / 300,000 messages | 13.45 MiB/s | 16.49 MiB/s | 19.81 MiB/s | 12.45 MiB/s | 19.07 MiB/s |
-| 1% loss | 64 B / 100,000 messages | 3.25 MiB/s | 14.82 MiB/s | 15.53 MiB/s | 11.23 MiB/s | 15.70 MiB/s |
-| 5% loss | 64 B / 100,000 messages | 0.12 MiB/s | 14.81 MiB/s | 11.98 MiB/s | 10.10 MiB/s | 3.46 MiB/s |
-| No injected loss | 4,096 B / 50,000 messages | 343.72 MiB/s | 313.39 MiB/s | 316.06 MiB/s | 255.39 MiB/s | 219.47 MiB/s |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s | 3.02 MiB/s | 2.96 MiB/s | 2.97 MiB/s | 1.57 MiB/s |
-
-<details>
-<summary>Single-connection throughput ranges</summary>
-
-| Network profile | Payload / burst count | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
-| --- | --- | --- | --- | --- | --- | --- |
-| No injected loss | 800 B / 200,000 messages | 149.64 MiB/s (149.44–157.64 MiB/s) | 188.84 MiB/s (186.11–189.02 MiB/s) | 194.79 MiB/s (191.36–195.96 MiB/s) | 150.33 MiB/s (146.79–153.49 MiB/s) | 114.28 MiB/s (85.89–115.88 MiB/s) |
-| 1% loss | 800 B / 50,000 messages | 17.87 MiB/s (14.64–25.13 MiB/s) | 148.62 MiB/s (148.36–150.92 MiB/s) | 150.42 MiB/s (125.54–166.60 MiB/s) | 130.82 MiB/s (125.84–149.80 MiB/s) | 73.61 MiB/s (64.52–87.73 MiB/s) |
-| 5% loss | 800 B / 50,000 messages | 1.10 MiB/s (1.02–1.12 MiB/s) | 138.58 MiB/s (73.17–168.10 MiB/s) | 138.57 MiB/s (85.28–143.16 MiB/s) | 104.44 MiB/s (95.78–122.29 MiB/s) | 9.24 MiB/s (8.35–10.51 MiB/s) |
-| No injected loss | 64 B / 300,000 messages | 13.45 MiB/s (13.18–14.03 MiB/s) | 16.49 MiB/s (16.47–16.58 MiB/s) | 19.81 MiB/s (16.45–35.17 MiB/s) | 12.45 MiB/s (12.39–12.70 MiB/s) | 19.07 MiB/s (13.44–31.32 MiB/s) |
-| 1% loss | 64 B / 100,000 messages | 3.25 MiB/s (2.81–3.69 MiB/s) | 14.82 MiB/s (14.52–16.11 MiB/s) | 15.53 MiB/s (14.44–16.70 MiB/s) | 11.23 MiB/s (10.53–11.92 MiB/s) | 15.70 MiB/s (13.10–21.80 MiB/s) |
-| 5% loss | 64 B / 100,000 messages | 0.12 MiB/s (0.12–0.14 MiB/s) | 14.81 MiB/s (10.86–15.24 MiB/s) | 11.98 MiB/s (6.26–13.47 MiB/s) | 10.10 MiB/s (9.99–10.23 MiB/s) | 3.46 MiB/s (2.88–3.82 MiB/s) |
-| No injected loss | 4,096 B / 50,000 messages | 343.72 MiB/s (308.23–348.77 MiB/s) | 313.39 MiB/s (312.68–314.14 MiB/s) | 316.06 MiB/s (310.03–316.51 MiB/s) | 255.39 MiB/s (249.93–259.25 MiB/s) | 219.47 MiB/s (218.10–227.73 MiB/s) |
-| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.04 MiB/s (0.98–1.16 MiB/s) | 3.02 MiB/s (2.84–3.27 MiB/s) | 2.96 MiB/s (2.94–3.01 MiB/s) | 2.97 MiB/s (2.95–3.04 MiB/s) | 1.57 MiB/s (1.55–1.64 MiB/s) |
-
-</details>
+| No injected loss | 800 B / 200,000 messages | 150.71 MiB/s (149.60–151.39 MiB/s)<br>C: 3.53 MiB (3.46–3.54 MiB)<br>S: 3.45 MiB (3.37–3.45 MiB) | 188.34 MiB/s (183.93–191.66 MiB/s)<br>C: 3.84 MiB (3.69–3.98 MiB)<br>S: 3.77 MiB (3.60–3.89 MiB) | 193.30 MiB/s (189.46–195.30 MiB/s)<br>C: 3.85 MiB (3.71–3.99 MiB)<br>S: 3.88 MiB (3.67–4.00 MiB) | 152.98 MiB/s (151.66–155.92 MiB/s)<br>C: 1.88 MiB (1.75–1.88 MiB)<br>S: 1.75 MiB (1.75–1.75 MiB) | 116.06 MiB/s (115.70–117.91 MiB/s)<br>C: 14.15 MiB (14.14–14.41 MiB)<br>S: 13.70 MiB (13.55–14.21 MiB) |
+| 1% loss | 800 B / 50,000 messages | 17.02 MiB/s (14.55–19.00 MiB/s)<br>C: 3.65 MiB (3.42–3.74 MiB)<br>S: 3.44 MiB (3.29–3.50 MiB) | 151.54 MiB/s (151.06–151.61 MiB/s)<br>C: 3.70 MiB (3.70–3.82 MiB)<br>S: 3.82 MiB (3.54–3.85 MiB) | 158.37 MiB/s (151.12–162.72 MiB/s)<br>C: 3.78 MiB (3.59–3.99 MiB)<br>S: 3.95 MiB (3.79–4.02 MiB) | 131.88 MiB/s (129.13–132.70 MiB/s)<br>C: 1.88 MiB (1.75–1.88 MiB)<br>S: 1.88 MiB (1.75–1.88 MiB) | 77.07 MiB/s (29.79–87.86 MiB/s)<br>C: 13.75 MiB (13.49–13.85 MiB)<br>S: 13.52 MiB (13.50–13.56 MiB) |
+| 5% loss | 800 B / 50,000 messages | 1.06 MiB/s (0.99–1.11 MiB/s)<br>C: 3.55 MiB (3.41–3.77 MiB)<br>S: 3.41 MiB (3.29–3.45 MiB) | 146.94 MiB/s (140.16–149.13 MiB/s)<br>C: 3.85 MiB (3.81–3.91 MiB)<br>S: 3.78 MiB (3.39–3.98 MiB) | 142.99 MiB/s (133.51–144.10 MiB/s)<br>C: 3.83 MiB (3.72–4.10 MiB)<br>S: 3.84 MiB (3.74–3.86 MiB) | 113.61 MiB/s (111.54–124.69 MiB/s)<br>C: 1.75 MiB (1.75–1.75 MiB)<br>S: 1.87 MiB (1.75–1.88 MiB) | 10.03 MiB/s (8.66–13.69 MiB/s)<br>C: 13.68 MiB (13.64–13.78 MiB)<br>S: 14.00 MiB (13.89–14.31 MiB) |
+| No injected loss | 64 B / 300,000 messages | 13.82 MiB/s (13.32–14.09 MiB/s)<br>C: 3.58 MiB (3.41–3.75 MiB)<br>S: 3.40 MiB (3.29–3.49 MiB) | 16.45 MiB/s (16.25–16.66 MiB/s)<br>C: 3.58 MiB (3.50–3.79 MiB)<br>S: 3.70 MiB (3.69–3.78 MiB) | 49.83 MiB/s (49.04–50.50 MiB/s)<br>C: 3.58 MiB (3.57–3.73 MiB)<br>S: 3.71 MiB (3.52–3.73 MiB) | 12.56 MiB/s (12.43–12.72 MiB/s)<br>C: 1.75 MiB (1.75–1.88 MiB)<br>S: 1.75 MiB (1.75–1.88 MiB) | 31.30 MiB/s (10.36–31.48 MiB/s)<br>C: 13.51 MiB (13.25–13.89 MiB)<br>S: 13.51 MiB (13.32–14.20 MiB) |
+| 1% loss | 64 B / 100,000 messages | 2.34 MiB/s (1.63–3.86 MiB/s)<br>C: 3.58 MiB (3.36–3.63 MiB)<br>S: 3.34 MiB (3.25–3.51 MiB) | 15.13 MiB/s (14.65–16.43 MiB/s)<br>C: 3.86 MiB (3.73–3.89 MiB)<br>S: 3.80 MiB (3.70–3.83 MiB) | 14.91 MiB/s (14.85–16.35 MiB/s)<br>C: 3.73 MiB (3.63–3.89 MiB)<br>S: 3.71 MiB (3.68–3.74 MiB) | 11.45 MiB/s (11.34–11.72 MiB/s)<br>C: 1.75 MiB (1.75–1.88 MiB)<br>S: 1.88 MiB (1.75–1.88 MiB) | 13.69 MiB/s (8.00–21.54 MiB/s)<br>C: 12.64 MiB (12.01–12.76 MiB)<br>S: 11.95 MiB (11.57–12.07 MiB) |
+| 5% loss | 64 B / 100,000 messages | 0.11 MiB/s (0.11–0.13 MiB/s)<br>C: 3.58 MiB (3.46–3.63 MiB)<br>S: 3.35 MiB (3.33–3.50 MiB) | 13.42 MiB/s (13.26–13.63 MiB/s)<br>C: 3.62 MiB (3.59–3.62 MiB)<br>S: 3.66 MiB (3.48–3.77 MiB) | 13.92 MiB/s (13.91–14.32 MiB/s)<br>C: 3.79 MiB (3.78–3.82 MiB)<br>S: 3.81 MiB (3.60–3.89 MiB) | 10.16 MiB/s (9.96–10.19 MiB/s)<br>C: 1.75 MiB (1.75–1.88 MiB)<br>S: 1.75 MiB (1.75–1.75 MiB) | 3.15 MiB/s (2.73–3.20 MiB/s)<br>C: 12.64 MiB (12.51–12.76 MiB)<br>S: 12.13 MiB (12.07–12.20 MiB) |
+| No injected loss | 4,096 B / 50,000 messages | 345.98 MiB/s (342.74–347.49 MiB/s)<br>C: 3.59 MiB (3.52–3.61 MiB)<br>S: 3.45 MiB (3.43–3.49 MiB) | 314.30 MiB/s (301.29–315.82 MiB/s)<br>C: 4.71 MiB (4.43–4.76 MiB)<br>S: 4.68 MiB (4.64–4.76 MiB) | 313.17 MiB/s (310.92–315.55 MiB/s)<br>C: 4.66 MiB (4.65–4.89 MiB)<br>S: 4.80 MiB (4.67–5.02 MiB) | 256.66 MiB/s (249.47–263.40 MiB/s)<br>C: 1.87 MiB (1.86–1.88 MiB)<br>S: 1.75 MiB (1.75–1.88 MiB) | 227.94 MiB/s (149.56–228.93 MiB/s)<br>C: 14.23 MiB (14.18–14.24 MiB)<br>S: 13.73 MiB (13.72–14.10 MiB) |
+| 1% loss + 5 ms each way | 800 B / 3,000 messages | 1.21 MiB/s (1.09–1.28 MiB/s)<br>C: 3.58 MiB (3.56–3.59 MiB)<br>S: 3.34 MiB (3.26–3.45 MiB) | 2.91 MiB/s (2.72–2.96 MiB/s)<br>C: 3.80 MiB (3.78–3.98 MiB)<br>S: 3.68 MiB (3.64–3.70 MiB) | 3.05 MiB/s (2.99–3.12 MiB/s)<br>C: 3.79 MiB (3.61–3.89 MiB)<br>S: 3.71 MiB (3.65–3.80 MiB) | 2.85 MiB/s (2.79–2.95 MiB/s)<br>C: 1.75 MiB (1.75–1.88 MiB)<br>S: 1.75 MiB (1.75–1.88 MiB) | 1.67 MiB/s (1.55–1.79 MiB/s)<br>C: 11.83 MiB (11.64–11.89 MiB)<br>S: 11.45 MiB (10.70–11.57 MiB) |
 
 Single-connection UDP packet budgets match: rust-raknet's nominal MTU is 1,428 B,
 including 28 B of IPv4/UDP overhead; C KCP and quic-go use a 1,400 B UDP packet
@@ -440,13 +431,13 @@ messages and no injected loss. Client and server are pinned to different CPUs;
 each Rust/Go process has four workers on its assigned CPU, while C KCP uses one
 event loop. CPU affinity does not reserve the CPUs exclusively.
 
-| Implementation / API | Median RTT | 95th-percentile RTT | 99th-percentile RTT |
-| --- | --- | --- | --- |
-| TCP | 12.8 µs | 20.6 µs | 37.9 µs |
-| rust-raknet (`send`) | 17.6 µs | 22.7 µs | 47.9 µs |
-| rust-raknet (batch APIs) | 17.4 µs | 22.2 µs | 47.0 µs |
-| C KCP | 10.4 µs | 15.9 µs | 33.3 µs |
-| quic-go | 61.9 µs | 94.6 µs | 129.6 µs |
+| Implementation / API | Median RTT (range) | 95th-percentile RTT (range) | 99th-percentile RTT (range) | Peak RSS: C / S (range) |
+| --- | --- | --- | --- | --- |
+| TCP | 13.0 µs (12.8–13.1 µs) | 19.8 µs (19.5–21.6 µs) | 37.3 µs (37.1–39.5 µs) | C: 3.87 MiB (3.84–3.98 MiB)<br>S: 3.47 MiB (3.45–3.48 MiB) |
+| rust-raknet (`send`) | 18.5 µs (17.2–18.6 µs) | 24.4 µs (22.6–32.9 µs) | 48.9 µs (45.0–53.3 µs) | C: 4.31 MiB (4.20–4.36 MiB)<br>S: 4.12 MiB (3.90–4.25 MiB) |
+| rust-raknet (batch APIs) | 18.2 µs (17.4–18.4 µs) | 22.4 µs (21.7–25.2 µs) | 47.7 µs (45.9–49.3 µs) | C: 4.16 MiB (4.15–4.39 MiB)<br>S: 4.01 MiB (3.90–4.08 MiB) |
+| C KCP | 10.4 µs (10.4–10.5 µs) | 16.0 µs (14.2–16.3 µs) | 32.6 µs (27.1–35.2 µs) | C: 1.88 MiB (1.87–1.88 MiB)<br>S: 1.87 MiB (1.75–1.88 MiB) |
+| quic-go | 62.0 µs (61.9–62.1 µs) | 96.7 µs (95.7–98.0 µs) | 132.6 µs (126.2–170.2 µs) | C: 13.26 MiB (12.95–13.57 MiB)<br>S: 11.01 MiB (10.95–11.07 MiB) |
 
 The batch client calls `send_batch` with **one** message for these sparse samples;
 the batch server likewise replies without waiting for more messages. No messages
@@ -464,42 +455,22 @@ Connections stay open until every burst finishes.
 
 All implementations use four workers and four server listeners/receive sockets
 with `SO_REUSEPORT`. Servers are pinned to four CPUs and clients to the other
-four. These are synthetic transport sessions, not authenticated Minecraft players.
+four. These measurements use reliable ordered echo workloads.
 
-| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
+| Payload | Connections | Injected loss | TCP<br>Throughput (range)<br>RSS: C / S | rust-raknet (`send`)<br>Throughput (range)<br>RSS: C / S | rust-raknet (batch APIs)<br>Throughput (range)<br>RSS: C / S | C KCP<br>Throughput (range)<br>RSS: C / S | quic-go<br>Throughput (range)<br>RSS: C / S |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 800 B | 64 connections | 0% | 634.89 MiB/s | 573.33 MiB/s | 574.74 MiB/s | 390.10 MiB/s | 231.72 MiB/s |
-| 800 B | 256 connections | 0% | 602.00 MiB/s | 559.84 MiB/s | 580.24 MiB/s | 412.41 MiB/s | 189.96 MiB/s |
-| 800 B | 1,024 connections | 0% | 577.50 MiB/s | 495.19 MiB/s | 456.42 MiB/s | 351.83 MiB/s | 161.41 MiB/s |
-| 800 B | 2,048 connections | 0% | 560.90 MiB/s | 437.78 MiB/s | 317.01 MiB/s | 313.08 MiB/s | 127.58 MiB/s |
-| 800 B | 64 connections | 1% | 404.40 MiB/s | 486.37 MiB/s | 537.64 MiB/s | 342.39 MiB/s | 190.13 MiB/s |
-| 800 B | 256 connections | 1% | 492.03 MiB/s | 446.77 MiB/s | 476.44 MiB/s | 400.05 MiB/s | 178.44 MiB/s |
-| 800 B | 1,024 connections | 1% | 490.61 MiB/s | 439.75 MiB/s | 454.97 MiB/s | 362.80 MiB/s | 72.49 MiB/s |
-| 800 B | 2,048 connections | 1% | 480.96 MiB/s | 346.41 MiB/s | 353.56 MiB/s | 336.77 MiB/s | 38.47 MiB/s |
-| 64 B | 64 connections | 0% | 68.60 MiB/s | 47.59 MiB/s | 129.31 MiB/s | 32.87 MiB/s | 135.46 MiB/s |
-| 64 B | 1,024 connections | 0% | 55.39 MiB/s | 49.03 MiB/s | 148.73 MiB/s | 43.48 MiB/s | 110.25 MiB/s |
-| 64 B | 64 connections | 1% | 46.47 MiB/s | 44.86 MiB/s | 46.56 MiB/s | 32.54 MiB/s | 66.16 MiB/s |
-| 64 B | 1,024 connections | 1% | 47.38 MiB/s | 42.28 MiB/s | 46.91 MiB/s | 43.08 MiB/s | 80.70 MiB/s |
-
-<details>
-<summary>Concurrent throughput ranges</summary>
-
-| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) | C KCP | quic-go |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 800 B | 64 connections | 0% | 634.89 MiB/s (604.49–691.88 MiB/s) | 573.33 MiB/s (549.30–578.24 MiB/s) | 574.74 MiB/s (573.26–583.02 MiB/s) | 390.10 MiB/s (331.71–391.23 MiB/s) | 231.72 MiB/s (224.07–232.60 MiB/s) |
-| 800 B | 256 connections | 0% | 602.00 MiB/s (599.13–632.16 MiB/s) | 559.84 MiB/s (515.24–567.53 MiB/s) | 580.24 MiB/s (553.57–585.65 MiB/s) | 412.41 MiB/s (410.23–418.18 MiB/s) | 189.96 MiB/s (189.17–194.65 MiB/s) |
-| 800 B | 1,024 connections | 0% | 577.50 MiB/s (455.40–585.45 MiB/s) | 495.19 MiB/s (490.50–506.24 MiB/s) | 456.42 MiB/s (406.09–509.81 MiB/s) | 351.83 MiB/s (302.39–407.08 MiB/s) | 161.41 MiB/s (148.02–168.02 MiB/s) |
-| 800 B | 2,048 connections | 0% | 560.90 MiB/s (485.08–571.37 MiB/s) | 437.78 MiB/s (397.60–440.29 MiB/s) | 317.01 MiB/s (295.58–443.27 MiB/s) | 313.08 MiB/s (295.83–346.13 MiB/s) | 127.58 MiB/s (81.90–137.95 MiB/s) |
-| 800 B | 64 connections | 1% | 404.40 MiB/s (375.90–484.43 MiB/s) | 486.37 MiB/s (449.86–503.03 MiB/s) | 537.64 MiB/s (519.54–558.08 MiB/s) | 342.39 MiB/s (325.80–373.99 MiB/s) | 190.13 MiB/s (185.66–197.30 MiB/s) |
-| 800 B | 256 connections | 1% | 492.03 MiB/s (490.61–544.03 MiB/s) | 446.77 MiB/s (374.17–495.70 MiB/s) | 476.44 MiB/s (472.61–514.43 MiB/s) | 400.05 MiB/s (390.22–420.57 MiB/s) | 178.44 MiB/s (177.19–178.79 MiB/s) |
-| 800 B | 1,024 connections | 1% | 490.61 MiB/s (325.94–510.10 MiB/s) | 439.75 MiB/s (430.81–468.65 MiB/s) | 454.97 MiB/s (431.67–458.71 MiB/s) | 362.80 MiB/s (358.80–382.40 MiB/s) | 72.49 MiB/s (60.68–111.68 MiB/s) |
-| 800 B | 2,048 connections | 1% | 480.96 MiB/s (437.30–493.70 MiB/s) | 346.41 MiB/s (336.19–367.02 MiB/s) | 353.56 MiB/s (328.69–389.72 MiB/s) | 336.77 MiB/s (319.42–346.90 MiB/s) | 38.47 MiB/s (33.38–46.39 MiB/s) |
-| 64 B | 64 connections | 0% | 68.60 MiB/s (67.87–73.23 MiB/s) | 47.59 MiB/s (47.32–47.99 MiB/s) | 129.31 MiB/s (113.26–157.07 MiB/s) | 32.87 MiB/s (28.76–35.58 MiB/s) | 135.46 MiB/s (133.70–137.00 MiB/s) |
-| 64 B | 1,024 connections | 0% | 55.39 MiB/s (54.94–55.73 MiB/s) | 49.03 MiB/s (47.57–51.86 MiB/s) | 148.73 MiB/s (124.90–149.36 MiB/s) | 43.48 MiB/s (40.99–43.67 MiB/s) | 110.25 MiB/s (108.30–111.87 MiB/s) |
-| 64 B | 64 connections | 1% | 46.47 MiB/s (43.87–54.31 MiB/s) | 44.86 MiB/s (44.67–46.52 MiB/s) | 46.56 MiB/s (46.21–47.98 MiB/s) | 32.54 MiB/s (31.50–34.95 MiB/s) | 66.16 MiB/s (63.31–66.84 MiB/s) |
-| 64 B | 1,024 connections | 1% | 47.38 MiB/s (44.98–51.74 MiB/s) | 42.28 MiB/s (42.08–42.58 MiB/s) | 46.91 MiB/s (45.06–47.80 MiB/s) | 43.08 MiB/s (35.78–43.10 MiB/s) | 80.70 MiB/s (76.90–83.43 MiB/s) |
-
-</details>
+| 800 B | 64 connections | 0% | 686.84 MiB/s (660.28–696.38 MiB/s)<br>C: 3.96 MiB (3.94–3.96 MiB)<br>S: 3.48 MiB (3.29–3.50 MiB) | 566.35 MiB/s (513.44–608.05 MiB/s)<br>C: 7.19 MiB (6.83–7.57 MiB)<br>S: 8.07 MiB (7.33–8.23 MiB) | 570.96 MiB/s (536.42–613.69 MiB/s)<br>C: 7.25 MiB (7.23–7.62 MiB)<br>S: 7.61 MiB (7.44–7.97 MiB) | 385.96 MiB/s (381.21–415.65 MiB/s)<br>C: 3.00 MiB (3.00–3.00 MiB)<br>S: 3.25 MiB (3.13–3.25 MiB) | 230.52 MiB/s (223.93–232.42 MiB/s)<br>C: 29.70 MiB (29.16–29.77 MiB)<br>S: 33.91 MiB (31.39–36.24 MiB) |
+| 800 B | 256 connections | 0% | 607.51 MiB/s (573.21–608.02 MiB/s)<br>C: 5.78 MiB (5.64–5.78 MiB)<br>S: 3.66 MiB (3.53–3.72 MiB) | 549.78 MiB/s (546.04–569.34 MiB/s)<br>C: 15.78 MiB (15.75–15.90 MiB)<br>S: 14.38 MiB (13.83–14.53 MiB) | 549.17 MiB/s (526.89–561.53 MiB/s)<br>C: 16.47 MiB (16.31–16.75 MiB)<br>S: 14.93 MiB (14.28–15.23 MiB) | 407.50 MiB/s (388.71–408.66 MiB/s)<br>C: 6.25 MiB (6.25–6.25 MiB)<br>S: 7.00 MiB (6.88–7.00 MiB) | 191.40 MiB/s (188.11–193.07 MiB/s)<br>C: 77.63 MiB (76.96–77.87 MiB)<br>S: 79.33 MiB (72.77–81.14 MiB) |
+| 800 B | 1,024 connections | 0% | 579.63 MiB/s (552.38–580.28 MiB/s)<br>C: 12.33 MiB (11.49–12.47 MiB)<br>S: 4.88 MiB (4.73–4.95 MiB) | 543.38 MiB/s (510.86–547.88 MiB/s)<br>C: 47.03 MiB (46.72–47.24 MiB)<br>S: 39.34 MiB (37.62–41.84 MiB) | 424.12 MiB/s (397.64–514.45 MiB/s)<br>C: 48.34 MiB (48.27–49.49 MiB)<br>S: 40.75 MiB (40.61–43.16 MiB) | 384.08 MiB/s (381.90–400.60 MiB/s)<br>C: 20.25 MiB (20.25–20.38 MiB)<br>S: 20.63 MiB (20.25–20.63 MiB) | 173.05 MiB/s (163.57–173.73 MiB/s)<br>C: 242.27 MiB (241.52–244.64 MiB)<br>S: 219.83 MiB (207.71–223.86 MiB) |
+| 800 B | 2,048 connections | 0% | 551.95 MiB/s (515.72–587.01 MiB/s)<br>C: 18.20 MiB (16.71–20.39 MiB)<br>S: 6.61 MiB (6.57–6.68 MiB) | 433.48 MiB/s (430.64–434.75 MiB/s)<br>C: 87.66 MiB (87.63–89.96 MiB)<br>S: 69.42 MiB (69.22–70.91 MiB) | 408.05 MiB/s (367.75–414.65 MiB/s)<br>C: 89.64 MiB (89.14–91.14 MiB)<br>S: 74.59 MiB (73.68–74.95 MiB) | 342.55 MiB/s (334.12–344.45 MiB/s)<br>C: 38.75 MiB (38.63–38.88 MiB)<br>S: 38.38 MiB (37.63–38.38 MiB) | 136.72 MiB/s (135.05–138.96 MiB/s)<br>C: 465.14 MiB (459.12–467.06 MiB)<br>S: 380.00 MiB (367.71–399.96 MiB) |
+| 800 B | 64 connections | 1% | 426.91 MiB/s (340.17–500.90 MiB/s)<br>C: 4.10 MiB (3.91–4.14 MiB)<br>S: 3.33 MiB (3.09–3.50 MiB) | 537.82 MiB/s (523.14–538.61 MiB/s)<br>C: 7.25 MiB (7.10–7.47 MiB)<br>S: 7.72 MiB (7.68–7.87 MiB) | 539.56 MiB/s (521.51–557.75 MiB/s)<br>C: 7.45 MiB (7.37–7.63 MiB)<br>S: 7.98 MiB (7.78–8.13 MiB) | 388.20 MiB/s (380.95–402.75 MiB/s)<br>C: 2.88 MiB (2.75–3.00 MiB)<br>S: 3.13 MiB (3.13–3.25 MiB) | 219.77 MiB/s (216.52–220.89 MiB/s)<br>C: 28.51 MiB (28.32–28.76 MiB)<br>S: 33.42 MiB (31.50–33.46 MiB) |
+| 800 B | 256 connections | 1% | 478.63 MiB/s (460.11–516.55 MiB/s)<br>C: 5.80 MiB (5.73–5.87 MiB)<br>S: 3.64 MiB (3.53–3.70 MiB) | 474.69 MiB/s (473.86–497.07 MiB/s)<br>C: 16.32 MiB (16.14–17.25 MiB)<br>S: 15.69 MiB (15.27–15.75 MiB) | 503.83 MiB/s (499.65–505.25 MiB/s)<br>C: 17.13 MiB (16.84–17.18 MiB)<br>S: 15.37 MiB (15.36–15.56 MiB) | 390.50 MiB/s (327.94–418.43 MiB/s)<br>C: 6.25 MiB (6.25–6.38 MiB)<br>S: 6.88 MiB (6.75–6.88 MiB) | 183.33 MiB/s (182.52–185.20 MiB/s)<br>C: 75.93 MiB (75.65–76.08 MiB)<br>S: 72.21 MiB (71.33–73.33 MiB) |
+| 800 B | 1,024 connections | 1% | 495.35 MiB/s (495.10–512.14 MiB/s)<br>C: 12.21 MiB (12.04–12.55 MiB)<br>S: 4.72 MiB (4.66–4.72 MiB) | 445.63 MiB/s (436.74–471.55 MiB/s)<br>C: 47.18 MiB (46.41–49.34 MiB)<br>S: 42.86 MiB (42.12–43.16 MiB) | 433.00 MiB/s (412.66–444.47 MiB/s)<br>C: 49.04 MiB (48.64–51.79 MiB)<br>S: 45.11 MiB (42.27–45.48 MiB) | 324.89 MiB/s (313.60–384.79 MiB/s)<br>C: 20.25 MiB (20.25–20.38 MiB)<br>S: 19.88 MiB (18.88–20.63 MiB) | 79.09 MiB/s (77.68–97.35 MiB/s)<br>C: 329.10 MiB (323.22–339.30 MiB)<br>S: 194.25 MiB (190.52–199.92 MiB) |
+| 800 B | 2,048 connections | 1% | 425.19 MiB/s (255.63–440.72 MiB/s)<br>C: 17.40 MiB (17.23–20.09 MiB)<br>S: 6.60 MiB (6.43–6.64 MiB) | 371.13 MiB/s (341.29–387.26 MiB/s)<br>C: 90.00 MiB (88.92–92.36 MiB)<br>S: 74.96 MiB (73.77–77.34 MiB) | 324.86 MiB/s (323.00–328.90 MiB/s)<br>C: 92.60 MiB (92.43–92.98 MiB)<br>S: 77.47 MiB (75.64–77.80 MiB) | 300.43 MiB/s (270.36–316.49 MiB/s)<br>C: 38.75 MiB (38.75–39.00 MiB)<br>S: 37.38 MiB (36.13–38.00 MiB) | 36.02 MiB/s (34.86–38.96 MiB/s)<br>C: 760.16 MiB (753.87–775.20 MiB)<br>S: 411.05 MiB (403.68–418.38 MiB) |
+| 64 B | 64 connections | 0% | 66.29 MiB/s (63.73–74.45 MiB/s)<br>C: 3.98 MiB (3.70–4.09 MiB)<br>S: 3.27 MiB (3.25–3.57 MiB) | 50.20 MiB/s (49.10–51.96 MiB/s)<br>C: 5.64 MiB (5.58–5.86 MiB)<br>S: 5.85 MiB (5.75–5.89 MiB) | 112.17 MiB/s (97.73–112.77 MiB/s)<br>C: 5.71 MiB (5.69–5.91 MiB)<br>S: 6.05 MiB (6.01–6.43 MiB) | 34.92 MiB/s (30.01–36.24 MiB/s)<br>C: 2.26 MiB (2.25–2.38 MiB)<br>S: 2.38 MiB (2.38–2.50 MiB) | 124.82 MiB/s (117.80–139.59 MiB/s)<br>C: 21.71 MiB (21.24–22.41 MiB)<br>S: 19.02 MiB (18.83–19.58 MiB) |
+| 64 B | 1,024 connections | 0% | 55.28 MiB/s (54.29–56.05 MiB/s)<br>C: 9.24 MiB (9.09–9.31 MiB)<br>S: 4.14 MiB (4.12–4.36 MiB) | 48.66 MiB/s (47.83–50.19 MiB/s)<br>C: 32.75 MiB (32.27–32.95 MiB)<br>S: 27.39 MiB (25.48–28.52 MiB) | 142.12 MiB/s (140.84–146.14 MiB/s)<br>C: 32.24 MiB (31.98–32.27 MiB)<br>S: 25.79 MiB (25.66–25.85 MiB) | 42.03 MiB/s (41.17–44.17 MiB/s)<br>C: 8.88 MiB (8.88–8.88 MiB)<br>S: 9.25 MiB (9.25–9.38 MiB) | 109.34 MiB/s (108.98–109.42 MiB/s)<br>C: 147.46 MiB (131.64–148.71 MiB)<br>S: 96.83 MiB (94.08–96.85 MiB) |
+| 64 B | 64 connections | 1% | 42.97 MiB/s (41.55–44.56 MiB/s)<br>C: 4.01 MiB (3.80–4.02 MiB)<br>S: 3.34 MiB (3.22–3.36 MiB) | 47.57 MiB/s (46.08–48.15 MiB/s)<br>C: 5.80 MiB (5.73–5.87 MiB)<br>S: 6.18 MiB (5.95–6.24 MiB) | 46.27 MiB/s (41.98–48.32 MiB/s)<br>C: 6.04 MiB (5.93–6.07 MiB)<br>S: 6.33 MiB (6.29–6.52 MiB) | 32.18 MiB/s (30.46–34.99 MiB/s)<br>C: 2.26 MiB (2.25–2.38 MiB)<br>S: 2.50 MiB (2.38–2.50 MiB) | 62.27 MiB/s (61.10–65.93 MiB/s)<br>C: 21.81 MiB (21.58–21.88 MiB)<br>S: 18.96 MiB (18.80–19.27 MiB) |
+| 64 B | 1,024 connections | 1% | 51.20 MiB/s (46.05–53.09 MiB/s)<br>C: 9.13 MiB (9.09–9.58 MiB)<br>S: 4.09 MiB (3.91–4.11 MiB) | 43.49 MiB/s (42.68–43.57 MiB/s)<br>C: 34.34 MiB (33.05–35.57 MiB)<br>S: 29.52 MiB (28.13–29.59 MiB) | 49.85 MiB/s (49.79–52.47 MiB/s)<br>C: 35.72 MiB (35.22–35.84 MiB)<br>S: 30.05 MiB (29.84–30.09 MiB) | 40.47 MiB/s (37.55–42.08 MiB/s)<br>C: 8.75 MiB (8.75–8.75 MiB)<br>S: 9.25 MiB (9.13–9.25 MiB) | 81.37 MiB/s (81.09–90.10 MiB/s)<br>C: 132.64 MiB (130.52–142.89 MiB)<br>S: 95.26 MiB (93.71–96.21 MiB) |
 
 Concurrent runs use rust-raknet's default nominal MTU of 1,400 B. quic-go's UDP
 budget is 1,372 B, matching the 1,400 B IPv4 packet budget, with path MTU discovery
@@ -510,67 +481,62 @@ counts across implementations.
 
 ### Delivery latency during sustained load
 
-A separate instrumented driver timestamps messages before sending and measures
-RTT when their verified echoes arrive throughout the burst. It uses the same
-16-message window, worker counts, CPU placement and server modes, but verifies
+All concurrent clients support `--loaded-rtt`. They timestamp each message
+before sending and measure
+RTT when its verified echo is consumed throughout the burst. They use the same
+16-message window, worker counts, CPU placement and server modes, but verify
 262,144 burst echoes per run. These latency measurements include client and
 server queueing. Instrumentation adds overhead, so its throughput is not mixed
-into the tables above. Values are medians of three runs; each cell shows
-**median RTT / 99th-percentile RTT**. Lower is better.
+into the tables above. Values are medians of three runs, showing
+**median RTT and 99th-percentile RTT**, each with its range. Lower is better.
+RSS includes the client's retained RTT samples, aggregation and sorting.
 
-| Payload | Connections | Injected loss | TCP | rust-raknet (`send`) | rust-raknet (batch APIs) |
-| --- | --- | --- | --- | --- | --- |
-| 64 B | 64 connections | 0% | 0.94 ms / 5.28 ms | 1.00 ms / 7.84 ms | 0.45 ms / 3.71 ms |
-| 64 B | 1,024 connections | 0% | 19.12 ms / 38.37 ms | 15.99 ms / 42.99 ms | 4.21 ms / 22.42 ms |
-| 64 B | 64 connections | 1% | 0.65 ms / 3.74 ms | 0.94 ms / 5.83 ms | 0.95 ms / 4.85 ms |
-| 64 B | 1,024 connections | 1% | 15.71 ms / 37.28 ms | 15.44 ms / 62.46 ms | 10.22 ms / 51.70 ms |
-| 800 B | 64 connections | 0% | 1.15 ms / 9.62 ms | 1.10 ms / 8.51 ms | 1.11 ms / 9.22 ms |
-| 800 B | 1,024 connections | 0% | 20.37 ms / 40.35 ms | 19.24 ms / 124.51 ms | 17.59 ms / 113.04 ms |
-| 800 B | 64 connections | 1% | 0.66 ms / 3.95 ms | 0.99 ms / 5.90 ms | 1.05 ms / 5.92 ms |
-| 800 B | 1,024 connections | 1% | 18.34 ms / 48.50 ms | 18.23 ms / 71.80 ms | 20.38 ms / 100.26 ms |
+| Payload | Connections | Injected loss | TCP<br>RTT median / 99th (range)<br>RSS: C / S | rust-raknet (`send`)<br>RTT median / 99th (range)<br>RSS: C / S | rust-raknet (batch APIs)<br>RTT median / 99th (range)<br>RSS: C / S | C KCP<br>RTT median / 99th (range)<br>RSS: C / S | quic-go<br>RTT median / 99th (range)<br>RSS: C / S |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 64 B | 64 connections | 0% | 50%: 0.91 ms (0.88–0.95 ms)<br>99%: 3.66 ms (3.51–4.39 ms)<br>C: 11.54 MiB (11.46–11.61 MiB)<br>S: 3.28 MiB (3.22–3.32 MiB) | 50%: 1.04 ms (1.02–1.06 ms)<br>99%: 4.30 ms (3.39–8.22 ms)<br>C: 13.38 MiB (13.26–13.43 MiB)<br>S: 5.77 MiB (5.57–5.86 MiB) | 50%: 0.40 ms (0.37–0.43 ms)<br>99%: 3.99 ms (1.62–4.30 ms)<br>C: 13.38 MiB (13.28–13.46 MiB)<br>S: 5.90 MiB (5.74–5.99 MiB) | 50%: 1.32 ms (1.26–1.36 ms)<br>99%: 6.61 ms (5.66–9.60 ms)<br>C: 6.21 MiB (6.20–6.26 MiB)<br>S: 2.38 MiB (2.38–2.38 MiB) | 50%: 0.36 ms (0.35–0.36 ms)<br>99%: 2.49 ms (1.55–2.89 ms)<br>C: 30.30 MiB (27.44–31.44 MiB)<br>S: 17.33 MiB (17.21–17.71 MiB) |
+| 64 B | 1,024 connections | 0% | 50%: 17.27 ms (17.04–17.89 ms)<br>99%: 36.27 ms (35.31–39.06 ms)<br>C: 16.73 MiB (16.35–17.03 MiB)<br>S: 4.13 MiB (4.00–4.23 MiB) | 50%: 15.99 ms (15.70–18.16 ms)<br>99%: 87.61 ms (36.52–94.68 ms)<br>C: 36.47 MiB (36.36–36.68 MiB)<br>S: 23.73 MiB (22.76–23.86 MiB) | 50%: 4.76 ms (4.53–5.00 ms)<br>99%: 19.49 ms (17.86–19.88 ms)<br>C: 37.91 MiB (37.82–38.02 MiB)<br>S: 24.41 MiB (24.10–24.41 MiB) | 50%: 5.12 ms (5.12–11.34 ms)<br>99%: 161.62 ms (101.00–162.49 ms)<br>C: 10.69 MiB (10.57–10.94 MiB)<br>S: 9.25 MiB (9.25–9.50 MiB) | 50%: 8.89 ms (8.67–8.94 ms)<br>99%: 14.09 ms (12.27–35.74 ms)<br>C: 138.33 MiB (138.08–139.46 MiB)<br>S: 86.21 MiB (84.71–92.96 MiB) |
+| 64 B | 64 connections | 1% | 50%: 0.63 ms (0.59–0.68 ms)<br>99%: 3.41 ms (2.85–3.47 ms)<br>C: 11.62 MiB (11.61–11.82 MiB)<br>S: 3.43 MiB (3.39–3.46 MiB) | 50%: 0.94 ms (0.91–0.97 ms)<br>99%: 5.70 ms (5.18–5.81 ms)<br>C: 13.63 MiB (13.42–13.75 MiB)<br>S: 6.02 MiB (5.81–6.14 MiB) | 50%: 0.97 ms (0.91–0.99 ms)<br>99%: 5.12 ms (4.80–5.99 ms)<br>C: 13.71 MiB (13.69–13.92 MiB)<br>S: 6.18 MiB (6.11–6.41 MiB) | 50%: 1.23 ms (1.22–1.29 ms)<br>99%: 7.13 ms (5.39–8.05 ms)<br>C: 6.21 MiB (6.17–6.23 MiB)<br>S: 2.38 MiB (2.38–2.50 MiB) | 50%: 0.09 ms (0.09–0.10 ms)<br>99%: 27.22 ms (27.18–27.24 ms)<br>C: 33.52 MiB (30.96–34.39 MiB)<br>S: 17.46 MiB (16.96–17.57 MiB) |
+| 64 B | 1,024 connections | 1% | 50%: 15.82 ms (14.79–16.82 ms)<br>99%: 35.74 ms (34.77–38.60 ms)<br>C: 17.36 MiB (16.71–17.39 MiB)<br>S: 4.25 MiB (4.14–4.25 MiB) | 50%: 16.12 ms (15.94–16.48 ms)<br>99%: 73.30 ms (59.21–90.99 ms)<br>C: 35.66 MiB (35.43–37.98 MiB)<br>S: 25.35 MiB (24.98–25.75 MiB) | 50%: 12.54 ms (11.93–13.24 ms)<br>99%: 34.82 ms (33.37–44.75 ms)<br>C: 38.88 MiB (37.43–39.15 MiB)<br>S: 25.90 MiB (25.77–25.91 MiB) | 50%: 6.84 ms (6.51–8.46 ms)<br>99%: 157.42 ms (122.50–160.02 ms)<br>C: 10.76 MiB (10.69–10.82 MiB)<br>S: 9.13 MiB (9.13–9.25 MiB) | 50%: 9.80 ms (9.11–10.45 ms)<br>99%: 55.46 ms (52.74–66.84 ms)<br>C: 133.46 MiB (133.14–137.96 MiB)<br>S: 87.45 MiB (87.18–89.26 MiB) |
+| 800 B | 64 connections | 0% | 50%: 1.16 ms (1.12–1.17 ms)<br>99%: 4.95 ms (4.14–10.78 ms)<br>C: 11.84 MiB (11.81–12.00 MiB)<br>S: 3.22 MiB (3.21–3.38 MiB) | 50%: 1.11 ms (1.09–1.17 ms)<br>99%: 3.81 ms (3.35–3.89 ms)<br>C: 14.66 MiB (14.55–14.79 MiB)<br>S: 7.14 MiB (6.98–7.64 MiB) | 50%: 1.12 ms (1.09–1.17 ms)<br>99%: 5.94 ms (3.28–8.83 ms)<br>C: 14.79 MiB (14.64–14.91 MiB)<br>S: 7.30 MiB (7.28–7.46 MiB) | 50%: 1.18 ms (1.17–1.22 ms)<br>99%: 23.48 ms (6.77–30.71 ms)<br>C: 7.02 MiB (6.96–7.11 MiB)<br>S: 3.13 MiB (3.13–3.13 MiB) | 50%: 3.11 ms (3.08–3.14 ms)<br>99%: 14.75 ms (12.52–15.22 ms)<br>C: 36.69 MiB (36.36–38.85 MiB)<br>S: 32.20 MiB (30.51–32.23 MiB) |
+| 800 B | 1,024 connections | 0% | 50%: 19.53 ms (19.52–21.90 ms)<br>99%: 40.40 ms (37.69–41.09 ms)<br>C: 20.02 MiB (20.00–20.07 MiB)<br>S: 4.92 MiB (4.91–5.05 MiB) | 50%: 13.14 ms (13.02–15.01 ms)<br>99%: 121.29 ms (116.86–193.91 ms)<br>C: 50.09 MiB (49.30–50.50 MiB)<br>S: 34.84 MiB (34.50–34.88 MiB) | 50%: 11.04 ms (10.65–18.39 ms)<br>99%: 184.17 ms (116.17–190.44 ms)<br>C: 51.06 MiB (50.85–52.21 MiB)<br>S: 34.95 MiB (34.54–36.98 MiB) | 50%: 17.84 ms (17.11–19.91 ms)<br>99%: 116.16 ms (113.56–120.76 ms)<br>C: 22.19 MiB (22.07–22.19 MiB)<br>S: 20.25 MiB (20.13–20.88 MiB) | 50%: 70.44 ms (69.77–72.96 ms)<br>99%: 124.10 ms (113.07–140.60 ms)<br>C: 227.46 MiB (226.21–237.71 MiB)<br>S: 156.83 MiB (151.87–162.71 MiB) |
+| 800 B | 64 connections | 1% | 50%: 0.73 ms (0.68–0.79 ms)<br>99%: 5.66 ms (4.05–8.74 ms)<br>C: 11.75 MiB (11.65–12.10 MiB)<br>S: 3.38 MiB (3.38–3.39 MiB) | 50%: 1.07 ms (1.06–1.10 ms)<br>99%: 5.32 ms (5.02–7.29 ms)<br>C: 14.86 MiB (14.77–15.00 MiB)<br>S: 7.37 MiB (7.28–7.39 MiB) | 50%: 1.06 ms (1.04–1.10 ms)<br>99%: 5.98 ms (5.66–6.38 ms)<br>C: 15.10 MiB (15.08–15.12 MiB)<br>S: 7.72 MiB (7.51–7.82 MiB) | 50%: 1.16 ms (1.12–1.27 ms)<br>99%: 8.17 ms (7.62–15.36 ms)<br>C: 6.89 MiB (6.77–6.95 MiB)<br>S: 3.13 MiB (3.00–3.25 MiB) | 50%: 3.06 ms (3.02–3.06 ms)<br>99%: 13.40 ms (12.61–13.63 ms)<br>C: 37.86 MiB (36.83–38.06 MiB)<br>S: 29.83 MiB (29.78–34.01 MiB) |
+| 800 B | 1,024 connections | 1% | 50%: 18.53 ms (18.27–18.59 ms)<br>99%: 46.00 ms (45.15–51.12 ms)<br>C: 20.23 MiB (20.10–20.32 MiB)<br>S: 4.86 MiB (4.73–4.91 MiB) | 50%: 15.22 ms (14.46–17.90 ms)<br>99%: 120.08 ms (68.63–121.71 ms)<br>C: 49.66 MiB (48.44–50.02 MiB)<br>S: 35.99 MiB (35.46–37.51 MiB) | 50%: 16.70 ms (15.52–18.56 ms)<br>99%: 116.65 ms (98.59–147.61 ms)<br>C: 51.54 MiB (50.38–52.66 MiB)<br>S: 36.85 MiB (36.84–37.36 MiB) | 50%: 18.00 ms (16.27–19.79 ms)<br>99%: 124.25 ms (120.94–127.48 ms)<br>C: 22.19 MiB (22.19–22.32 MiB)<br>S: 19.88 MiB (19.38–20.38 MiB) | 50%: 67.98 ms (67.98–69.97 ms)<br>99%: 174.05 ms (172.49–319.53 ms)<br>C: 243.64 MiB (243.08–245.33 MiB)<br>S: 198.14 MiB (181.47–228.02 MiB) |
 
-### What these runs show
+### Reading the results
 
-- For 64 B messages with no injected loss, batch APIs improve concurrent
-  throughput from 47.59 to 129.31 MiB/s at 64 connections and from 49.03 to
-  148.73 MiB/s at 1,024 connections. In the separate loaded-latency measurement
-  at 1,024 connections, median RTT falls from 15.99 to 4.21 ms and the
-  99th-percentile RTT from 42.99 to 22.42 ms.
-- The single-connection 64 B batch result is less stable: 19.81 MiB/s median,
-  with a 16.45–35.17 MiB/s range. It does not consistently reproduce the previous
-  batch's small-message gain. A separate diagnostic build observed matched NACKs
-  disabling packing in four of ten no-injected-loss runs, despite zero netem
-  drops and zero UDP receive-buffer drops. A NACK reports a sequence gap; it
-  does not by itself prove permanent packet loss. The current permanent fallback
-  makes batching sensitive to that feedback. Diagnostic results are excluded
-  from the tables.
-- Ordinary rust-raknet sends retain strong single-connection 800 B throughput,
-  including the 1% and 5% loss profiles. TCP leads the 4 KiB single-connection
-  profile and the 800 B concurrent groups without injected loss. quic-go leads
-  the 64 B / 64-connection group and both 64 B concurrent loss groups. There is
-  no winner across every workload.
-- Batch APIs are **not a general default-speedup switch**. At 800 B and 2,048
-  connections without injected loss, they measure 317.01 MiB/s versus
-  437.78 MiB/s for ordinary sends, about 28% lower. At 64 B and 5% loss on one
-  connection, they measure 11.98 versus 14.81 MiB/s, about 19% lower. The
-  API/draining and driver-buffer differences still matter when packing is
-  unavailable or has been disabled.
-- Sparse median RTT is similar between the two API modes: 17.6 µs for `send`
-  and 17.4 µs for batch APIs. Loaded latency is not uniformly better: at 800 B,
-  1,024 connections and 1% loss, the batch mode's 99th-percentile RTT is
-  100.26 ms versus 71.80 ms for ordinary sends. Select the mode using the
-  payload sizes, concurrency and latency distribution of the actual workload.
+- With 64 B messages and 1,024 connections without injected loss, ordinary
+  rust-raknet delivers 48.66 MiB/s and batch APIs
+  deliver 142.12 MiB/s. TCP delivers 55.28 MiB/s,
+  C KCP 42.03 MiB/s and quic-go 109.34 MiB/s.
+- For that same profile, loaded median / 99th-percentile RTT is
+  15.99 ms / 87.61 ms
+  with ordinary sends and 4.76 ms / 19.49 ms
+  with batch APIs. All five loaded-latency columns use the same per-message
+  measurement.
+- Check tails separately from throughput. At 800 B, 1,024 connections and
+  1% loss, 99th-percentile loaded RTT is 120.08 ms for ordinary
+  sends and 116.65 ms for batch APIs.
+- At 800 B and 2,048 connections without injected loss, server peak RSS is
+  6.61 MiB for TCP, 69.42 MiB for ordinary rust-raknet,
+  74.59 MiB for batch rust-raknet, 38.38 MiB for C KCP and
+  380.00 MiB for quic-go. This includes the drivers and runtimes;
+  it is not a heap-only comparison of protocol cores.
 
+The concurrent batch client constructs owned payloads for pending messages,
+while the ordinary client reuses a borrowed template. Results include these
+buffer choices and receive draining; they are not a pure packet-packing ablation.
+Batch APIs are workload-dependent, especially when packing has fallen back to
+individual sends. Compare throughput, loaded latency and memory together.
 
 Random netem loss and namespace-local UDP receive-buffer errors were recorded
 for every run. Saturated UDP sockets can drop packets even with no injected
-loss. Maximum receive-buffer drops in one throughput run: rust-raknet (`send`): 187,997 datagrams, rust-raknet (batch APIs): 375,102 datagrams, C KCP: 335,992 datagrams, quic-go: 6,124 datagrams.
+loss. Maximum receive-buffer drops in one throughput run: rust-raknet (`send`): 207,572 datagrams, rust-raknet (batch APIs): 327,373 datagrams, C KCP: 370,281 datagrams, quic-go: 0 datagrams.
 These are part of the measured workload. Random loss and shared CPU scheduling
 make the ranges relevant; a small median difference is not a universal ranking.
 
-All 397 measurements completed with verified echoes: 120 single-connection
+All 445 measurements completed with verified echoes: 120 single-connection
 throughput runs, 25 sparse-latency runs, 180 concurrent-throughput runs and
-72 loaded-latency runs. This batch replaces the previous tables; it is not a
+120 loaded-latency runs. This batch replaces the previous tables; it is not a
 controlled before/after comparison with an older library revision.
 
 Build commands, API flags and workload details are in

@@ -29,15 +29,15 @@ Tokio workers, four Linux `SO_REUSEPORT` listeners, `TCP_NODELAY` and reused
 length-prefixed record buffers. Pin the server and client to
 separate sets of four CPUs; affinity does not reserve these CPUs exclusively.
 
-All three concurrent drivers measure 20 sequential RTTs per connection, then start
+The concurrent drivers measure 20 sequential RTTs per connection, then start
 throughput at a common barrier. Each connection keeps a sliding window of up to
 16 messages in flight, refilling it after each echo. Every echo is checked for its
 connection ID, message ID and payload; all connections remain open until the
 burst finishes. RTT samples and setup are excluded from throughput. KCP has no
 connection handshake, so setup durations are not comparable.
 
-KCP settings are message mode, send window 64, receive window 128, UDP MTU 1,400
-bytes, `ikcp_nodelay(kcp, 1, 10, 2, 1)`, and immediate flush after each write/input.
+KCP settings are message mode, send window 64, receive window 64 for the
+single-connection adapter or 128 for the concurrent adapter, UDP MTU 1,400 bytes, `ikcp_nodelay(kcp, 1, 10, 2, 1)`, and immediate flush after each write/input.
 No FEC or encryption is enabled. `rust-raknet` uses its normal `ReliableOrdered`,
 64-datagram flight window and retry timings. For the README's single-connection
 comparison, pass `--raknet-mtu 1428` to both Rust processes: nominal `rust-raknet` MTU
@@ -56,3 +56,15 @@ Repeat and alternate protocol order. Record namespace-local UDP receive/send
 buffer errors as well as netem counters, including at 0% injected loss. Random
 loss affects data and ACKs in both directions, and traces differ between runs.
 Never apply `tc`, interface or network configuration to the host.
+
+## Sustained-load RTT
+
+Append `--loaded-rtt` to the concurrent **client** command to timestamp every
+measured message before sending and record its verified echo RTT throughout the
+burst. The 20 warmup samples are discarded, so the reported sample count must
+be `CONNECTIONS * MESSAGES`. The server and 16-message application window are
+unchanged. Run this separately from throughput; storing timestamps and sorting
+all burst samples changes CPU and memory use.
+
+Peak process RSS for both endpoints is collected with the parent benchmark's
+`measure_process.c` supervisor after process exit, without polling.

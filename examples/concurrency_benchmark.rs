@@ -32,6 +32,10 @@ async fn main() -> Result<(), BenchError> {
         }
         return tcp_server(args[2].parse()?).await;
     }
+    let loaded_rtt = args.last().is_some_and(|arg| arg == "--loaded-rtt");
+    if loaded_rtt {
+        args.pop();
+    }
     let tcp = args.get(1).is_some_and(|arg| arg == "--tcp");
     if tcp {
         args.remove(1);
@@ -45,7 +49,7 @@ async fn main() -> Result<(), BenchError> {
     }
     if args.len() != 5 {
         return Err(
-            "usage: concurrency_benchmark [--tcp | --batch] ADDRESS CONNECTIONS MESSAGES PAYLOAD"
+            "usage: concurrency_benchmark [--tcp | --batch] ADDRESS CONNECTIONS MESSAGES PAYLOAD [--loaded-rtt]"
                 .into(),
         );
     }
@@ -56,15 +60,23 @@ async fn main() -> Result<(), BenchError> {
     if count == 0 || messages == 0 || size < 17 {
         return Err("invalid counts".into());
     }
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        run(address, count, messages, size, tcp, batch),
-    )
-    .await??;
+    if loaded_rtt {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            run::<true>(address, count, messages, size, tcp, batch),
+        )
+        .await??;
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            run::<false>(address, count, messages, size, tcp, batch),
+        )
+        .await??;
+    }
     Ok(())
 }
 
-async fn run(
+async fn run<const LOADED: bool>(
     address: std::net::SocketAddr,
     count: usize,
     messages: usize,
@@ -105,7 +117,12 @@ async fn run(
         let barrier = barrier.clone();
         let start_gate = start_gate.clone();
         exchanges.spawn(async move {
-            let mut rtts = Vec::with_capacity(20);
+            let mut rtts = Vec::with_capacity(if LOADED { messages.max(20) } else { 20 });
+            let mut stamps = if LOADED {
+                vec![Instant::now(); 16]
+            } else {
+                Vec::new()
+            };
             let mut expected = payload(id, 0, size);
             let mut outgoing = expected.clone();
             let mut actual = Vec::with_capacity(size);
@@ -118,6 +135,9 @@ async fn run(
                     return Err::<_, BenchError>("echo payload or order mismatch".into());
                 }
                 rtts.push(start.elapsed().as_nanos());
+            }
+            if LOADED {
+                rtts.clear();
             }
             barrier.wait().await;
             start_gate.wait().await;
@@ -133,6 +153,9 @@ async fn run(
                 let mut pending = Vec::with_capacity(16);
                 for message in 0..messages.min(16) {
                     pending.push(rust_raknet::Bytes::from(payload(id, message + 20, size)));
+                    if LOADED {
+                        stamps[message % 16] = Instant::now();
+                    }
                     sent += 1;
                 }
                 connection
@@ -145,11 +168,17 @@ async fn run(
                         if actual.as_ref() != expected {
                             return Err::<_, BenchError>("echo payload or order mismatch".into());
                         }
+                        if LOADED {
+                            rtts.push(stamps[received % 16].elapsed().as_nanos());
+                        }
                         received += 1;
                     }
                     pending.clear();
                     for _ in 0..incoming.len().min(messages - sent) {
                         pending.push(rust_raknet::Bytes::from(payload(id, sent + 20, size)));
+                        if LOADED {
+                            stamps[sent % 16] = Instant::now();
+                        }
                         sent += 1;
                     }
                     if !pending.is_empty() {
@@ -162,6 +191,9 @@ async fn run(
                 let mut sent = 0;
                 while sent < messages.min(16) {
                     outgoing[9..17].copy_from_slice(&((sent + 20) as u64).to_le_bytes());
+                    if LOADED {
+                        stamps[sent % 16] = Instant::now();
+                    }
                     socket.send(&outgoing).await?;
                     sent += 1;
                 }
@@ -171,8 +203,14 @@ async fn run(
                     if actual != expected {
                         return Err::<_, BenchError>("echo payload or order mismatch".into());
                     }
+                    if LOADED {
+                        rtts.push(stamps[received % 16].elapsed().as_nanos());
+                    }
                     if sent < messages {
                         outgoing[9..17].copy_from_slice(&((sent + 20) as u64).to_le_bytes());
+                        if LOADED {
+                            stamps[sent % 16] = Instant::now();
+                        }
                         socket.send(&outgoing).await?;
                         sent += 1;
                     }
@@ -186,13 +224,14 @@ async fn run(
     let started = Instant::now();
     start_gate.wait().await;
     let mut retained = Vec::with_capacity(count);
-    let mut rtts = Vec::with_capacity(count * 20);
+    let mut rtts = Vec::with_capacity(count * if LOADED { messages } else { 20 });
     while let Some(result) = exchanges.join_next().await {
         let (socket, values) = result??;
         retained.push(socket);
         rtts.extend(values);
     }
     let elapsed = started.elapsed().as_secs_f64();
+    println!("RTT samples: {}", rtts.len());
     rtts.sort_unstable();
     println!(
         "Connections: {count}\nMessages per connection: {messages}\nPayload size: {size} bytes\nSetup: {setup_seconds:.6} s\nElapsed: {elapsed:.6} s"
@@ -206,6 +245,14 @@ async fn run(
         percentile(&rtts, 50),
         percentile(&rtts, 95),
         percentile(&rtts, 99)
+    );
+    println!(
+        "RTT measurement: {}",
+        if LOADED {
+            "per-message throughout measured burst"
+        } else {
+            "sequential warmup before burst"
+        }
     );
     println!("Verified ordered echoes: {}", count * (messages + 20));
     drop(retained);

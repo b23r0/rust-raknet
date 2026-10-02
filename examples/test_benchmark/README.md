@@ -73,7 +73,7 @@ Build `examples/concurrency.rs`, the echo benchmark server, and `examples/proxy`
 /path/to/task/target/release/examples/concurrency 127.0.0.1:19201 1024 30
 ```
 
-The driver establishes connections with eight concurrent handshakes, keeps all connections open before sending, and validates 64 / 800 / 4,096-byte echoes with unique connection/message IDs. The receiving application pauses for 30 ms to exercise buffering. This is a transport workload, not 1,024 authenticated Minecraft players. The timeout is 120 seconds. Apply any loss rules only to the disposable namespace and inspect its UDP receive-buffer errors as well as netem counters.
+The driver establishes connections with eight concurrent handshakes, keeps all connections open before sending, and validates 64 / 800 / 4,096-byte echoes with unique connection/message IDs. The receiving application pauses for 30 ms to exercise buffering. This uses a transport echo workload. The timeout is 120 seconds. Apply any loss rules only to the disposable namespace and inspect its UDP receive-buffer errors as well as netem counters.
 
 ## Concurrent throughput benchmark
 
@@ -107,9 +107,10 @@ connection, refilling a slot after each echo rather than waiting for a whole bat
 Every ordered echo is checked against its connection and message ID.
 Connections remain open until all bursts finish. The timeout is 180 seconds.
 
-Setup time and RTT samples are excluded from the throughput timer. RTT percentiles
-describe the preceding sequential phase, not delivery latency under the measured
-burst. These synthetic sessions do not represent authenticated Minecraft players.
+Without `--loaded-rtt`, setup and RTT sampling precede the throughput timer.
+Those RTT percentiles describe the sequential phase. Append `--loaded-rtt` to
+the client command for per-message RTT throughout the measured burst; run that
+instrumented workload separately from throughput. These measurements use transport echo workloads.
 Inspect namespace-local UDP error counters; no injected loss does not guarantee
 that socket buffers never overflow.
 
@@ -128,8 +129,7 @@ For sustained concurrent throughput, the README uses 1,048,576 messages per run:
 64 / 256 / 1,024 / 2,048 connections send 16,384 / 4,096 / 1,024 / 512 messages
 each. Use 800-byte payloads, a sliding window of 16 per connection, four workers
 and four server receive sockets. Repeat each 0% / 1% loss case three times and
-report median and range. These are synthetic transport connections, not Minecraft
-players. Include TCP using the concurrent `--tcp-server` / `--tcp` modes above;
+report median and range. These use reliable ordered echo workloads. Include TCP using the concurrent `--tcp-server` / `--tcp` modes above;
 do not substitute the single-connection driver. Rotate TCP / `rust-raknet` / C KCP run
 order across repetitions. Apply `tc netem` only after confirming a private network
 namespace, with loopback MTU 1,500 B, GSO/GRO limited to one packet and queue limit
@@ -171,9 +171,9 @@ continue to work after fallback, but send individual datagrams.
 
 Sequential latency samples in batch mode call `send_batch` with one message;
 there is no second message to merge. They measure sparse request/echo latency,
-not sustained-load latency. The concurrent throughput driver's RTT output also
-comes from the 20 pre-burst samples, not from the burst. Keep any separately
-instrumented delivery-latency measurements in their own table.
+not sustained-load latency. Without `--loaded-rtt`, the concurrent driver's RTT output comes from the
+20 pre-burst samples. All three concurrent client drivers support `--loaded-rtt`
+for separate sustained-load latency measurements.
 
 Rotate TCP / ordinary `rust-raknet` / batch `rust-raknet` / C KCP / quic-go order
 across repetitions. Use the same application windows, message counts, network
@@ -194,8 +194,76 @@ Concurrent bursts verify 1,048,576 unique ordered echoes at 64 / 256 / 1,024 /
 The concurrent batch client constructs owned payloads for pending messages,
 while the ordinary client reuses a borrowed template. Results include these
 buffer choices and receive draining; they are not a pure packet-packing ablation.
-The separately instrumented loaded-latency driver timestamps messages before
-sending, verifies 262,144 burst echoes, and measures RTT as each echo is consumed
+The Rust, C KCP and quic-go concurrent clients support `--loaded-rtt`. They
+timestamp messages before sending, verifies 262,144 burst echoes, and measures RTT as each echo is consumed
 throughout the burst. It retains the same 16-message window and CPU placement,
 and runs three repetitions at 64 / 1,024 connections for 64 B / 800 B and
 0% / 1% loss. Its instrumentation cost is excluded from throughput tables.
+
+## Full five-column comparison and peak memory
+
+The [quic-go drivers](quic/README.md) are included here alongside the C KCP
+adapters. `run_comparison.py` runs TCP, ordinary rust-raknet, batch rust-raknet,
+C KCP and quic-go with rotating order and fresh servers for every repetition.
+It fails if the network namespace is not private, Cargo/HOME are not task-local,
+message/sample counts are incorrect, or a process memory measurement is missing.
+No host-network fallback is provided.
+
+Prepare this layout **inside an isolated task directory**, with all toolchains
+and caches belonging to that task:
+
+```text
+TASK_ROOT/
+  work/                  repository copy
+  home/ cargo/           task HOME and CARGO_HOME
+  go/                    task-local Go toolchain
+  target/release/         Rust binaries and examples
+  bin/                   C and Go benchmark executables
+  logs/ results/         raw output (keep outside the repository)
+  kcp/                   pinned upstream ikcp.c, ikcp.h and license
+```
+
+Build the Rust benchmark and examples in that task:
+
+```sh
+cargo build --offline --release --manifest-path examples/test_benchmark/Cargo.toml
+cargo build --offline --release --example concurrency_benchmark --example sharded_echo
+cc -O2 -std=c11 examples/test_benchmark/measure_process.c -o "$TASK_ROOT/bin/measure-process"
+```
+
+Build the C adapters as `bin/kcp-single` and `bin/kcp-concurrent`, and the Go
+drivers as `bin/quic-single` and `bin/quic-concurrent`. Set `CARGO_TARGET_DIR`
+to `TASK_ROOT/target`. The runner expects prebuilt binaries and never downloads
+dependencies or builds during measurement. Linux `ip`, `tc`, `taskset`, `nice`,
+`lscpu`, Python 3 and at least eight available CPUs are required.
+
+Run from `TASK_ROOT/work` inside a private user/network namespace with UID mapping
+of one user to namespace UID 0 and namespace-local `CAP_NET_ADMIN`. Pass the
+parent's network namespace identifier as `TASK_HOST_NETNS` **before entering**
+the namespace. Set task-local `HOME`, `CARGO_HOME`, Rust/Go caches and temporary
+directories. Mount the host read-only and hide its home directory. Then run:
+
+```sh
+python3 examples/test_benchmark/run_comparison.py single > "$TASK_ROOT/results/single.jsonl"
+python3 examples/test_benchmark/run_comparison.py concurrent > "$TASK_ROOT/results/concurrent.jsonl"
+LOADED_RTT=1 python3 examples/test_benchmark/run_comparison.py concurrent > "$TASK_ROOT/results/loaded.jsonl"
+python3 examples/test_benchmark/run_comparison.py latency > "$TASK_ROOT/results/latency.jsonl"
+```
+
+The runner uses 3 repetitions for every single/concurrent/loaded profile, and 5
+for sparse latency. `SMOKE=1` selects short one-repetition checks instead. Raw
+JSONL contains each process's `wait4` resource usage, verified echo/sample counts,
+network counters and output. A failure is retained and stops the suite.
+
+The small C supervisor forwards termination signals to the server and records
+Linux `ru_maxrss` after the child exits. There is no RSS polling during the run.
+Divide KiB by 1,024 to report MiB. Values are **whole-process peak resident
+memory**, covering startup, warmup, burst, reporting and teardown, including
+runtime/allocator/application buffers. They exclude kernel socket buffers and
+are neither heap-only measurements nor memory per connection. TCP transport
+state lives in the kernel, so RSS is not total system memory used for networking. Client/server
+peaks can occur at different times; report them separately. The loaded clients
+also retain all RTT samples, so their memory belongs in a separate table.
+
+For each profile, report the median of three process peaks alongside throughput.
+RSS ranges and throughput ranges are useful when comparing close results.

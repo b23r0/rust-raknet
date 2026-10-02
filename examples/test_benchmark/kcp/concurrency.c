@@ -5,7 +5,7 @@
 #include <sys/epoll.h>
 #include <pthread.h>
 
-typedef struct { Session io; size_t id, sent, received; uint64_t sent_at; } Peer;
+typedef struct { Session io; size_t id, sent, received; uint64_t sent_at; uint64_t *sent_times; } Peer;
 static _Thread_local size_t total_peers, payload_size, messages_per_peer;
 static _Thread_local int is_server, measured;
 static _Thread_local Peer *peers;
@@ -16,6 +16,7 @@ static _Thread_local size_t id_offset, worker_index;
 static pthread_barrier_t ready_barrier, finish_barrier;
 typedef struct { uint64_t start, end; double setup; double *latency; size_t samples; } WorkerResult;
 static WorkerResult results[4];
+static int loaded_rtt;
 
 static void make_payload(size_t id, size_t message) {
     for (size_t i=0;i<8;++i) {
@@ -24,6 +25,7 @@ static void make_payload(size_t id, size_t message) {
     }
 }
 static void setup_peer(Peer *p, int fd, uint32_t conv) {
+    if (loaded_rtt && !is_server) { p->sent_times=calloc(16,sizeof(uint64_t)); if(!p->sent_times)exit(1); }
     p->io.fd=fd; p->io.kcp=ikcp_create(conv,&p->io); if (!p->io.kcp) exit(1);
     p->io.kcp->output=output;
     ikcp_setmtu(p->io.kcp,1400);ikcp_wndsize(p->io.kcp,64,128);ikcp_nodelay(p->io.kcp,1,10,2,1);
@@ -34,7 +36,7 @@ static void fill(Peer *p) {
     size_t pipeline=measured?16:1;
     while (p->sent<maximum && p->sent-p->received<pipeline && ikcp_waitsnd(p->io.kcp)<64) {
         make_payload(p->id,p->sent+(measured?20:0));
-        p->sent_at=nanos();send_record(&p->io,message_buffer,payload_size);++p->sent;
+        p->sent_at=nanos();if(measured && loaded_rtt)p->sent_times[p->sent%16]=p->sent_at;send_record(&p->io,message_buffer,payload_size);++p->sent;
     }
 }
 static void drain(Peer *p) {
@@ -44,14 +46,14 @@ static void drain(Peer *p) {
         if(is_server) {send_record(&p->io,receive_buffer,(size_t)n);continue;}
         make_payload(p->id,p->received+(measured?20:0));
         if(n!=(int)payload_size || memcmp(receive_buffer,message_buffer,payload_size)) {fprintf(stderr,"Ordered echo mismatch\n");exit(1);}
-        if(!measured)rtts[rtt_count++]=(nanos()-p->sent_at)/1000.0;
+        if(!measured || loaded_rtt)rtts[rtt_count++]=(nanos()-(measured?p->sent_times[p->received%16]:p->sent_at))/1000.0;
         ++p->received;
         if(p->received==(measured?messages_per_peer:20))++completed;
     }
     if(!is_server)fill(p);
 }
 static int worker_main(int argc,char **argv) {
-    if(argc!=6){fprintf(stderr,"usage: kcp_concurrency server|client ADDRESS CONNECTIONS MESSAGES PAYLOAD\n");return 2;}
+    if(argc!=6 && argc!=7){fprintf(stderr,"usage: kcp_concurrency server|client ADDRESS CONNECTIONS MESSAGES PAYLOAD\n");return 2;}
     is_server=!strcmp(argv[1],"server");
     if(!is_server && strcmp(argv[1],"client"))return 2;
     total_peers=number(argv[3]);messages_per_peer=number(argv[4]);payload_size=number(argv[5]);
@@ -59,7 +61,7 @@ static int worker_main(int argc,char **argv) {
     char ip[64];const char *colon=strrchr(argv[2],':');if(!colon || (size_t)(colon-argv[2])>=sizeof(ip))return 2;
     memcpy(ip,argv[2],(size_t)(colon-argv[2]));ip[colon-argv[2]]=0;
     struct sockaddr_in address={.sin_family=AF_INET,.sin_port=htons((uint16_t)number(colon+1))};if(inet_pton(AF_INET,ip,&address.sin_addr)!=1)return 2;
-    peers=calloc(total_peers,sizeof(*peers));message_buffer=malloc(payload_size);receive_buffer=malloc(payload_size);rtts=malloc(total_peers*20*sizeof(double));
+    peers=calloc(total_peers,sizeof(*peers));message_buffer=malloc(payload_size);receive_buffer=malloc(payload_size);rtts=malloc(total_peers*((loaded_rtt && !is_server && messages_per_peer>20)?messages_per_peer:20)*sizeof(double));
     if(!peers || !message_buffer || !receive_buffer || !rtts)return 1;
     memset(message_buffer, 0xfe, payload_size);
     int epoll=epoll_create1(EPOLL_CLOEXEC);if(epoll<0)fail("epoll_create");
@@ -110,7 +112,7 @@ static int worker_main(int argc,char **argv) {
         if(!is_server && completed==total_peers) {
             if(!measured){
                 pthread_barrier_wait(&ready_barrier);
-                measured=1;completed=0;burst_start=nanos();
+                measured=1;completed=0;if(loaded_rtt)rtt_count=0;burst_start=nanos();
                 for(size_t i=0;i<total_peers;++i){peers[i].sent=peers[i].received=0;fill(&peers[i]);}
             } else {
                 results[worker_index]=(WorkerResult){.start=burst_start,.end=nanos(),.setup=setup_seconds,.latency=rtts,.samples=rtt_count};
@@ -119,7 +121,7 @@ static int worker_main(int argc,char **argv) {
             }
         }
     }
-    for(size_t i=0;i<established;++i){ikcp_release(peers[i].io.kcp);if(!is_server)close(peers[i].io.fd);}
+    for(size_t i=0;i<established;++i){ikcp_release(peers[i].io.kcp);free(peers[i].sent_times);if(!is_server)close(peers[i].io.fd);}
     free(ports);free(peers);free(message_buffer);free(receive_buffer);close(epoll);return 0;
 }
 
@@ -130,17 +132,19 @@ static void *run_worker(void *arg) {
     return NULL;
 }
 int main(int argc,char **argv) {
-    if(argc!=6)return 2;
+    if(argc!=6 && argc!=7)return 2;
+    loaded_rtt=argc==7;
+    if(loaded_rtt && strcmp(argv[6],"--loaded-rtt"))return 2;
     size_t n=number(argv[3]),messages=number(argv[4]),size=number(argv[5]);
     if(n<4 || n>8192 || !messages || size<17 || size>65536)return 2;
     int server=!strcmp(argv[1],"server");
     pthread_barrier_init(&ready_barrier,NULL,4);pthread_barrier_init(&finish_barrier,NULL,4);
-    pthread_t workers[4];WorkerArgs args[4];char counts[4][32];char *options[4][6];
+    pthread_t workers[4];WorkerArgs args[4];char counts[4][32];char *options[4][7];
     size_t offset=0;
     for(size_t i=0;i<4;++i) {
         size_t count=server?n:n/4+(i<n%4);
         snprintf(counts[i],sizeof(counts[i]),"%zu",count);
-        for (int j = 0; j < 6; ++j) {
+        for (int j = 0; j < argc; ++j) {
             options[i][j] = argv[j];
         }
         options[i][3] = counts[i];
@@ -156,5 +160,7 @@ int main(int argc,char **argv) {
     printf("Connections: %zu\nMessages per connection: %zu\nPayload size: %zu bytes\nSetup: %.6f s\nElapsed: %.6f s\n",n,messages,size,setup,elapsed);
     printf("Echo payload throughput (per direction): %.2f MiB/s\n",(double)n*messages*size/1048576.0/elapsed);
     printf("RTT p50: %.1f us\nRTT p95: %.1f us\nRTT p99: %.1f us\n",percentile(values,sample_count,50),percentile(values,sample_count,95),percentile(values,sample_count,99));
+    printf("RTT samples: %zu\n",sample_count);
+    printf("RTT measurement: %s\n",loaded_rtt?"per-message throughout measured burst":"sequential warmup before burst");
     printf("Verified ordered echoes: %zu\n",n*(messages+20));free(values);return 0;
 }
