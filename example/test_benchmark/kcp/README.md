@@ -22,10 +22,14 @@ Rust echo benchmark. Pass `--protocol kcp`.
 The concurrent adapter takes `server|client ADDRESS CONNECTIONS MESSAGES PAYLOAD`.
 It uses four pthread workers, four server receive sockets with `SO_REUSEPORT`,
 and one distinct client UDP socket per connection. The Rust comparison uses four
-Tokio workers and four server receive sockets too. Pin the server and client to
+Tokio workers and four server receive sockets too. The concurrent TCP control
+uses `concurrency_benchmark --tcp-server ADDRESS` and
+`concurrency_benchmark --tcp ADDRESS CONNECTIONS MESSAGES PAYLOAD`, with four
+Tokio workers, four Linux `SO_REUSEPORT` listeners, `TCP_NODELAY` and reused
+length-prefixed record buffers. Pin the server and client to
 separate sets of four CPUs; affinity does not reserve these CPUs exclusively.
 
-Both concurrent drivers measure 20 sequential RTTs per connection, then start
+All three concurrent drivers measure 20 sequential RTTs per connection, then start
 throughput at a common barrier. Each connection keeps a sliding window of up to
 16 messages in flight, refilling it after each echo. Every echo is checked for its
 connection ID, message ID and payload; all connections remain open until the

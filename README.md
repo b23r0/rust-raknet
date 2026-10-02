@@ -243,35 +243,49 @@ four workers pinned to the same per-process CPU; C uses one event loop.
 
 ### Concurrent throughput
 
-Both protocols use four workers, four server receive sockets with `SO_REUSEPORT`,
+Measured on **2026-10-02** in a fresh comparison including TCP, RakNet and C KCP.
+All three protocols use four workers, four server sockets with `SO_REUSEPORT`,
 separate sets of four client/server CPUs, 800 B messages, and a sliding application
-window of 16 messages per connection. Each run verifies **1,048,576 ordered
-echoes** in its measured burst. Cells show the median and range of three runs,
-alternating protocol order. Setup and 20 preceding sequential RTTs per connection
-are excluded from throughput; every connection stays open until all bursts finish.
-These are synthetic transport sessions, not authenticated Minecraft players.
+window of 16 messages per connection. TCP uses `TCP_NODELAY`, four-byte
+length-prefixed records, complete-record writes and reused record buffers. TCP
+listeners distribute connection acceptance; each accepted stream has its own
+socket. UDP sockets distribute incoming datagrams.
+
+Each run verifies **1,048,576 ordered echoes** in its measured burst. Cells show
+the median and range of three runs, rotating TCP / RakNet / C KCP order. Setup and
+20 preceding sequential RTTs per connection are excluded from throughput; every
+connection stays open until all bursts finish. These are synthetic transport
+sessions, not authenticated Minecraft players.
 
 This table uses the ordinary nominal RakNet MTU of **1,400 B** and KCP UDP MTU of
 **1,400 B**. Their IPv4 budgets differ by 28 B, but each 800 B message fits one
-datagram in both protocols. Do not extrapolate this table to fragmented traffic.
+datagram in both protocols. TCP may combine several records in a segment; packet
+loss percentages do not imply the same number of lost application messages.
+Do not extrapolate this table to fragmented traffic.
 
-| Connections | Injected loss | RakNet throughput (median, range) | C KCP throughput (median, range) | RakNet / C KCP median |
-| ---: | ---: | ---: | ---: | ---: |
-| 64 connections | 0% | 564.93 MiB/s (562.26–581.05 MiB/s) | 396.07 MiB/s (387.85–399.02 MiB/s) | 142.6% |
-| 256 connections | 0% | 542.09 MiB/s (537.90–583.91 MiB/s) | 421.80 MiB/s (411.35–430.18 MiB/s) | 128.5% |
-| 1,024 connections | 0% | 507.85 MiB/s (499.11–537.84 MiB/s) | 422.22 MiB/s (412.15–422.54 MiB/s) | 120.3% |
-| 2,048 connections | 0% | 429.29 MiB/s (425.11–436.89 MiB/s) | 333.14 MiB/s (321.37–353.58 MiB/s) | 128.9% |
-| 64 connections | 1% | 553.59 MiB/s (512.34–555.89 MiB/s) | 409.35 MiB/s (317.50–409.88 MiB/s) | 135.2% |
-| 256 connections | 1% | 491.77 MiB/s (479.02–530.03 MiB/s) | 408.24 MiB/s (369.61–427.65 MiB/s) | 120.5% |
-| 1,024 connections | 1% | 408.88 MiB/s (375.69–443.87 MiB/s) | 343.07 MiB/s (301.44–408.38 MiB/s) | 119.2% |
-| 2,048 connections | 1% | 368.64 MiB/s (359.22–385.89 MiB/s) | 323.07 MiB/s (322.47–335.00 MiB/s) | 114.1% |
+| Connections | Injected loss | TCP throughput (median, range) | RakNet throughput (median, range) | C KCP throughput (median, range) | RakNet / C KCP median |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 connections | 0% | 713.62 MiB/s (700.90–714.45 MiB/s) | 543.43 MiB/s (536.83–572.64 MiB/s) | 362.82 MiB/s (361.95–377.37 MiB/s) | 149.8% |
+| 256 connections | 0% | 598.00 MiB/s (581.63–620.48 MiB/s) | 556.90 MiB/s (526.97–562.89 MiB/s) | 415.87 MiB/s (329.26–424.58 MiB/s) | 133.9% |
+| 1,024 connections | 0% | 591.75 MiB/s (562.39–594.38 MiB/s) | 497.71 MiB/s (466.01–523.55 MiB/s) | 380.07 MiB/s (378.09–415.04 MiB/s) | 131.0% |
+| 2,048 connections | 0% | 586.90 MiB/s (579.19–593.85 MiB/s) | 440.64 MiB/s (429.02–452.66 MiB/s) | 361.93 MiB/s (310.89–376.98 MiB/s) | 121.7% |
+| 64 connections | 1% | 390.96 MiB/s (388.32–424.96 MiB/s) | 520.11 MiB/s (491.58–583.39 MiB/s) | 377.12 MiB/s (358.86–406.28 MiB/s) | 137.9% |
+| 256 connections | 1% | 519.37 MiB/s (440.41–549.12 MiB/s) | 511.55 MiB/s (462.67–513.39 MiB/s) | 384.26 MiB/s (372.07–406.03 MiB/s) | 133.1% |
+| 1,024 connections | 1% | 424.33 MiB/s (416.75–478.65 MiB/s) | 455.86 MiB/s (424.03–468.14 MiB/s) | 390.54 MiB/s (372.44–415.87 MiB/s) | 116.7% |
+| 2,048 connections | 1% | 423.78 MiB/s (114.57–465.28 MiB/s) | 389.14 MiB/s (360.29–395.85 MiB/s) | 335.09 MiB/s (323.29–356.21 MiB/s) | 116.1% |
 
-Both protocols completed **24/24** concurrent runs. RakNet's throughput median
-exceeds C KCP in all eight measured groups. Random loss affects data and ACKs in
-both directions, and traces differ between runs. Even with no injected loss,
-namespace-local UDP receive buffers can overflow under saturation. Scheduling,
-queueing and retransmissions affect the ranges and tail latency; inspect UDP
-error counters as well as netem counters when reproducing results.
+All three protocols completed **24/24** concurrent runs (**72/72** total). TCP's
+median leads all four clean groups. At 1% loss, RakNet leads TCP at 64 and 1,024
+connections; TCP leads at 256 and 2,048. RakNet exceeds C KCP in all eight groups.
+At 2,048 connections with loss, TCP spans 114.57–465.28 MiB/s, so its median alone
+hides substantial variation. Small median differences and overlapping ranges do
+not establish a stable ordering across other networks or CPU budgets.
+
+Random loss affects data and ACKs in both directions, and traces differ between
+runs. Even with no injected loss, namespace-local UDP receive buffers can overflow
+under saturation. Scheduling, queueing and retransmissions affect the ranges and
+tail latency; inspect UDP error counters as well as netem counters when reproducing
+results. The sequential RTT phase does not measure latency during the burst.
 
 See the [benchmark instructions](example/test_benchmark/README.md) and
 [C adapters](example/test_benchmark/kcp/README.md) for isolated reproduction.

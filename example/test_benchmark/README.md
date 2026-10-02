@@ -77,12 +77,27 @@ The driver establishes connections with eight concurrent handshakes, keeps all c
 
 ## Concurrent throughput benchmark
 
-Build `examples/concurrency_benchmark.rs` in the task copy. Inside the same private
-network namespace as the echo server, run:
+Build `examples/concurrency_benchmark.rs` and `examples/sharded_echo.rs` in the
+task copy. Run all processes inside the same private network namespace. Run one
+protocol at a time, starting its server before its client. For 1,024 connections:
 
 ```sh
-/path/to/task/target/release/examples/concurrency_benchmark 127.0.0.1:19132 1024 128 800
+# RakNet server and client, in separate terminals inside the namespace.
+TOKIO_WORKER_THREADS=4 taskset -c 0-3 /path/to/task/target/release/examples/sharded_echo 127.0.0.1:19132 4
+taskset -c 4-7 /path/to/task/target/release/examples/concurrency_benchmark 127.0.0.1:19132 1024 1024 800
+
+# TCP server and client, in separate terminals inside the namespace.
+taskset -c 0-3 /path/to/task/target/release/examples/concurrency_benchmark --tcp-server 127.0.0.1:19132
+taskset -c 4-7 /path/to/task/target/release/examples/concurrency_benchmark --tcp 127.0.0.1:19132 1024 1024 800
 ```
+
+Choose CPU lists from the CPUs actually available to the sandbox. Both Rust
+clients use the same warmup, barriers, echo validation and sliding window. TCP
+uses four Linux `SO_REUSEPORT` listeners, four Tokio workers, `TCP_NODELAY`,
+four-byte little-endian length prefixes, and one complete-record write. Both TCP
+ends reuse record buffers. TCP may combine several records in a segment; loss
+percentages apply to network packets, not application messages. The TCP server
+mode requires Linux.
 
 The arguments are address, connection count, messages per connection, and payload
 size in bytes (at least 17). The driver uses eight concurrent handshakes and four
@@ -114,4 +129,9 @@ For sustained concurrent throughput, the README uses 1,048,576 messages per run:
 each. Use 800-byte payloads, a sliding window of 16 per connection, four workers
 and four server receive sockets. Repeat each 0% / 1% loss case three times and
 report median and range. These are synthetic transport connections, not Minecraft
-players. Keep TCP's single-connection comparison separate from this workload.
+players. Include TCP using the concurrent `--tcp-server` / `--tcp` modes above;
+do not substitute the single-connection driver. Rotate TCP / RakNet / C KCP run
+order across repetitions. Apply `tc netem` only after confirming a private network
+namespace, with loopback MTU 1,500 B, GSO/GRO limited to one packet and queue limit
+100,000 packets. Record qdisc and UDP error counters for every run. Affinity does
+not reserve CPUs exclusively; report each protocol's median and full range.
