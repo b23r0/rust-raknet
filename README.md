@@ -191,7 +191,8 @@ your workload before changing the default of one socket.
 ## Benchmarks
 
 These measurements compare **this `rust-raknet` implementation** with a TCP echo
-program and the official [C KCP implementation](https://github.com/skywind3000/kcp).
+program, the official [C KCP implementation](https://github.com/skywind3000/kcp),
+and [quic-go](https://github.com/quic-go/quic-go).
 They are not measurements of the RakNet protocol in general.
 
 Measured **October 1–2, 2026** on an Intel Core i7-9700F (8 logical CPUs), Linux
@@ -323,6 +324,109 @@ data and ACKs in both directions, and each run has a different trace. UDP buffer
 can also overflow under saturation, even at 0% injected loss. Check UDP error
 counters alongside netem counters when reproducing these results. CPU affinity
 does not reserve the CPUs exclusively.
+
+</details>
+
+### quic-go comparison
+
+A separate run compared `rust-raknet` 0.16.0 (commit `7f80c57`) with
+[quic-go v0.63.0](https://github.com/quic-go/quic-go/tree/v0.63.0), built with
+Go 1.27.1 on October 2, 2026. It used the same i7-9700F and isolated loopback setup
+as above. Results are medians of three alternating runs.
+
+Both implementations use four workers per process and four server receive sockets
+with `SO_REUSEPORT`, with separate sets of four client/server CPUs. Each connection has a sliding window of
+**16 messages**. `rust-raknet` uses `ReliableOrdered`; quic-go uses one bidirectional
+reliable, ordered stream per connection, with four-byte little-endian record
+lengths and reused buffers. QUIC encryption and congestion control remain enabled.
+
+These are implementation comparisons with different features: `rust-raknet`
+does not provide QUIC's encryption, stream flow control or congestion control.
+The single-connection window also differs from the 64-message TCP/C KCP run above,
+so its throughput figures should not be compared directly with that table.
+
+#### Single connection
+
+| Payload / burst count | Injected loss | **rust-raknet** | quic-go |
+| --- | ---: | ---: | ---: |
+| 64 B / 200,000 messages | 0% | 14.23 MiB/s | 9.53 MiB/s |
+| 800 B / 200,000 messages | 0% | 167.13 MiB/s | 82.42 MiB/s |
+| 4,096 B / 50,000 messages | 0% | 256.40 MiB/s | 170.33 MiB/s |
+| 800 B / 20,000 messages | 1% | 89.19 MiB/s | 33.80 MiB/s |
+| 800 B / 20,000 messages | 5% | 13.59 MiB/s | 9.03 MiB/s |
+
+#### Concurrent connections
+
+800 B messages, 1,048,576 measured echoes per run. All connections are established
+before the measured burst and remain open until every connection finishes.
+
+| Connections | Injected loss | **rust-raknet** | quic-go |
+| ---: | ---: | ---: | ---: |
+| 64 connections | 0% | 557.72 MiB/s | 220.49 MiB/s |
+| 256 connections | 0% | 555.54 MiB/s | 184.68 MiB/s |
+| 1,024 connections | 0% | 466.28 MiB/s | 164.48 MiB/s |
+| 2,048 connections | 0% | 373.63 MiB/s | 133.22 MiB/s |
+| 64 connections | 1% | 540.77 MiB/s | 216.83 MiB/s |
+| 256 connections | 1% | 420.98 MiB/s | 147.19 MiB/s |
+| 1,024 connections | 1% | 430.35 MiB/s | 64.55 MiB/s |
+| 2,048 connections | 1% | 357.96 MiB/s | 31.48 MiB/s |
+
+At 2,048 connections without injected loss, median peak client RSS was
+86.36 MiB for `rust-raknet` and 465.82 MiB for quic-go. This covers the
+whole client process, including connection setup and warmup.
+
+#### Added delay
+
+One connection, 800 B messages, 3,000 measured echoes, with 5 ms added in each
+direction (about 10 ms network RTT).
+
+| Injected loss | **rust-raknet** | quic-go |
+| ---: | ---: | ---: |
+| 0% | 1.17 MiB/s | 1.15 MiB/s |
+| 1% | 1.01 MiB/s | 0.94 MiB/s |
+| 5% | 0.68 MiB/s | 0.53 MiB/s |
+
+`rust-raknet` had higher throughput in these loopback runs. With added delay,
+the difference was much smaller. This does not establish an Internet-performance
+ranking; the run has no bandwidth bottleneck or competing traffic.
+
+<details>
+<summary>quic-go comparison ranges and setup</summary>
+
+| Workload | Payload | Injected loss | rust-raknet throughput range | quic-go throughput range |
+| --- | ---: | ---: | ---: | ---: |
+| 1 connection | 64 B | 0% | 14.16–14.53 MiB/s | 7.21–11.35 MiB/s |
+| 1 connection | 800 B | 0% | 165.36–172.17 MiB/s | 64.18–84.11 MiB/s |
+| 1 connection | 4,096 B | 0% | 254.90–256.60 MiB/s | 145.22–172.23 MiB/s |
+| 1 connection | 800 B | 1% | 77.28–136.93 MiB/s | 28.52–55.79 MiB/s |
+| 1 connection | 800 B | 5% | 13.57–26.01 MiB/s | 7.19–12.70 MiB/s |
+| 64 connections | 800 B | 0% | 554.68–586.75 MiB/s | 217.91–220.77 MiB/s |
+| 256 connections | 800 B | 0% | 503.58–577.93 MiB/s | 178.88–186.38 MiB/s |
+| 1,024 connections | 800 B | 0% | 442.85–521.72 MiB/s | 158.35–166.63 MiB/s |
+| 2,048 connections | 800 B | 0% | 353.87–410.25 MiB/s | 129.02–135.82 MiB/s |
+| 64 connections | 800 B | 1% | 513.73–556.50 MiB/s | 212.02–220.87 MiB/s |
+| 256 connections | 800 B | 1% | 392.52–454.76 MiB/s | 138.19–170.24 MiB/s |
+| 1,024 connections | 800 B | 1% | 363.01–445.81 MiB/s | 45.63–81.04 MiB/s |
+| 2,048 connections | 800 B | 1% | 303.46–360.06 MiB/s | 29.59–35.89 MiB/s |
+| 1 connection, 5 ms each way | 800 B | 0% | 1.16–1.17 MiB/s | 1.15–1.16 MiB/s |
+| 1 connection, 5 ms each way | 800 B | 1% | 1.00–1.04 MiB/s | 0.88–1.03 MiB/s |
+| 1 connection, 5 ms each way | 800 B | 5% | 0.63–0.70 MiB/s | 0.48–0.54 MiB/s |
+
+Each connection completes 20 sequential warmup echoes before a shared start
+barrier. Setup and warmup are excluded from throughput. Every echo is checked for
+payload contents, connection ID and message order. All 96 measurement runs passed,
+verifying 54,140,688 echoes including warmups.
+
+The nominal `rust-raknet` MTU is 1,400 B. quic-go uses an initial UDP packet size
+of 1,372 B and disables path MTU discovery, giving both the same 1,400 B IPv4
+packet budget. The loopback MTU is 1,500 B and GSO/GRO are limited to one packet.
+Loss and delay apply to both data and ACKs, only inside the private namespace.
+
+Loss percentages are injected rates. Receive-buffer drops also occurred at high
+connection counts, especially for `rust-raknet`; 0% injected loss is not a claim
+of zero actual loss. Neither implementation had receive-buffer drops in the
+64- or 256-connection runs without injected loss, or in the added-delay runs.
+CPU affinity does not reserve the CPUs exclusively.
 
 </details>
 
