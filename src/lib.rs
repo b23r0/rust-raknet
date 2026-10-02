@@ -19,7 +19,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rust-raknet = "0.15"
+//! rust-raknet = "0.16.0"
 //! ```
 //!
 //! # Reliability modes

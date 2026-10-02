@@ -1,6 +1,6 @@
 # Official C KCP comparison
 
-These Linux benchmark adapters call the upstream C implementation directly. They
+These Linux benchmark adapters call the [upstream C implementation](https://github.com/skywind3000/kcp) directly. They
 are test programs, not a Rust KCP binding or an alternative implementation.
 
 Use upstream `skywind3000/kcp` commit
@@ -38,15 +38,15 @@ connection handshake, so setup durations are not comparable.
 
 KCP settings are message mode, send window 64, receive window 128, UDP MTU 1,400
 bytes, `ikcp_nodelay(kcp, 1, 10, 2, 1)`, and immediate flush after each write/input.
-No FEC or encryption is enabled. RakNet uses its normal `ReliableOrdered`,
+No FEC or encryption is enabled. `rust-raknet` uses its normal `ReliableOrdered`,
 64-datagram flight window and retry timings. For the README's single-connection
-comparison, pass `--raknet-mtu 1428` to both Rust processes: nominal RakNet MTU
+comparison, pass `--raknet-mtu 1428` to both Rust processes: nominal `rust-raknet` MTU
 includes 28 bytes of IPv4/UDP overhead, while KCP's UDP MTU excludes it. Both
 therefore have a 1,428-byte IPv4 packet budget. The application window is 64
 messages for all three single-connection drivers, including TCP. The C adapter
 uses one event loop per process; the Rust drivers use four Tokio workers.
 
-The concurrent comparison uses the ordinary nominal RakNet MTU of 1,400 bytes
+The concurrent comparison uses the ordinary nominal `rust-raknet` MTU of 1,400 bytes
 and KCP UDP MTU of 1,400 bytes. Their physical IPv4 budgets differ by 28 bytes;
 the 800-byte payloads fit in one datagram for both protocols. Do not extrapolate
 these results to fragmented concurrent workloads. An additional equal-MTU

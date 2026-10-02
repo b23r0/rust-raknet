@@ -25,6 +25,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check documented crate version
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: python3 scripts/set-version.py --check
       - name: Select Rust toolchain
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal && rustup default ${{ matrix.rust }}
       - name: Run tests
