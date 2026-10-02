@@ -16,8 +16,7 @@
 
 `rust-raknet` provides reliable message delivery over UDP for Rust applications.
 Built on Tokio, it implements RakNet handshakes, acknowledgements, retransmission,
-ordering and fragmentation. Choose the delivery guarantees your application needs,
-or use it to proxy Minecraft Bedrock traffic over RakNet UDP.
+ordering and fragmentation. Choose the delivery guarantees your application needs.
 
 - Client and listener APIs, with all five RakNet reliability modes.
 - Bounded send queues, backpressure and selective retransmission.
