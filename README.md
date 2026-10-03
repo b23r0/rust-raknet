@@ -15,13 +15,11 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2)](https://discord.gg/ZKtYMvDFN4)
 
-[Features](#features) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [Get started](#get-started) · [Bedrock proxy](#minecraft-bedrock) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
+[Features](#features) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [Get started](#get-started) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
 
 </div>
 
-`rust-raknet` provides reliable message delivery over UDP for Rust applications.
-Built on Tokio, it implements RakNet handshakes, acknowledgements, retransmission,
-ordering and fragmentation. Choose the delivery guarantees your application needs.
+`rust-raknet` is a high-performance asynchronous networking library written in Rust, implementing a Reliable UDP protocol for real-time messaging.
 
 ## Features
 
@@ -29,13 +27,11 @@ ordering and fragmentation. Choose the delivery guarantees your application need
 - **Async client and server.** Tokio-based connect, listen, accept, send and receive APIs, with IPv4 and IPv6 address encoding.
 - **Message boundaries.** Receive complete application messages rather than reconstructing them from a byte stream. Large `ReliableOrdered` messages are fragmented and reassembled automatically.
 - **Loss recovery.** ACK/NACK ranges, selective retries and ACK-gap fast retransmission, with RTT-based retry timers and retransmission backoff.
-- **Explicit batching.** Pack ready small `ReliableOrdered` messages into standard RakNet datagrams with `send_batch` or `send_bytes_batch`. There is no timer to wait for more messages.
 - **Owned buffer forwarding.** `Bytes` send/receive APIs share immutable payload storage with send and retry queues, reducing copies in relays.
 - **Bounded queues and backpressure.** Send accounting, receive reordering and fragment assembly have limits; sustained producers wait for capacity.
 - **Optional send policy.** The `send-policy` feature exposes per-connection flight limits, reliable/unreliable queue budgets and flush budgets. It is opt-in; see the measured [performance trade-offs](#performance-trade-offs).
 - **Server tuning.** Configure the nominal MTU, accept backlog and UDP receive buffer. Optional Linux socket sharding, receive batching and idle maintenance let you tune busy listeners.
 - **Discovery and lifecycle.** Unconnected ping/pong, customizable MOTD, peer RakNet version lookup, flush and close APIs.
-- **Runnable examples.** Echo, discovery, reverse proxy and benchmark programs live in one [`examples/`](examples) directory.
 - **Rust implementation.** Rust 2024, MIT licensed, with Linux, Windows, macOS and BSD support. Platform-specific fast paths have portable fallbacks.
 
 **Requirements:** Rust 1.85+ and Tokio 1.38+.
@@ -285,101 +281,9 @@ before any are queued; cancelling a send may leave a prefix queued for delivery.
 ### Example layout
 
 All examples live under `examples/`. Single-file programs run with
-`cargo run --example NAME`. The `proxy`, `bedrock_ping` and `test_benchmark`
-subdirectories are standalone Cargo projects; run them with
+`cargo run --example NAME`. Subdirectories containing a `Cargo.toml`
+are standalone Cargo projects; run them with
 `cargo run --manifest-path examples/PROJECT/Cargo.toml`.
-
-## Minecraft Bedrock
-
-The crate transports Bedrock packets as bytes. It does not implement Xbox login
-or decode the game protocol. The [proxy example](examples/proxy) forwards RakNet UDP
-game traffic and requires a backend server configured with `transport=raknet`.
-
-### Enabling RakNet in Bedrock 26.52
-
-As of October 2, 2026, the latest stable Bedrock release is
-[26.52](https://feedback.minecraft.net/hc/en-us/articles/49175370527501-Minecraft-Bedrock-Edition-26-52-Hotfix-Changelog).
-The tested setup used a Windows 1.26.52 client and Bedrock Dedicated Server
-1.26.52.3, with game protocol 2193 and RakNet protocol 11. Joining, movement,
-placing and breaking blocks, and the proxy's server-list MOTD all worked through
-`rust-raknet` 1.0.0 over RakNet UDP.
-
-Dedicated servers default to NetherNet starting with
-[26.50](https://feedback.minecraft.net/hc/en-us/articles/48826825649933-Minecraft-Bedrock-Edition-26-50-Changelog-Wilderness-Bound).
-For the tested 26.52 setup, stop the server and edit its `server.properties`:
-
-```properties
-transport=raknet
-server-port=19142
-server-portv6=19143
-enable-lan-visibility=false
-```
-
-Restart the dedicated server after saving. Setting `transport=raknet` selects the
-legacy UDP transport. Disabling LAN visibility avoids the extra default-port
-listeners when using a custom port. Keep the backend and proxy in the same
-isolated test network; the proxy command below forwards to backend port 19142.
-
-Configure a matching Bedrock advertisement on the proxy listener before calling
-`listen()`. In `examples/proxy/src/main.rs`, insert this before
-`listener.listen().await`:
-
-```rust
-listener.set_motd(
-    "Rust RakNet Bedrock proxy",
-    10,
-    "2193",
-    "1.26.52",
-    "Survival",
-    local_address.port(),
-).await?;
-```
-
-Use the backend's protocol, game version and game mode when adapting this setup.
-The listener's default advertisement describes an older Bedrock version. An
-incorrect advertisement can prevent a recent client from joining, even when the
-UDP handshake works.
-
-### RakNet deprecation in Bedrock
-
-Mojang is moving Bedrock networking to NetherNet. The
-[26.60.22/23 Preview changelog](https://feedback.minecraft.net/hc/en-us/articles/48740748263565-Minecraft-Beta-Preview-26-60-22-23)
-marks RakNet deprecated and changes the dedicated-server warning about using
-another transport into an error. Our 26.52 server also printed a NetherNet-only
-error, while the RakNet connection and gameplay tests still succeeded.
-
-The compatibility result above covers the tested 26.52 builds. It does not
-establish support for 26.60 or later, and the cited preview note does not give a
-confirmed final removal date. Check the release notes and retest before upgrading
-a deployment that depends on RakNet. `rust-raknet` implements RakNet UDP;
-NetherNet uses WebRTC and requires a different transport implementation.
-
-### RakNet proxy
-
-```sh
-cargo run --release --manifest-path examples/proxy/Cargo.toml -- \
-  -l 127.0.0.1:19144 -r 127.0.0.1:19142
-```
-
-For a local test, add `127.0.0.1:19144` to the client's server list. On another
-machine, use the proxy's reachable address and frontend port. The client must
-join the proxy endpoint for its game traffic to pass through `rust-raknet`.
-
-The proxy keeps the client's RakNet version when connecting upstream. Both
-forwarding directions run concurrently; upstream handshakes time out after 10 s.
-On Linux, add `--socket-shards 4` to opt into four receive sockets. The default is
-one; several frontend shards can be slower when they feed a single upstream socket.
-Add `--batch-messages` to forward already-ready messages through the explicit
-batch API. This is opt-in and never waits to fill a batch.
-
-### Server discovery
-
-```sh
-cargo run --manifest-path examples/bedrock_ping/Cargo.toml -- play.example.com:19132
-```
-
-This sends an unconnected RakNet ping and prints the server name, game version,
-player counts and MOTD.
 
 ## Configuration
 

@@ -15,11 +15,11 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2)](https://discord.gg/ZKtYMvDFN4)
 
-[功能特性](#功能特性) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [快速开始](#快速开始) · [基岩版反向代理](#minecraft-基岩版) · [性能测试](#性能测试) · [参与贡献](#参与贡献)
+[功能特性](#功能特性) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [快速开始](#快速开始) · [性能测试](#性能测试) · [参与贡献](#参与贡献)
 
 </div>
 
-`rust-raknet` 为 Rust 应用提供基于 UDP 的可靠消息传输。它基于 Tokio，实现了 RakNet 的握手、确认、重传、排序和分片机制。你可以根据业务需要，选择不同的消息交付方式。
+`rust-raknet` 是一个Rust实现的高性能Reliable UDP实时消息传输协议异步网络库。
 
 ## 功能特性
 
@@ -27,13 +27,11 @@
 - **异步客户端和服务端。** 基于 Tokio 的连接、监听、接收连接、收发接口，支持 IPv4 和 IPv6 地址编码。
 - **保留消息边界。** 接收完整应用消息，无需从字节流重建消息。较大的 `ReliableOrdered` 消息会自动分片和重组。
 - **丢包恢复。** 支持 ACK/NACK 区间、选择性重传和 ACK 缺口快速重传，结合 RTT 估计调整重传计时，并对重复重传进行退避。
-- **显式小包合并。** 用 `send_batch` 或 `send_bytes_batch` 将已就绪的小型 `ReliableOrdered` 消息装入标准 RakNet 数据报，无需等待凑包计时器。
 - **拥有所有权的缓冲区转发。** `Bytes` 收发接口与发送、重传队列共享不可变载荷，减少代理转发中的复制。
 - **有界队列和背压。** 发送记账、接收重排和分片重组均有限制；持续发送者会等待可用容量。
 - **可选发送策略。** `send-policy` feature 提供每连接在途限制、可靠/不可靠队列预算和单次发送预算。需要显式启用，实测影响见[策略对性能的影响](#策略对性能的影响)。
 - **服务端调优。** 可配置名义 MTU、accept 队列和 UDP 接收缓冲区；Linux 可选 socket 分片、接收批处理和空闲维护优化。
 - **发现与生命周期。** 支持未连接 ping/pong、自定义 MOTD、查询对端 RakNet 版本，以及 flush 和关闭接口。
-- **可运行示例。** 回显、发现、反向代理和 benchmark 程序统一放在 [`examples/`](examples) 中。
 - **Rust 实现。** 使用 Rust 2024，采用 MIT 协议，支持 Linux、Windows、macOS 和 BSD。平台专用快速路径提供可移植的回退实现。
 
 **环境要求：** Rust 1.85+、Tokio 1.38+。
@@ -211,67 +209,8 @@ async fn forward(
 ### 示例目录
 
 所有示例都放在 `examples/` 下。单文件程序使用 `cargo run --example NAME` 运行。
-`proxy`、`bedrock_ping` 和 `test_benchmark` 子目录是独立的 Cargo 项目，
+包含 `Cargo.toml` 的子目录是独立的 Cargo 项目，
 使用 `cargo run --manifest-path examples/PROJECT/Cargo.toml` 运行。
-
-## Minecraft 基岩版
-
-本库按字节传输基岩版数据包，不实现 Xbox 登录，也不解析游戏协议。[反向代理示例](examples/proxy) 用于转发 RakNet UDP 游戏流量，后端服务器需要配置 `transport=raknet`。
-
-### 在基岩版 26.52 中启用 RakNet
-
-截至 2026 年 10 月 2 日，基岩版最新稳定版本为 [26.52](https://feedback.minecraft.net/hc/en-us/articles/49175370527501-Minecraft-Bedrock-Edition-26-52-Hotfix-Changelog)。已测试的环境使用 Windows 1.26.52 客户端和基岩版专用服务端 1.26.52.3，游戏协议版本为 2193，RakNet 协议版本为 11。通过 `rust-raknet` 1.0.0 的 RakNet UDP 代理，加入世界、走动、放置和破坏方块，以及服务器列表 MOTD 均正常。
-
-从 [26.50](https://feedback.minecraft.net/hc/en-us/articles/48826825649933-Minecraft-Bedrock-Edition-26-50-Changelog-Wilderness-Bound) 开始，专用服务端默认使用 NetherNet。在已测试的 26.52 环境中，先停止服务端，再修改 `server.properties`：
-
-```properties
-transport=raknet
-server-port=19142
-server-portv6=19143
-enable-lan-visibility=false
-```
-
-保存后重启专用服务端。`transport=raknet` 选择传统 UDP 传输；关闭局域网可见性，可以避免使用自定义端口时额外监听默认端口。测试时应将后端和代理放在同一个隔离网络中，下方代理命令会转发到后端的 19142 端口。
-
-调用 `listen()` 前，需要为代理监听器配置与后端匹配的基岩版服务器公告。在 `examples/proxy/src/main.rs` 的 `listener.listen().await` 前加入：
-
-```rust
-listener.set_motd(
-    "Rust RakNet Bedrock proxy",
-    10,
-    "2193",
-    "1.26.52",
-    "Survival",
-    local_address.port(),
-).await?;
-```
-
-实际部署时，请使用后端对应的协议版本、游戏版本和游戏模式。监听器默认公告使用较旧的基岩版本信息；即使 UDP 握手成功，错误的公告也可能导致新客户端无法加入。
-
-### 基岩版对 RakNet 的弃用
-
-Mojang 正在把基岩版网络传输迁移到 NetherNet。[26.60.22/23 预览版更新说明](https://feedback.minecraft.net/hc/en-us/articles/48740748263565-Minecraft-Beta-Preview-26-60-22-23) 将 RakNet 标记为弃用，并把专用服务端使用其他传输方式时的警告升级为错误。我们的 26.52 服务端也打印了仅支持 NetherNet 的错误信息，但 RakNet 连接和游戏操作测试仍然成功。
-
-上述兼容性结果仅覆盖实际测试过的 26.52 构建，不能据此认定支持 26.60 或后续版本。引用的预览版说明也没有给出最终移除日期。依赖 RakNet 的部署在升级前应查看更新说明并重新测试。`rust-raknet` 实现的是 RakNet UDP；NetherNet 使用 WebRTC，需要不同的传输实现。
-
-### RakNet 反向代理
-
-```sh
-cargo run --release --manifest-path examples/proxy/Cargo.toml -- \
-  -l 127.0.0.1:19144 -r 127.0.0.1:19142
-```
-
-本地测试时，在客户端服务器列表中添加 `127.0.0.1:19144`。从其他机器连接时，使用可访问的代理地址和前端端口。客户端必须连接代理入口，游戏流量才会经过 `rust-raknet`。
-
-代理连接上游时会沿用客户端的 RakNet 版本。两个方向并发转发，上游握手超时为 10 s。Linux 下可添加 `--socket-shards 4`，启用四个接收 socket；默认使用一个。当多个前端分片共享单个上游 socket 时，也可能比单分片更慢。添加 `--batch-messages` 可使用显式批量接口转发已准备好的消息，该选项默认关闭，不会等待凑包。
-
-### 服务器发现
-
-```sh
-cargo run --manifest-path examples/bedrock_ping/Cargo.toml -- play.example.com:19132
-```
-
-该示例发送未连接的 RakNet ping，并打印服务器名称、游戏版本、玩家数量和 MOTD。
 
 ## 配置
 
