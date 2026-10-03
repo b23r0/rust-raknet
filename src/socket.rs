@@ -2284,6 +2284,16 @@ mod maintenance_tests {
     use super::*;
     use crate::RaknetListener;
 
+    async fn wait_for_idle(socket: &RaknetSocket) {
+        timeout(std::time::Duration::from_secs(2), async {
+            while !socket.maintenance.idle.load(Ordering::Acquire) {
+                sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("quiet connection did not enter idle maintenance");
+    }
+
     #[tokio::test]
     async fn a_lost_control_reply_wakes_an_idle_connection_for_retries() {
         timeout(std::time::Duration::from_secs(3), async {
@@ -2302,7 +2312,7 @@ mod maintenance_tests {
             .await;
             assert!(!socket.maintenance.enabled.load(Ordering::Acquire));
             socket.set_idle_maintenance(true);
-            sleep(std::time::Duration::from_millis(600)).await;
+            wait_for_idle(&socket).await;
             assert!(socket.maintenance.idle.load(Ordering::Acquire));
             socket.set_loss_rate(10);
             let request = ConnectionRequest {
@@ -2360,7 +2370,7 @@ mod maintenance_tests {
             client.set_idle_maintenance(true);
             client.flush().await.unwrap();
             server.flush().await.unwrap();
-            sleep(std::time::Duration::from_millis(600)).await;
+            wait_for_idle(&client).await;
             assert!(client.maintenance.idle.load(Ordering::Acquire));
             client.set_loss_rate(10);
             let payload = bytes::Bytes::from(vec![0xfe; 4096]);
