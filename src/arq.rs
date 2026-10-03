@@ -822,6 +822,17 @@ impl RecvQ {
     }
 }
 
+#[cfg(feature = "send-policy")]
+struct SendScheduler {
+    capacity_notifier: std::sync::Weak<tokio::sync::Notify>,
+    options: crate::SendOptions,
+    unreliable: VecDeque<FrameSetPacket>,
+    unreliable_bytes: usize,
+    use_legacy: bool,
+    persistent: bool,
+    next_lane: usize,
+}
+
 pub struct SendQ {
     mtu: u16,
     ack_sequence_number: u32,
@@ -843,6 +854,8 @@ pub struct SendQ {
     coalesce: bool,
     coalescing_allowed: bool,
     grouped_acks: bool,
+    #[cfg(feature = "send-policy")]
+    scheduler: Option<Box<SendScheduler>>,
 }
 
 impl SendQ {
@@ -862,6 +875,8 @@ impl SendQ {
             ack_sequence_number: sequence::MASK,
             sequence_number: 0,
             packets: VecDeque::new(),
+            #[cfg(feature = "send-policy")]
+            scheduler: None,
             queued_unreliable: 0,
             buffered_bytes: 0,
             sent_packet: vec![],
@@ -906,7 +921,14 @@ impl SendQ {
     pub fn has_capacity(&self, reliability: Reliability, len: usize) -> Result<bool> {
         let required = self.required_bytes(reliability, len)?;
         // Admit a single large message while applying backpressure to bursts.
-        Ok(self.buffered_bytes.saturating_add(required) <= Self::SEND_HIGH_WATER.max(required))
+        #[cfg(feature = "send-policy")]
+        {
+            self.has_reserved_capacity(reliability, required)
+        }
+        #[cfg(not(feature = "send-policy"))]
+        {
+            Ok(self.buffered_bytes.saturating_add(required) <= Self::SEND_HIGH_WATER.max(required))
+        }
     }
 
     pub(crate) fn enable_coalescing(&mut self) {
@@ -928,7 +950,14 @@ impl SendQ {
                 .filter(|&bytes| bytes <= Self::MAX_BUFFERED_BYTES)
                 .ok_or(RaknetError::PacketSizeExceedMTU)
         })?;
-        Ok(self.buffered_bytes.saturating_add(required) <= Self::SEND_HIGH_WATER.max(required))
+        #[cfg(feature = "send-policy")]
+        {
+            self.has_batch_required_capacity(reliability, required)
+        }
+        #[cfg(not(feature = "send-policy"))]
+        {
+            Ok(self.buffered_bytes.saturating_add(required) <= Self::SEND_HIGH_WATER.max(required))
+        }
     }
 
     pub fn insert(&mut self, reliability: Reliability, buf: &[u8]) -> Result<()> {
@@ -984,6 +1013,9 @@ impl SendQ {
                         |data| FramePayload::Bytes(data.clone()),
                     ),
                 );
+                #[cfg(feature = "send-policy")]
+                self.push_unreliable(frame);
+                #[cfg(not(feature = "send-policy"))]
                 self.packets.push_back(frame);
             }
             Reliability::UnreliableSequenced => {
@@ -1008,6 +1040,9 @@ impl SendQ {
                 frame.order_channel = order_channel;
                 frame.ordered_frame_index = ordered_frame_index;
                 frame.sequenced_frame_index = sequenced_frame_index;
+                #[cfg(feature = "send-policy")]
+                self.push_unreliable(frame);
+                #[cfg(not(feature = "send-policy"))]
                 self.packets.push_back(frame);
             }
             Reliability::Reliable => {
@@ -1110,6 +1145,7 @@ impl SendQ {
             }
         };
         self.buffered_bytes += reserved;
+        #[cfg(not(feature = "send-policy"))]
         if matches!(
             reliability,
             Reliability::Unreliable | Reliability::UnreliableSequenced
@@ -1363,6 +1399,14 @@ impl SendQ {
     }
 
     pub fn flush(&mut self, tick: i64, peer_addr: &SocketAddr) -> OutgoingFrames {
+        #[cfg(feature = "send-policy")]
+        if self
+            .scheduler
+            .as_ref()
+            .is_some_and(|s| !s.use_legacy || !s.unreliable.is_empty())
+        {
+            return self.flush_scheduled(tick);
+        }
         self.tick(tick);
 
         // Reserve queued batches once; a full reliable flight window reserves
@@ -1472,7 +1516,19 @@ impl SendQ {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.packets.is_empty() && self.sent_packet.is_empty()
+        #[cfg(feature = "send-policy")]
+        {
+            self.packets.is_empty()
+                && self.sent_packet.is_empty()
+                && self
+                    .scheduler
+                    .as_ref()
+                    .is_none_or(|s| s.unreliable.is_empty())
+        }
+        #[cfg(not(feature = "send-policy"))]
+        {
+            self.packets.is_empty() && self.sent_packet.is_empty()
+        }
     }
 
     pub fn get_reliable_queue_size(&self) -> usize {
@@ -1494,6 +1550,343 @@ fn malformed_datagrams_are_rejected() {
 fn send_queue_rejects_an_invalid_mtu() {
     let mut send_queue = SendQ::new(59);
     assert!(send_queue.insert(Reliability::Reliable, &[0xfe]).is_err());
+}
+
+#[cfg(feature = "send-policy")]
+impl SendQ {
+    /// Validate batch sizes and determine packing eligibility in one pass.
+    /// Oversized messages still validate their fragmentation budget, but cannot
+    /// be packed. Avoid rescanning an entire batch that will use ordinary sends.
+    pub(crate) fn batch_can_coalesce(
+        &self,
+        reliability: Reliability,
+        mut lengths: impl Iterator<Item = usize>,
+    ) -> Result<bool> {
+        let allowed = self.allows_coalescing() && reliability == Reliability::ReliableOrdered;
+        if reliability == Reliability::ReliableOrdered && !allowed {
+            self.has_batch_capacity(reliability, lengths)?;
+            return Ok(false);
+        }
+        let max_payload = usize::from(self.mtu).saturating_sub(60);
+        let datagram_budget = usize::from(self.mtu).saturating_sub(28);
+        let mut previous = None;
+        let mut packable = false;
+        let required = lengths.try_fold(0usize, |total, length| {
+            if reliability != Reliability::ReliableOrdered && length > max_payload {
+                return Err(RaknetError::PacketSizeExceedMTU);
+            }
+            if allowed && !packable && length <= max_payload {
+                packable = previous.is_some_and(|last: usize| {
+                    last <= max_payload
+                        && last.saturating_add(length).saturating_add(24) <= datagram_budget
+                });
+            }
+            previous = Some(length);
+            total
+                .checked_add(self.required_bytes(reliability, length)?)
+                .filter(|&bytes| bytes <= Self::MAX_BUFFERED_BYTES)
+                .ok_or(RaknetError::PacketSizeExceedMTU)
+        })?;
+        self.has_batch_required_capacity(reliability, required)?;
+        Ok(allowed && packable)
+    }
+
+    fn has_batch_required_capacity(
+        &self,
+        reliability: Reliability,
+        required: usize,
+    ) -> Result<bool> {
+        // Unreliable batches use the streaming path. Their aggregate may
+        // exceed the pending reserve even though every member fits and drains.
+        if matches!(
+            reliability,
+            Reliability::Unreliable | Reliability::UnreliableSequenced
+        ) && self
+            .send_options()
+            .is_some_and(|options| required > options.unreliable_queue_bytes)
+        {
+            return Ok(false);
+        }
+        self.has_reserved_capacity(reliability, required)
+    }
+
+    fn ensure_scheduler(&mut self) -> &mut SendScheduler {
+        if self.scheduler.is_none() {
+            let mut unreliable = VecDeque::with_capacity(self.queued_unreliable);
+            let mut unreliable_bytes = 0;
+            for _ in 0..self.packets.len() {
+                let frame = self.packets.pop_front().unwrap();
+                if frame.is_reliable().unwrap_or(false) {
+                    self.packets.push_back(frame);
+                } else {
+                    unreliable_bytes += frame.data.len() + Self::FRAME_BUDGET;
+                    unreliable.push_back(frame);
+                }
+            }
+            self.queued_unreliable = 0;
+            self.scheduler = Some(Box::new(SendScheduler {
+                capacity_notifier: std::sync::Weak::new(),
+                options: crate::SendOptions::default(),
+                unreliable,
+                unreliable_bytes,
+                use_legacy: usize::from(self.mtu) * Self::MAX_IN_FLIGHT_PACKETS
+                    <= crate::SendOptions::default().flush_bytes,
+                persistent: true,
+                next_lane: 2,
+            }));
+        }
+        self.scheduler.as_mut().unwrap()
+    }
+
+    fn push_unreliable(&mut self, mut frame: FrameSetPacket) {
+        if let Some(scheduler) = &mut self.scheduler {
+            scheduler.unreliable_bytes += frame.data.len() + Self::FRAME_BUDGET;
+            scheduler.unreliable.push_back(frame);
+        } else {
+            frame.sequence_number = self.sequence_number;
+            self.sequence_number = sequence::next(self.sequence_number);
+            self.queued_unreliable += 1;
+            self.packets.push_back(frame);
+        }
+    }
+
+    /// Bind queue-release notifications only after a policy is enabled.
+    pub(crate) fn register_capacity_notifier(&mut self, notifier: &Arc<tokio::sync::Notify>) {
+        let Some(scheduler) = &mut self.scheduler else {
+            return;
+        };
+        if !std::ptr::eq(scheduler.capacity_notifier.as_ptr(), Arc::as_ptr(notifier)) {
+            scheduler.capacity_notifier = Arc::downgrade(notifier);
+        }
+    }
+
+    pub(crate) fn set_send_options(&mut self, options: crate::SendOptions) -> Result<()> {
+        let mtu = usize::from(self.mtu);
+        if options.in_flight_bytes < mtu
+            || options.flush_bytes < mtu
+            || options.unreliable_queue_bytes < mtu
+        {
+            return Err(RaknetError::PacketSizeExceedMTU);
+        }
+        let scheduler = self.ensure_scheduler();
+        scheduler.options = options;
+        scheduler.persistent = true;
+        let defaults = crate::SendOptions::default();
+        scheduler.use_legacy = options.in_flight_frames == defaults.in_flight_frames
+            && options.in_flight_bytes == defaults.in_flight_bytes
+            && options.flush_bytes == defaults.flush_bytes
+            && mtu * Self::MAX_IN_FLIGHT_PACKETS <= options.flush_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn send_options(&self) -> Option<crate::SendOptions> {
+        self.scheduler.as_ref().map(|s| s.options)
+    }
+
+    #[inline]
+    fn has_reserved_capacity(&self, reliability: Reliability, required: usize) -> Result<bool> {
+        if self.scheduler.is_none() {
+            return Ok(
+                self.buffered_bytes.saturating_add(required) <= Self::SEND_HIGH_WATER.max(required)
+            );
+        }
+        let unreliable = matches!(
+            reliability,
+            Reliability::Unreliable | Reliability::UnreliableSequenced
+        );
+        if !unreliable {
+            // The common reliable-only case needs neither the full options
+            // copy nor reservation arithmetic. Valid budgets leave room for
+            // the unreliable reserve, including when no unreliable data waits.
+            let budget = match &self.scheduler {
+                None if required <= Self::MAX_BUFFERED_BYTES - 64 * 1024 => {
+                    Some(Self::SEND_HIGH_WATER.max(required))
+                }
+                None => None,
+                Some(s)
+                    if s.unreliable_bytes == 0 && required <= s.options.reliable_queue_bytes =>
+                {
+                    Some(s.options.reliable_queue_bytes)
+                }
+                Some(_) => None,
+            };
+            if let Some(budget) = budget {
+                return Ok(self.buffered_bytes.saturating_add(required) <= budget);
+            }
+        }
+        let options = self.send_options().unwrap();
+        let used_unreliable = self.scheduler.as_ref().map_or(0, |s| s.unreliable_bytes);
+        let (used, limit) = if unreliable {
+            if required > options.unreliable_queue_bytes {
+                return Err(RaknetError::PacketSizeExceedMTU);
+            }
+            (used_unreliable, options.unreliable_queue_bytes)
+        } else {
+            let hard_limit = Self::MAX_BUFFERED_BYTES - options.unreliable_queue_bytes;
+            if required > hard_limit {
+                return Err(RaknetError::PacketSizeExceedMTU);
+            }
+            (
+                self.buffered_bytes - used_unreliable,
+                options.reliable_queue_bytes.max(required).min(hard_limit),
+            )
+        };
+        Ok(used.saturating_add(required) <= limit
+            && self.buffered_bytes.saturating_add(required) <= Self::MAX_BUFFERED_BYTES)
+    }
+
+    fn flush_scheduled(&mut self, tick: i64) -> OutgoingFrames {
+        self.tick(tick);
+        if self.flight_order_dirty {
+            self.sent_packet
+                .sort_unstable_by_key(|packet| packet.0.sequence_number);
+            self.flight_order_dirty = false;
+        }
+        // Taking the sidecar keeps the frame queues and connection indexes under
+        // one mutable owner. Unconfigured sockets never allocate this state.
+        let mut scheduler = self.scheduler.take().unwrap();
+        let options = scheduler.options;
+        // Compute only in configured scheduling. ACK handling remains the
+        // original path with no per-frame policy or byte-ledger checks.
+        let mut flight_bytes: usize = self.sent_packet.iter().map(|p| p.0._size().unwrap()).sum();
+        let capacity = self.packets.len().min(
+            options
+                .in_flight_frames
+                .saturating_sub(self.sent_packet.len()),
+        ) + scheduler.unreliable.len();
+        let mut output = OutgoingFrames::with_capacity(capacity.min(256));
+        let quantum = usize::from(self.mtu) * 4;
+        let mut bytes = 0;
+        let mut unreliable_drained = false;
+        let mut retry_cursor = 0;
+        let mut group_sequence = None;
+        let mut group_bytes = 0;
+        let mut group_frames = 0;
+        let datagram_budget = usize::from(self.mtu).saturating_sub(28);
+        'rounds: loop {
+            let mut progressed = false;
+            let start = scheduler.next_lane;
+            for offset in 0..3 {
+                let lane = (start + offset) % 3;
+                let mut lane_bytes = 0;
+                while lane_bytes < quantum {
+                    let charge = match lane {
+                        0 => scheduler
+                            .unreliable
+                            .front()
+                            .map(|frame| frame._size().unwrap()),
+                        1 => {
+                            if !self.retries_pending {
+                                break;
+                            }
+                            while retry_cursor < self.sent_packet.len()
+                                && self.sent_packet[retry_cursor].1
+                            {
+                                retry_cursor += 1;
+                            }
+                            self.sent_packet
+                                .get(retry_cursor)
+                                .map(|item| item.0._size().unwrap())
+                        }
+                        _ => self.packets.front().and_then(|frame| {
+                            let size = frame._size().unwrap();
+                            (self.sent_packet.len() < options.in_flight_frames
+                                && flight_bytes + size <= options.in_flight_bytes)
+                                .then_some(size)
+                        }),
+                    };
+                    let Some(charge) = charge else {
+                        break;
+                    };
+                    // Skip a class that cannot fit the remaining burst; smaller
+                    // realtime messages in another class can still make progress.
+                    if bytes + charge > options.flush_bytes {
+                        break;
+                    }
+                    match lane {
+                        0 => {
+                            let mut packet = scheduler.unreliable.pop_front().unwrap();
+                            packet.sequence_number = self.sequence_number;
+                            self.sequence_number = sequence::next(self.sequence_number);
+                            let reserved = packet.data.len() + Self::FRAME_BUDGET;
+                            self.buffered_bytes -= reserved;
+                            scheduler.unreliable_bytes -= reserved;
+                            unreliable_drained = true;
+                            output.push(packet);
+                            group_sequence = None;
+                        }
+                        1 => {
+                            let item = &mut self.sent_packet[retry_cursor];
+                            output.push(item.0.clone());
+                            item.1 = true;
+                            item.2 = tick;
+                            item.3 = item.3.saturating_add(1);
+                            self.next_retry = self
+                                .next_retry
+                                .min(tick.saturating_add(Self::retry_timeout(self.rto, item.3)));
+                            retry_cursor += 1;
+                            group_sequence = None;
+                        }
+                        _ => {
+                            let mut packet = self.packets.pop_front().unwrap();
+                            let packable = self.coalesce
+                                && matches!(packet.reliability(), Ok(Reliability::ReliableOrdered))
+                                && !packet.is_fragment();
+                            let frame_bytes = charge - 4;
+                            if packable
+                                && group_sequence.is_some()
+                                && group_frames < Self::MAX_COALESCED_FRAMES
+                                && group_bytes + frame_bytes <= datagram_budget
+                            {
+                                packet.sequence_number = group_sequence.unwrap();
+                                group_bytes += frame_bytes;
+                                group_frames += 1;
+                                self.grouped_acks = true;
+                                output.coalesced = true;
+                            } else {
+                                packet.sequence_number = self.sequence_number;
+                                self.sequence_number = sequence::next(self.sequence_number);
+                                group_sequence = packable.then_some(packet.sequence_number);
+                                group_bytes = charge;
+                                group_frames = 1;
+                            }
+                            output.push(packet.clone());
+                            if self
+                                .sent_packet
+                                .last()
+                                .is_some_and(|p| p.0.sequence_number > packet.sequence_number)
+                            {
+                                self.flight_order_dirty = true;
+                            }
+                            self.sent_packet.push((packet, true, tick, 0, Vec::new()));
+                            flight_bytes += charge;
+                            self.next_retry = self.next_retry.min(tick.saturating_add(self.rto));
+                        }
+                    }
+                    progressed = true;
+                    bytes += charge;
+                    lane_bytes += charge;
+                    scheduler.next_lane = (lane + 1) % 3;
+                    if bytes == options.flush_bytes {
+                        break 'rounds;
+                    }
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        self.retries_pending = self.sent_packet.iter().any(|item| !item.1);
+        if unreliable_drained {
+            if let Some(capacity) = scheduler.capacity_notifier.upgrade() {
+                capacity.notify_waiters();
+            }
+        }
+        if scheduler.persistent || !scheduler.use_legacy || !scheduler.unreliable.is_empty() {
+            self.scheduler = Some(scheduler);
+        }
+        output
+    }
 }
 
 #[tokio::test]

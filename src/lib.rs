@@ -37,6 +37,8 @@ pub mod error;
 mod fragment;
 mod log;
 mod packet;
+#[cfg(feature = "send-policy")]
+mod send_options;
 mod sequence;
 mod server;
 mod socket;
@@ -45,6 +47,8 @@ mod utils;
 
 pub use crate::arq::Reliability;
 pub use crate::log::enable_raknet_log;
+#[cfg(feature = "send-policy")]
+pub use crate::send_options::{SendOptions, SendOptionsError};
 pub use crate::server::*;
 pub use crate::socket::*;
 pub use bytes::Bytes;
@@ -664,3 +668,120 @@ async fn chore2(){
 
 }
 */
+
+#[cfg(feature = "send-policy")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_send_options_preserve_reliable_order_and_deliver_unreliable_data() {
+    use std::sync::Arc;
+    let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    listener.listen().await;
+    let address = listener.local_addr().unwrap();
+    let options = SendOptions::default()
+        .with_in_flight_limits(128, 8192)
+        .unwrap()
+        .with_queue_budgets(4096, 2048)
+        .unwrap()
+        .with_flush_budget(2048)
+        .unwrap();
+    let client = Arc::new(RaknetSocket::connect(&address).await.unwrap());
+    assert_eq!(client.send_options().await, None);
+    client.set_send_options(options).await.unwrap();
+    assert_eq!(client.send_options().await, Some(options));
+    let server = listener.accept().await.unwrap();
+    let reliable = client.clone();
+    let send_reliable = tokio::spawn(async move {
+        for index in 0..100u8 {
+            let mut data = [0xfe; 128];
+            data[1] = 0;
+            data[2] = index;
+            reliable
+                .send(&data, Reliability::ReliableOrdered)
+                .await
+                .unwrap();
+        }
+        reliable.flush().await.unwrap();
+    });
+    let unreliable = client.clone();
+    let send_unreliable = tokio::spawn(async move {
+        for index in 0..100u8 {
+            let mut data = [0xfe; 64];
+            data[1] = 1;
+            data[2] = index;
+            unreliable
+                .send(&data, Reliability::Unreliable)
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut ordered = 0u8;
+        let mut unordered = 0usize;
+        for _ in 0..200 {
+            let data = server.recv().await.unwrap();
+            if data[1] == 0 {
+                assert_eq!(data[2], ordered);
+                ordered += 1;
+            } else {
+                unordered += 1;
+            }
+        }
+        assert_eq!(ordered, 100);
+        assert_eq!(unordered, 100);
+        send_reliable.await.unwrap();
+        send_unreliable.await.unwrap();
+    })
+    .await
+    .unwrap();
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+    listener.close().await.unwrap();
+}
+
+#[cfg(feature = "send-policy")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreliable_batch_streams_beyond_the_queue_reserve() {
+    let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    listener.listen().await;
+    let client = RaknetSocket::connect(&listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    client
+        .set_send_options(
+            SendOptions::default()
+                .with_queue_budgets(4096, 2048)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let server = listener.accept().await.unwrap();
+    let messages = (0..100u8)
+        .map(|i| {
+            let mut d = vec![0xfe; 64];
+            d[1] = i;
+            d
+        })
+        .collect::<Vec<_>>();
+    let borrowed = messages.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        client
+            .send_batch(&borrowed, Reliability::Unreliable)
+            .await
+            .unwrap();
+        let mut received = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let data = server.recv().await.unwrap();
+            assert_eq!(data.len(), 64);
+            assert!(received.insert(data[1]));
+        }
+    })
+    .await
+    .unwrap();
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+    listener.close().await.unwrap();
+}

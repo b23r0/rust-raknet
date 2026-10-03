@@ -1546,6 +1546,31 @@ impl RaknetSocket {
             return Err(RaknetError::PacketHeaderError);
         }
         // Validate every member before reserving memory or assigning indexes.
+        #[cfg(feature = "send-policy")]
+        let can_coalesce = {
+            let queue = self.sendq.read().await;
+            if queue.send_options().is_some() {
+                queue.batch_can_coalesce(reliability, lengths())?
+            } else {
+                queue.has_batch_capacity(reliability, lengths())?;
+                let mtu = usize::from(queue.mtu());
+                for length in lengths() {
+                    if reliability != Reliability::ReliableOrdered
+                        && length > mtu.saturating_sub(60)
+                    {
+                        return Err(RaknetError::PacketSizeExceedMTU);
+                    }
+                }
+                queue.allows_coalescing()
+                    && reliability == Reliability::ReliableOrdered
+                    && lengths().zip(lengths().skip(1)).any(|(a, b)| {
+                        a <= mtu.saturating_sub(60)
+                            && b <= mtu.saturating_sub(60)
+                            && a.saturating_add(b).saturating_add(24) <= mtu.saturating_sub(28)
+                    })
+            }
+        };
+        #[cfg(not(feature = "send-policy"))]
         let can_coalesce = {
             let queue = self.sendq.read().await;
             queue.has_batch_capacity(reliability, lengths())?;
@@ -2324,5 +2349,31 @@ mod maintenance_tests {
         })
         .await
         .expect("idle maintenance or owned send stalled");
+    }
+}
+
+#[cfg(feature = "send-policy")]
+impl RaknetSocket {
+    /// Configure this connection's reliable flight window and queue budgets.
+    /// Existing messages remain queued; lowering limits does not discard data.
+    /// Apply before starting bulk traffic to establish the unreliable reserve.
+    pub async fn set_send_options(&self, options: crate::SendOptions) -> Result<()> {
+        if self.close_notifier.is_closed() {
+            return Err(RaknetError::ConnectionClosed);
+        }
+        {
+            let mut queue = self.sendq.write().await;
+            queue.set_send_options(options)?;
+            queue.register_capacity_notifier(&self.send_capacity);
+        }
+        self.send_capacity.notify_waiters();
+        self.maintenance.idle.store(false, Ordering::Release);
+        self.maintenance.wakeup.notify_one();
+        Ok(())
+    }
+
+    /// Return configured limits, or `None` for the original queue policy.
+    pub async fn send_options(&self) -> Option<crate::SendOptions> {
+        self.sendq.read().await.send_options()
     }
 }
