@@ -226,6 +226,31 @@ impl DatagramInput {
     }
 }
 
+#[cfg(test)]
+async fn wait_for_read_ahead(input: &mut DatagramInput) {
+    let DatagramInput::Direct(direct) = input else {
+        panic!("read-ahead readiness requires direct datagram input");
+    };
+    let socket = direct.socket.clone();
+    timeout(std::time::Duration::from_secs(2), async {
+        // A completed UDP send does not imply that Tokio has observed readable
+        // readiness. Poll the nonblocking prefetch, then await the real event.
+        while input.should_flush_ack() {
+            let DatagramInput::Direct(direct) = input else {
+                unreachable!();
+            };
+            assert!(
+                direct.error.is_none(),
+                "read-ahead failed: {:?}",
+                direct.error
+            );
+            socket.readable().await.unwrap();
+        }
+    })
+    .await
+    .expect("peer datagram did not become available for read-ahead");
+}
+
 enum ControlAction {
     Continue,
     HandshakeComplete,
@@ -1963,6 +1988,23 @@ mod direct_input_tests {
     use super::*;
 
     #[tokio::test]
+    async fn read_ahead_waits_for_readiness_without_delaying_empty_acks() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let address = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut input = DatagramInput::direct(socket, peer.local_addr().unwrap());
+        // Clear cached readiness with an empty read before sending the packet.
+        assert!(input.should_flush_ack());
+        peer.send_to(&[0xfe, 42], address).await.unwrap();
+        wait_for_read_ahead(&mut input).await;
+        assert!(!input.should_flush_ack());
+        assert!(input.packet().is_empty());
+        assert!(input.recv().await.unwrap());
+        assert_eq!(input.packet(), &[0xfe, 42]);
+        assert!(input.should_flush_ack());
+    }
+
+    #[tokio::test]
     async fn direct_input_filters_foreign_peers_and_keeps_read_ahead_until_consumed() {
         timeout(std::time::Duration::from_secs(2), async {
             let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -1975,6 +2017,7 @@ mod direct_input_tests {
             peer.send_to(&[0xfe, 2], address).await.unwrap();
             assert!(input.recv().await.unwrap());
             assert_eq!(input.packet(), &[0xfe, 1]);
+            wait_for_read_ahead(&mut input).await;
             assert!(!input.should_flush_ack());
             assert!(!input.should_flush_ack());
             assert_eq!(input.packet(), &[0xfe, 1]);
@@ -2056,6 +2099,7 @@ mod tuning_tests {
             assert!(input.recv().await.unwrap());
             assert_eq!(input.packet(), &[0xfe, 1]);
             peer.send_to(&[0xfe, 2], address).await.unwrap();
+            wait_for_read_ahead(&mut input).await;
             assert!(!input.should_flush_ack());
             let close = Arc::new(tokio::sync::Semaphore::new(0));
             input.enable_fragment_worker(close.clone());
