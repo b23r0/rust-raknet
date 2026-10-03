@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.png" alt="rust-raknet otter logo" width="180">
+
 # rust-raknet
 
 **English** | [简体中文](README.zh-CN.md)
@@ -9,10 +11,11 @@
 [![Build](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml/badge.svg)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml)
 [![Crates.io](https://img.shields.io/crates/v/rust-raknet)](https://crates.io/crates/rust-raknet)
 [![Documentation](https://img.shields.io/docsrs/rust-raknet/latest)](https://docs.rs/rust-raknet/latest/rust_raknet/)
+[![Wiki](https://img.shields.io/badge/Wiki-EN%20%2F%20中文-007C83?logo=github)](https://github.com/b23r0/rust-raknet/wiki)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2)](https://discord.gg/ZKtYMvDFN4)
 
-[Get started](#get-started) · [Bedrock proxy](#minecraft-bedrock) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
+[Features](#features) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [Get started](#get-started) · [Bedrock proxy](#minecraft-bedrock) · [Benchmarks](#benchmarks) · [Contributing](#contributing)
 
 </div>
 
@@ -20,19 +23,43 @@
 Built on Tokio, it implements RakNet handshakes, acknowledgements, retransmission,
 ordering and fragmentation. Choose the delivery guarantees your application needs.
 
-- Client and listener APIs, with all five RakNet reliability modes.
-- Bounded send queues, backpressure and selective retransmission.
-- Configurable MTU, accept backlog and UDP receive buffers.
-- Optional Linux receive socket sharding for busy servers.
-- Pure Rust, MIT licensed. Linux, Windows, macOS and BSD.
+## Features
+
+- **Five delivery modes.** Send best-effort updates, discard stale state, deliver reliable events, or keep messages ordered on independent channels.
+- **Async client and server.** Tokio-based connect, listen, accept, send and receive APIs, with IPv4 and IPv6 address encoding.
+- **Message boundaries.** Receive complete application messages rather than reconstructing them from a byte stream. Large `ReliableOrdered` messages are fragmented and reassembled automatically.
+- **Loss recovery.** ACK/NACK ranges, selective retries and ACK-gap fast retransmission, with RTT-based retry timers and retransmission backoff.
+- **Explicit batching.** Pack ready small `ReliableOrdered` messages into standard RakNet datagrams with `send_batch` or `send_bytes_batch`. There is no timer to wait for more messages.
+- **Owned buffer forwarding.** `Bytes` send/receive APIs share immutable payload storage with send and retry queues, reducing copies in relays.
+- **Bounded queues and backpressure.** Send accounting, receive reordering and fragment assembly have limits; sustained producers wait for capacity.
+- **Optional send policy.** The `send-policy` feature exposes per-connection flight limits, reliable/unreliable queue budgets and flush budgets. It is opt-in; see the measured [performance trade-offs](#performance-trade-offs).
+- **Server tuning.** Configure the nominal MTU, accept backlog and UDP receive buffer. Optional Linux socket sharding, receive batching and idle maintenance let you tune busy listeners.
+- **Discovery and lifecycle.** Unconnected ping/pong, customizable MOTD, peer RakNet version lookup, flush and close APIs.
+- **Runnable examples.** Echo, discovery, reverse proxy and benchmark programs live in one [`examples/`](examples) directory.
+- **Rust implementation.** Rust 2024, MIT licensed, with Linux, Windows, macOS and BSD support. Platform-specific fast paths have portable fallbacks.
 
 **Requirements:** Rust 1.85+ and Tokio 1.38+.
+
+## Documentation
+
+The **[Wiki](https://github.com/b23r0/rust-raknet/wiki)** covers setup, delivery modes,
+configuration, protocol details and reproducible benchmarks. English is the default;
+each guide links to its Chinese translation.
+
+[Quick start](https://github.com/b23r0/rust-raknet/wiki/Quick-Start-EN) ·
+[RakNet protocol reference](https://github.com/b23r0/rust-raknet/wiki/Protocol-Reference-EN) ·
+[Send policy](https://github.com/b23r0/rust-raknet/wiki/Send-Policy-EN) ·
+[Benchmark methodology](https://github.com/b23r0/rust-raknet/wiki/Benchmark-Methodology-EN)
+
+See [docs.rs](https://docs.rs/rust-raknet/latest/rust_raknet/) for the published API.
+The protocol reference documents this implementation's limits as well as its wire format;
+it does not imply support for every feature of the original RakNet SDK.
 
 ## Get started
 
 ```toml
 [dependencies]
-rust-raknet = "1.0.0"
+rust-raknet = "1.1.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -115,14 +142,10 @@ same queue limits, fragmentation and delivery guarantees.
 The benchmark tables below distinguish default builds from explicitly configured
 `send-policy` builds.
 
-The following configuration API is available on the repository branch; it is
-not included in the published 1.0.0 crate.
-
-Enable the Cargo feature first:
+Available since 1.1.0. Enable the `send-policy` feature:
 
 ```toml
-# Use the repository branch until this API is published.
-rust-raknet = { git = "https://github.com/b23r0/rust-raknet", features = ["send-policy"] }
+rust-raknet = { version = "1.1.0", features = ["send-policy"] }
 ```
 
 Default builds compile the original send queue and feedback path without the new
@@ -171,6 +194,60 @@ updates to proceed while another `send` is awaiting reliable capacity.
 
 Loss feedback keeps the original fast retry and packing fallback behavior
 in both configured and unconfigured connections.
+
+#### Performance trade-offs
+
+`send-policy` is a control over queue admission, reliable flight and sending
+bursts; it is not a throughput preset. Default builds omit the policy code.
+A feature-enabled socket without a setter retains the original queue strategy,
+but is not the default binary; the configured benchmark columns also call the
+setter on both endpoints.
+
+The benchmark policy preset is **`SendOptions::default()`**, whose flight-byte
+limit is **64 MiB**. The example above changes that limit to **256 KiB**; its
+results cannot be inferred directly from the preset's benchmark column. Calling
+`set_send_options(SendOptions::default())` activates the policy; it does not
+restore the original unconfigured queue strategy.
+
+| Control | Potential benefit | Cost to measure |
+| --- | --- | --- |
+| Flight frames / bytes | Limit outstanding reliable data and bottleneck queue pressure | Smaller windows can cap healthy high-RTT throughput; larger ones can deepen queues and loss |
+| Separate queue budgets | Keep capacity for unreliable updates while reliable sends wait | Both classes still share the link; increased unreliable admission can reduce reliable bandwidth or increase network loss |
+| Flush bytes | Bound each send burst and give other work a chance to run | Small budgets can defer queued frames until another send, ACK or maintenance tick |
+
+Results from October 3, using the default policy preset; values below are
+run medians. [The benchmark tables](#benchmarks) include ranges and memory.
+
+| Reliable ordered workload | Without policy | Configured policy | Median change |
+| --- | --- | --- | --- |
+| One connection, 800 B, no injected loss, ordinary throughput | 185.57 MiB/s | 175.19 MiB/s | −5.6% |
+| 1,024 connections, 800 B, no injected loss, ordinary throughput | 464.75 MiB/s | 486.67 MiB/s | +4.7% |
+| 1,024 connections, 800 B, no injected loss, batch throughput | 481.91 MiB/s | 423.69 MiB/s | −12.1% |
+| 1,024 connections, 64 B, no injected loss, ordinary loaded 99th-percentile RTT | 54.03 ms | 100.53 ms | +86.1% (slower) |
+
+These three-repeat measurements show trade-offs, not statistical significance.
+Policy accounting and scheduling can add work and change the timing of admitted
+messages and bursts. This can affect throughput and slow-message latency even
+without changing the wire protocol; the measurements do not isolate a single
+cause for each difference.
+
+Separate mixed-traffic tests used eight connections in separate processes,
+sharing a link that dropped from 100 Mbps / 30 ms RTT to 2 Mbps / 800 ms RTT.
+Candidate senders used the default policy preset. During congestion, unreliable
+slowest-1% delivered-message latency improved from
+1,894.73 ms to 743.49 ms, but reliable throughput fell from 0.072704 Mbps to
+0.059392 Mbps. Across the whole run, unreliable delivery fell from 68.65% to
+60.01%. Queue isolation does not guarantee delivery or remove network congestion.
+
+For reliable-only traffic, start with the default build. Enable the policy when
+you need configurable limits or mixed queue isolation, then measure your payloads,
+connection count and network. Use separate sender tasks for mixed traffic, and
+compare throughput, loaded latency, delivery rate and memory together. There is
+no automatic congestion adaptation or universally optimal window.
+
+See the [send policy Wiki](https://github.com/b23r0/rust-raknet/wiki/Send-Policy-EN)
+for setting options on clients, accepted sockets and proxy legs, and for changing
+limits on an existing connection.
 
 ### Batching ready messages
 

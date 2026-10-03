@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.png" alt="rust-raknet otter logo" width="180">
+
 # rust-raknet
 
 [English](README.md) | **简体中文**
@@ -9,28 +11,49 @@
 [![Build](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml/badge.svg)](https://github.com/b23r0/rust-raknet/actions/workflows/rust.yml)
 [![Crates.io](https://img.shields.io/crates/v/rust-raknet)](https://crates.io/crates/rust-raknet)
 [![Documentation](https://img.shields.io/docsrs/rust-raknet/latest)](https://docs.rs/rust-raknet/latest/rust_raknet/)
+[![Wiki](https://img.shields.io/badge/Wiki-EN%20%2F%20中文-007C83?logo=github)](https://github.com/b23r0/rust-raknet/wiki)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2)](https://discord.gg/ZKtYMvDFN4)
 
-[快速开始](#快速开始) · [基岩版反向代理](#minecraft-基岩版) · [性能测试](#性能测试) · [参与贡献](#参与贡献)
+[功能特性](#功能特性) · [Wiki](https://github.com/b23r0/rust-raknet/wiki) · [快速开始](#快速开始) · [基岩版反向代理](#minecraft-基岩版) · [性能测试](#性能测试) · [参与贡献](#参与贡献)
 
 </div>
 
 `rust-raknet` 为 Rust 应用提供基于 UDP 的可靠消息传输。它基于 Tokio，实现了 RakNet 的握手、确认、重传、排序和分片机制。你可以根据业务需要，选择不同的消息交付方式。
 
-- 提供客户端和监听器接口，支持 RakNet 的五种可靠模式。
-- 有界发送队列、背压和选择性重传。
-- 可配置 MTU、连接接收队列和 UDP 接收缓冲区。
-- Linux 下可选接收 socket 分片，适用于繁忙的服务端。
-- 纯 Rust 实现，采用 MIT 协议，支持 Linux、Windows、macOS 和 BSD。
+## 功能特性
+
+- **五种交付模式。** 支持尽力传输、丢弃过时状态、可靠事件传输，以及按独立通道有序交付。
+- **异步客户端和服务端。** 基于 Tokio 的连接、监听、接收连接、收发接口，支持 IPv4 和 IPv6 地址编码。
+- **保留消息边界。** 接收完整应用消息，无需从字节流重建消息。较大的 `ReliableOrdered` 消息会自动分片和重组。
+- **丢包恢复。** 支持 ACK/NACK 区间、选择性重传和 ACK 缺口快速重传，结合 RTT 估计调整重传计时，并对重复重传进行退避。
+- **显式小包合并。** 用 `send_batch` 或 `send_bytes_batch` 将已就绪的小型 `ReliableOrdered` 消息装入标准 RakNet 数据报，无需等待凑包计时器。
+- **拥有所有权的缓冲区转发。** `Bytes` 收发接口与发送、重传队列共享不可变载荷，减少代理转发中的复制。
+- **有界队列和背压。** 发送记账、接收重排和分片重组均有限制；持续发送者会等待可用容量。
+- **可选发送策略。** `send-policy` feature 提供每连接在途限制、可靠/不可靠队列预算和单次发送预算。需要显式启用，实测影响见[策略对性能的影响](#策略对性能的影响)。
+- **服务端调优。** 可配置名义 MTU、accept 队列和 UDP 接收缓冲区；Linux 可选 socket 分片、接收批处理和空闲维护优化。
+- **发现与生命周期。** 支持未连接 ping/pong、自定义 MOTD、查询对端 RakNet 版本，以及 flush 和关闭接口。
+- **可运行示例。** 回显、发现、反向代理和 benchmark 程序统一放在 [`examples/`](examples) 中。
+- **Rust 实现。** 使用 Rust 2024，采用 MIT 协议，支持 Linux、Windows、macOS 和 BSD。平台专用快速路径提供可移植的回退实现。
 
 **环境要求：** Rust 1.85+、Tokio 1.38+。
+
+## 文档
+
+**[Wiki](https://github.com/b23r0/rust-raknet/wiki)** 包含入门、交付模式、配置、协议细节和可复现的性能测试方法。默认英文，每篇指南均提供中文切换入口。
+
+[快速开始](https://github.com/b23r0/rust-raknet/wiki/Quick-Start) ·
+[RakNet 协议参考](https://github.com/b23r0/rust-raknet/wiki/Protocol-Reference) ·
+[发送策略](https://github.com/b23r0/rust-raknet/wiki/Send-Policy) ·
+[性能评估方法](https://github.com/b23r0/rust-raknet/wiki/Benchmark-Methodology)
+
+已发布 API 的详细说明见 [docs.rs](https://docs.rs/rust-raknet/latest/rust_raknet/)。协议参考同时说明本库的实现限制和报文格式，并不代表原始 RakNet SDK 的所有功能均已实现。
 
 ## 快速开始
 
 ```toml
 [dependencies]
-rust-raknet = "1.0.0"
+rust-raknet = "1.1.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -107,13 +130,10 @@ async fn forward(source: &RaknetSocket, destination: &RaknetSocket) -> Result<()
 
 下方 benchmark 分别列出默认构建与显式配置 `send-policy` 的构建。
 
-以下配置接口在仓库分支中提供，尚未包含在已发布的 1.0.0 crate 中。
-
-先启用 Cargo feature：
+该接口从 1.1.0 起提供，请启用 `send-policy` feature：
 
 ```toml
-# 此接口发布前使用仓库分支。
-rust-raknet = { git = "https://github.com/b23r0/rust-raknet", features = ["send-policy"] }
+rust-raknet = { version = "1.1.0", features = ["send-policy"] }
 ```
 
 默认构建编译原有发送队列与反馈路径，不包含新策略的状态或检查。启用 `send-policy` 后，调用 `set_send_options` 才会为连接启用新策略。未配置的连接继续使用原有共享队列和 64 帧窗口，`send_options().await` 返回 `None`；配置后返回 `Some(options)`。
@@ -137,6 +157,35 @@ socket.set_send_options(options).await?;
 大窗口可能改善高 RTT 吞吐，也可能增加共享瓶颈的排队和丢包。此调度器不提供自适应拥塞控制或带宽比例保证。单次发送达到字节预算后，剩余工作由已有连接维护任务继续处理，不新增凑包定时器。自定义突发预算过小时，剩余帧可能等到下一次发送、ACK 或维护周期；如果不需要主动限制突发，保留默认预算。应用如需在可靠 `send` 等待容量时继续发送实时消息，应使用独立发送任务。
 
 配置和未配置连接均保留原有快速补发与丢包反馈后的合包回退行为。
+
+#### 策略对性能的影响
+
+`send-policy` 控制队列接纳、可靠在途数据及发送突发，不是一个吞吐加速预设。默认构建不编译策略代码。启用 feature 但未调用 setter 的连接仍使用原有队列策略，不过并不是默认二进制；benchmark 的策略列在两端都显式调用了 setter。
+
+benchmark 使用 **`SendOptions::default()`**，在途字节上限为 **64 MiB**。上方示例把它改成了 **256 KiB**，不能直接套用默认预设的实测结果。调用 `set_send_options(SendOptions::default())` 会启用策略，不会恢复到未配置的原有队列策略。
+
+| 参数 | 可能的收益 | 需要评估的代价 |
+| --- | --- | --- |
+| 在途帧数／字节 | 限制未确认的可靠数据，减轻瓶颈队列压力 | 小窗口可能限制健康高 RTT 链路吞吐；大窗口可能增加排队和丢包 |
+| 独立队列预算 | 可靠发送等待容量时，仍为不可靠更新预留空间 | 两类流量共享链路，更多不可靠接纳可能减少可靠带宽或增加网络丢包 |
+| flush 字节预算 | 限制一次突发，让其他工作获得调度机会 | 小预算可能把剩余帧推迟到下一次发送、ACK 或维护 tick |
+
+以下是 10 月 3 日使用默认策略预设的实测中位数；完整范围和内存见[性能表](#性能测试)。
+
+| 可靠有序负载 | 未启用策略 | 显式配置策略 | 中位数变化 |
+| --- | --- | --- | --- |
+| 单连接，800 B，无注入丢包，普通吞吐 | 185.57 MiB/s | 175.19 MiB/s | −5.6% |
+| 1024 连接，800 B，无注入丢包，普通吞吐 | 464.75 MiB/s | 486.67 MiB/s | +4.7% |
+| 1024 连接，800 B，无注入丢包，批量吞吐 | 481.91 MiB/s | 423.69 MiB/s | −12.1% |
+| 1024 连接，64 B，无注入丢包，普通发送负载下的 99% RTT | 54.03 ms | 100.53 ms | +86.1%（更慢） |
+
+这些三轮测量体现取舍，不表示差异已具有统计显著性。策略记账和调度可能增加处理工作，也会改变消息接纳与突发时机；即使线协议不变，吞吐和较慢消息延迟仍可能变化。本组测量没有隔离出每项变化的单一原因。
+
+另一组混合流量测试使用 8 条独立进程连接，共享从 100 Mbps／30 ms RTT 降到 2 Mbps／800 ms RTT 的链路。候选发送端使用默认策略预设。拥塞阶段，已收到不可靠消息中较慢 1% 的单程延迟从 1894.73 ms 降到 743.49 ms，但可靠吞吐从 0.072704 Mbps 降到 0.059392 Mbps；全程不可靠消息到达率从 68.65% 降到 60.01%。队列隔离不保证交付，也不能消除网络拥塞。
+
+只有可靠流量时，先用默认构建。需要连接级限制或混合队列隔离时再启用策略，按实际消息大小、连接数和网络测试。混合流量使用独立发送任务，同时比较吞吐、负载延迟、到达率和内存。它不会自动适应拥塞，也不存在通用最优窗口。
+
+客户端、accept 后的连接、代理两端及运行时修改限制的用法，见[发送策略 Wiki](https://github.com/b23r0/rust-raknet/wiki/Send-Policy)。
 
 ### 批量处理已准备好的消息
 
