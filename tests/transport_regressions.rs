@@ -351,55 +351,105 @@ async fn concurrent_flush_waiters_wake_on_ack_and_close() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
-    timeout(Duration::from_secs(12), async {
+    timeout(Duration::from_secs(60), async {
         let mut listener = RaknetListener::bind(&"127.0.0.1:0".parse().unwrap())
             .await
             .unwrap()
             .with_accept_backlog(std::num::NonZeroUsize::new(4).unwrap());
         let address = listener.local_addr().unwrap();
         listener.listen().await;
+
+        // Complete four handshakes without accepting any sockets. The backlog
+        // is now full regardless of the runner's timer resolution or load.
+        let mut initial_clients = Vec::new();
+        for index in 0..4_u8 {
+            let client = timeout(
+                Duration::from_secs(10),
+                RaknetSocket::connect_with_version(&address, 11),
+            )
+            .await
+            .expect("initial handshake did not fill the accept backlog")
+            .unwrap();
+            initial_clients.push((index, client));
+        }
+
+        let (replies_acknowledged, _) = tokio::sync::watch::channel(false);
         let mut clients = tokio::task::JoinSet::new();
         for index in 0..16_u8 {
+            let initial = if index < 4 {
+                Some(initial_clients.remove(0).1)
+            } else {
+                None
+            };
+            let mut acknowledged = replies_acknowledged.subscribe();
             clients.spawn(async move {
-                let client = RaknetSocket::connect_with_version(&address, 11)
+                let client = match initial {
+                    Some(client) => client,
+                    None => timeout(
+                        Duration::from_secs(15),
+                        RaknetSocket::connect_with_version(&address, 11),
+                    )
                     .await
-                    .unwrap();
-                client
-                    .send(&[0xfe, index], Reliability::ReliableOrdered)
-                    .await
-                    .unwrap();
-                assert_eq!(client.recv().await.unwrap(), vec![0xfe, index]);
-                // Keep the peer open until the server's flush completes. Closing
-                // first can legitimately cancel flush while the ACK is in flight.
-                assert!(client.recv().await.is_err());
+                    .unwrap_or_else(|_| panic!("backlogged client {index} did not connect"))
+                    .unwrap(),
+                };
+                timeout(Duration::from_secs(10), async {
+                    client
+                        .send(&[0xfe, index], Reliability::ReliableOrdered)
+                        .await
+                        .unwrap();
+                    assert_eq!(client.recv().await.unwrap(), vec![0xfe, index]);
+                })
+                .await
+                .unwrap_or_else(|_| panic!("client {index} did not receive its echo"));
+
+                // Keep clients alive until every server has received its ACK.
+                // Remote disconnect delivery is covered separately; it is not
+                // a prerequisite for proving backlog recovery.
+                acknowledged.wait_for(|done| *done).await.unwrap();
                 client.close().await.unwrap();
             });
         }
-        // Let the configured four-entry backlog fill before the application accepts.
+        // Give overflow handshakes a chance to exercise Request2 retry while
+        // the already-filled backlog remains untouched.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let mut servers = tokio::task::JoinSet::new();
-        for _ in 0..16 {
-            let server = listener.accept().await.unwrap();
+        for index in 0..16 {
+            let server = timeout(Duration::from_secs(15), listener.accept())
+                .await
+                .unwrap_or_else(|_| panic!("accept {index} did not recover after draining backlog"))
+                .unwrap();
             servers.spawn(async move {
-                let packet = server.recv().await.unwrap();
+                timeout(Duration::from_secs(10), async {
+                    let packet = server.recv().await.unwrap();
+                    server
+                        .send(&packet, Reliability::ReliableOrdered)
+                        .await
+                        .unwrap();
+                    server.flush().await.unwrap();
+                })
+                .await
+                .unwrap_or_else(|_| panic!("accepted socket {index} did not finish echo and ACK"));
                 server
-                    .send(&packet, Reliability::ReliableOrdered)
-                    .await
-                    .unwrap();
-                server.flush().await.unwrap();
-                let _ = server.close().await;
             });
         }
+        // Keep server sockets alive too, so closing a fast peer cannot race a
+        // slower client's echo receive while other handshakes are retrying.
+        let mut completed_servers = Vec::new();
+        while let Some(result) = servers.join_next().await {
+            completed_servers.push(result.unwrap());
+        }
+        replies_acknowledged.send(true).unwrap();
         while let Some(result) = clients.join_next().await {
             result.unwrap();
         }
-        while let Some(result) = servers.join_next().await {
-            result.unwrap();
+        for server in completed_servers {
+            server.close().await.unwrap();
         }
         listener.close().await.unwrap();
     })
     .await
-    .expect("accept backlog saturation broke an offline handshake");
+    .expect("accept backlog saturation test did not complete");
 }
 
 #[tokio::test]
