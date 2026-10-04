@@ -373,6 +373,33 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
             initial_clients.push((index, client));
         }
 
+        // Observe a real Request2 retransmission while acceptance is blocked.
+        // A relay for one overflow client forwards every datagram unchanged.
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let overflow_address = relay.local_addr().unwrap();
+        let (retry_observed, overflow_retry) = tokio::sync::oneshot::channel();
+        let relay_task = tokio::spawn(async move {
+            let mut client = None;
+            let mut request2_count = 0;
+            let mut retry_observed = Some(retry_observed);
+            let mut buf = [0; 2048];
+            loop {
+                let (len, source) = relay.recv_from(&mut buf).await.unwrap();
+                if source == address {
+                    relay.send_to(&buf[..len], client.unwrap()).await.unwrap();
+                } else {
+                    client = Some(source);
+                    relay.send_to(&buf[..len], address).await.unwrap();
+                    if len > 0 && buf[0] == 0x07 {
+                        request2_count += 1;
+                        if request2_count == 2 {
+                            retry_observed.take().unwrap().send(()).unwrap();
+                        }
+                    }
+                }
+            }
+        });
+
         let (replies_acknowledged, _) = tokio::sync::watch::channel(false);
         let mut clients = tokio::task::JoinSet::new();
         for index in 0..16_u8 {
@@ -380,6 +407,11 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
                 Some(initial_clients.remove(0).1)
             } else {
                 None
+            };
+            let address = if index == 4 {
+                overflow_address
+            } else {
+                address
             };
             let mut acknowledged = replies_acknowledged.subscribe();
             clients.spawn(async move {
@@ -403,16 +435,25 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
                 .await
                 .unwrap_or_else(|_| panic!("client {index} did not receive its echo"));
 
-                // Keep clients alive until every server has received its ACK.
-                // Remote disconnect delivery is covered separately; it is not
-                // a prerequisite for proving backlog recovery.
+                // Keep clients alive until every server has received its ACK,
+                // then require the remote close notification as in the original
+                // regression test. Synchronization does not replace that check.
                 acknowledged.wait_for(|done| *done).await.unwrap();
+                assert!(
+                    timeout(Duration::from_secs(10), client.recv())
+                        .await
+                        .unwrap_or_else(|_| panic!("client {index} did not observe server close"))
+                        .is_err()
+                );
                 client.close().await.unwrap();
             });
         }
-        // Give overflow handshakes a chance to exercise Request2 retry while
-        // the already-filled backlog remains untouched.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Do not drain the backlog until an overflow handshake has actually
+        // retried. A fixed sleep would only assume this path was exercised.
+        timeout(Duration::from_secs(8), overflow_retry)
+            .await
+            .expect("overflow handshake did not retransmit Request2 while backlog was full")
+            .expect("overflow handshake relay stopped before observing a retry");
         let mut servers = tokio::task::JoinSet::new();
         for index in 0..16 {
             let server = timeout(Duration::from_secs(15), listener.accept())
@@ -440,13 +481,14 @@ async fn a_full_accept_backlog_recovers_without_disconnecting_handshakes() {
             completed_servers.push(result.unwrap());
         }
         replies_acknowledged.send(true).unwrap();
+        for server in &completed_servers {
+            server.close().await.unwrap();
+        }
         while let Some(result) = clients.join_next().await {
             result.unwrap();
         }
-        for server in completed_servers {
-            server.close().await.unwrap();
-        }
         listener.close().await.unwrap();
+        relay_task.abort();
     })
     .await
     .expect("accept backlog saturation test did not complete");
