@@ -1,6 +1,6 @@
 [package]
 name = "rust-raknet"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["b23r0 <b23r0@foxmail.com>"]
@@ -14,6 +14,7 @@ keywords = ["raknet", "networking", "game"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+recovery-policy = []
 send-policy = []
 
 [dependencies]

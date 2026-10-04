@@ -27,6 +27,7 @@
 - **Async client and server.** Tokio-based connect, listen, accept, send and receive APIs, with IPv4 and IPv6 address encoding.
 - **Message boundaries.** Receive complete application messages rather than reconstructing them from a byte stream. Large `ReliableOrdered` messages are fragmented and reassembled automatically.
 - **Loss recovery.** ACK/NACK ranges, selective retries and ACK-gap fast retransmission, with RTT-based retry timers and retransmission backoff.
+- **Tail-loss probing.** Optional `recovery-policy` settings can reduce waits after isolated tail loss. Probe whole datagrams, retain normal RTO fallback, or enable deadline-driven retries independently. [Configuration and trade-offs](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy-EN).
 - **Owned buffer forwarding.** `Bytes` send/receive APIs share immutable payload storage with send and retry queues, reducing copies in relays.
 - **Bounded queues and backpressure.** Send accounting, receive reordering and fragment assembly have limits; sustained producers wait for capacity.
 - **Optional send policy.** The `send-policy` feature exposes per-connection flight limits, reliable/unreliable queue budgets and flush budgets. It is opt-in; see the measured [performance trade-offs](#performance-trade-offs).
@@ -55,7 +56,7 @@ it does not imply support for every feature of the original RakNet SDK.
 
 ```toml
 [dependencies]
-rust-raknet = "1.1.0"
+rust-raknet = "1.2.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -141,7 +142,7 @@ The benchmark tables below distinguish default builds from explicitly configured
 Available since 1.1.0. Enable the `send-policy` feature:
 
 ```toml
-rust-raknet = { version = "1.1.0", features = ["send-policy"] }
+rust-raknet = { version = "1.2.0", features = ["send-policy"] }
 ```
 
 Default builds compile the original send queue and feedback path without the new
@@ -374,6 +375,28 @@ example accepts `--idle-maintenance`.
   their next retry. It does not cap active sessions.
 
 </details>
+
+## Recovery tuning
+
+Enable `recovery-policy`, then configure each connected or accepted socket:
+
+```toml
+rust-raknet = { version = "1.2.0", features = ["recovery-policy"] }
+```
+
+```rust
+use rust_raknet::RecoveryOptions;
+use std::time::Duration;
+
+socket.set_recovery_options(RecoveryOptions {
+    tail_probe_min_delay: Some(Duration::from_millis(10)),
+    ..RecoveryOptions::default()
+}).await?;
+```
+
+All options are off by default. Probing implies deadline-driven maintenance and waits at least the configured minimum and 1.5 times the smoothed RTT. It preserves the original RTO deadline; 10 ms is not a delivery guarantee. Earlier recovery can reduce isolated tail-loss waits, but can reduce sustained throughput or increase congestion latency. The benchmark tables below retain the **1.1.0 measurements**, without recovery-policy.
+
+See the [recovery guide](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy-EN) for deadline-only retries, RTT-progress backoff, disabling options and measured trade-offs; the [configuration reference](https://github.com/b23r0/rust-raknet/wiki/Configuration-Reference-EN) lists all public tuning parameters.
 
 ## Benchmarks
 

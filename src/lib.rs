@@ -17,7 +17,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rust-raknet = "1.1.0"
+//! rust-raknet = "1.2.0"
 //! ```
 //!
 //! # Reliability modes
@@ -37,6 +37,8 @@ pub mod error;
 mod fragment;
 mod log;
 mod packet;
+#[cfg(feature = "recovery-policy")]
+mod recovery_options;
 #[cfg(feature = "send-policy")]
 mod send_options;
 mod sequence;
@@ -47,6 +49,8 @@ mod utils;
 
 pub use crate::arq::Reliability;
 pub use crate::log::enable_raknet_log;
+#[cfg(feature = "recovery-policy")]
+pub use crate::recovery_options::RecoveryOptions;
 #[cfg(feature = "send-policy")]
 pub use crate::send_options::{SendOptions, SendOptionsError};
 pub use crate::server::*;

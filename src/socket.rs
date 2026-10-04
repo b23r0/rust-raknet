@@ -23,11 +23,48 @@ use crate::{arq::*, packet::*, raknet_log_debug, utils::*};
 
 const MAINTENANCE_IDLE_MILLIS: i64 = 500;
 
-#[derive(Default)]
+#[cfg_attr(not(feature = "recovery-policy"), derive(Default))]
 struct Maintenance {
     wakeup: Notify,
     idle: AtomicBool,
     enabled: AtomicBool,
+    #[cfg(feature = "recovery-policy")]
+    deadline: AtomicI64,
+    #[cfg(feature = "recovery-policy")]
+    deadline_driven: AtomicBool,
+    #[cfg(feature = "recovery-policy")]
+    wake_at: AtomicI64,
+}
+
+#[cfg(feature = "recovery-policy")]
+impl Default for Maintenance {
+    fn default() -> Self {
+        Self {
+            wakeup: Notify::new(),
+            idle: AtomicBool::new(false),
+            enabled: AtomicBool::new(false),
+            deadline: AtomicI64::new(i64::MAX),
+            deadline_driven: AtomicBool::new(false),
+            wake_at: AtomicI64::new(i64::MAX),
+        }
+    }
+}
+
+#[cfg(feature = "recovery-policy")]
+impl Maintenance {
+    fn publish(&self, queue: &SendQ, wake: bool) {
+        if !self.deadline_driven.load(Ordering::Relaxed) {
+            return;
+        }
+        let deadline = queue.recovery_deadline();
+        self.deadline.store(deadline, Ordering::Release);
+        // A new flight need not interrupt a periodic wakeup that already occurs
+        // before its retry deadline. Compare against the armed timer, not an ACK
+        // transiently clearing the queue's cached deadline.
+        if wake && deadline < self.wake_at.load(Ordering::Acquire) {
+            self.wakeup.notify_one();
+        }
+    }
 }
 
 enum DatagramInput {
@@ -862,7 +899,13 @@ impl RaknetSocket {
 
         // Start the connected handshake immediately; the ticker remains the
         // fallback for reliable retransmission rather than the initial sender.
-        let frames = ret.sendq.write().await.flush(monotonic_millis(), addr);
+        let frames = {
+            let mut queue = ret.sendq.write().await;
+            let frames = queue.flush(monotonic_millis(), addr);
+            #[cfg(feature = "recovery-policy")]
+            ret.maintenance.publish(&queue, true);
+            frames
+        };
         if let Err(error) = Self::transmit_frames(&s, frames, addr, false, 0).await {
             if !matches!(error, RaknetError::SocketError) {
                 return Err(error);
@@ -993,7 +1036,12 @@ impl RaknetSocket {
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
                         sendq.ack_ranges(&ack.sequences, now);
-                        sendq.flush(now, &peer_addr)
+                        #[cfg(feature = "recovery-policy")]
+                        let now = monotonic_millis();
+                        let frames = sendq.flush(now, &peer_addr);
+                        #[cfg(feature = "recovery-policy")]
+                        maintenance.publish(&sendq, true);
+                        frames
                     };
                     send_capacity.notify_waiters();
                     if let Err(error) = RaknetSocket::transmit_replies(
@@ -1025,7 +1073,12 @@ impl RaknetSocket {
                     let outgoing_frames = {
                         let mut sendq = sendq.write().await;
                         sendq.nack_ranges(&nack.sequences, now);
-                        sendq.flush(now, &peer_addr)
+                        #[cfg(feature = "recovery-policy")]
+                        let now = monotonic_millis();
+                        let frames = sendq.flush(now, &peer_addr);
+                        #[cfg(feature = "recovery-policy")]
+                        maintenance.publish(&sendq, true);
+                        frames
                     };
                     if let Err(error) = RaknetSocket::transmit_replies(
                         &s,
@@ -1135,7 +1188,13 @@ impl RaknetSocket {
                         ) => {
                             // Flush control replies before exposing handshake readiness.
                             // Reliable frames remain queued until acknowledged.
-                            let frames = sendq.write().await.flush(monotonic_millis(), &peer_addr);
+                            let frames = {
+                                let mut queue = sendq.write().await;
+                                let frames = queue.flush(monotonic_millis(), &peer_addr);
+                                #[cfg(feature = "recovery-policy")]
+                                maintenance.publish(&queue, true);
+                                frames
+                            };
                             if !frames.is_empty() && maintenance.idle.swap(false, Ordering::AcqRel)
                             {
                                 maintenance.wakeup.notify_one();
@@ -1195,6 +1254,32 @@ impl RaknetSocket {
         });
     }
 
+    #[cfg(feature = "recovery-policy")]
+    async fn transmit_maintenance_frames(
+        socket: &UdpSocket,
+        frames: OutgoingFrames,
+        peer: &SocketAddr,
+        enable_loss: bool,
+        loss_rate: u8,
+    ) {
+        // A probe must preserve its complete datagram. Splitting members with
+        // the same sequence ID lets an ACK retire members lost independently.
+        if frames.coalesced {
+            if let Err(error) =
+                Self::transmit_frames(socket, frames, peer, enable_loss, loss_rate).await
+            {
+                raknet_log_error!("failed to send maintenance datagram: {}", error);
+            }
+            return;
+        }
+        for frame in &frames {
+            if let Err(error) = Self::send_frame(socket, frame, peer, enable_loss, loss_rate).await
+            {
+                raknet_log_error!("failed to send frame: {}", error);
+            }
+        }
+    }
+
     fn start_tick(&self, s: &Arc<UdpSocket>, collecter: Option<Arc<Mutex<Sender<SocketAddr>>>>) {
         let connected = self.close_notifier.clone();
         let s = s.clone();
@@ -1218,6 +1303,43 @@ impl RaknetSocket {
                 } else {
                     SendQ::DEFAULT_TIMEOUT_MILLS as u64
                 };
+                #[cfg(feature = "recovery-policy")]
+                {
+                    let notified = maintenance.wakeup.notified();
+                    tokio::pin!(notified);
+                    let mut delay = delay;
+                    if maintenance.deadline_driven.load(Ordering::Relaxed) {
+                        notified.as_mut().enable();
+                        let now = monotonic_millis();
+                        let remaining = maintenance
+                            .deadline
+                            .load(Ordering::Acquire)
+                            .saturating_sub(now)
+                            .max(1) as u64;
+                        delay = delay.min(remaining);
+                        maintenance
+                            .wake_at
+                            .store(now.saturating_add(delay as i64), Ordering::Release);
+                        // Recheck after arming: a producer may have compared its
+                        // deadline against the previous, earlier timer while it was
+                        // being replaced. Later producers notify the armed waiter.
+                        let remaining = maintenance
+                            .deadline
+                            .load(Ordering::Acquire)
+                            .saturating_sub(now)
+                            .max(1) as u64;
+                        delay = delay.min(remaining);
+                        maintenance
+                            .wake_at
+                            .store(now.saturating_add(delay as i64), Ordering::Release);
+                    }
+                    tokio::select! {
+                        _ = sleep(std::time::Duration::from_millis(delay)) => {},
+                        _ = &mut notified => {},
+                        _ = connected.acquire() => {},
+                    }
+                }
+                #[cfg(not(feature = "recovery-policy"))]
                 tokio::select! {
                     _ = sleep(std::time::Duration::from_millis(delay)) => {},
                     _ = maintenance.wakeup.notified(), if idle => {},
@@ -1269,12 +1391,24 @@ impl RaknetSocket {
                 let (outgoing_frames, send_idle) = {
                     let mut sendq = sendq.write().await;
                     let frames = sendq.flush(monotonic_millis(), &peer_addr);
+                    #[cfg(feature = "recovery-policy")]
+                    maintenance.publish(&sendq, false);
                     (frames, sendq.is_empty())
                 };
                 idle = quiet && receive_idle && send_idle;
                 if !idle {
                     maintenance.idle.store(false, Ordering::Release);
                 }
+                #[cfg(feature = "recovery-policy")]
+                Self::transmit_maintenance_frames(
+                    &s,
+                    outgoing_frames,
+                    &peer_addr,
+                    enable_loss.load(Ordering::Relaxed),
+                    loss_rate.load(Ordering::Relaxed),
+                )
+                .await;
+                #[cfg(not(feature = "recovery-policy"))]
                 for frame in &outgoing_frames {
                     if let Err(error) = Self::send_frame(
                         &s,
@@ -1648,7 +1782,10 @@ impl RaknetSocket {
                     for message in owned {
                         queue.insert_bytes(reliability, message, order_channel)?;
                     }
-                    Some(queue.flush(monotonic_millis(), &self.peer_addr))
+                    let frames = queue.flush(monotonic_millis(), &self.peer_addr);
+                    #[cfg(feature = "recovery-policy")]
+                    self.maintenance.publish(&queue, true);
+                    Some(frames)
                 } else {
                     None
                 }
@@ -1706,7 +1843,10 @@ impl RaknetSocket {
                         Some(data) => sendq.insert_bytes(reliability, data, order_channel)?,
                         None => sendq.insert_with_order_channel(reliability, buf, order_channel)?,
                     }
-                    Some(sendq.flush(monotonic_millis(), &self.peer_addr))
+                    let frames = sendq.flush(monotonic_millis(), &self.peer_addr);
+                    #[cfg(feature = "recovery-policy")]
+                    self.maintenance.publish(&sendq, true);
+                    Some(frames)
                 } else {
                     None
                 }
@@ -2429,5 +2569,198 @@ impl RaknetSocket {
     /// Return configured limits, or `None` for the original queue policy.
     pub async fn send_options(&self) -> Option<crate::SendOptions> {
         self.sendq.read().await.send_options()
+    }
+}
+
+#[cfg(feature = "recovery-policy")]
+impl RaknetSocket {
+    /// Configure optional early retransmission and ACK-progress backoff.
+    /// Apply on both peers before traffic when evaluating recovery latency.
+    /// This does not change the base RTO estimator or RakNet wire format.
+    pub async fn set_recovery_options(&self, options: crate::RecoveryOptions) -> Result<()> {
+        if self.close_notifier.is_closed() {
+            return Err(RaknetError::ConnectionClosed);
+        }
+        let mut queue = self.sendq.write().await;
+        queue.set_recovery_options(options, monotonic_millis());
+        let deadlines = options.deadline_driven || options.tail_probe_min_delay.is_some();
+        self.maintenance
+            .deadline_driven
+            .store(deadlines, Ordering::Release);
+        if !deadlines {
+            self.maintenance.deadline.store(i64::MAX, Ordering::Release);
+        }
+
+        #[cfg(feature = "recovery-policy")]
+        self.maintenance.publish(&queue, true);
+        self.maintenance.wakeup.notify_one();
+        Ok(())
+    }
+
+    /// Return the connection's recovery configuration; default options disable probes.
+    pub async fn recovery_options(&self) -> crate::RecoveryOptions {
+        self.sendq.read().await.recovery_options()
+    }
+}
+
+#[cfg(all(test, feature = "recovery-policy"))]
+mod recovery_tests {
+    use super::*;
+    #[tokio::test]
+    async fn maintenance_preserves_a_packed_probe_as_one_datagram() {
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = receiver.local_addr().unwrap();
+        let mut queue = SendQ::new(1400);
+        queue.enable_coalescing();
+        for value in 0..8 {
+            queue
+                .insert(Reliability::ReliableOrdered, &[0xfe, value])
+                .unwrap();
+        }
+        let frames = queue.flush(0, &address);
+        assert_eq!(frames.len(), 8);
+        assert!(frames.coalesced);
+        RaknetSocket::transmit_maintenance_frames(&sender, frames, &address, false, 0).await;
+        let mut wire = [0; 1500];
+        let (length, _) = timeout(
+            std::time::Duration::from_secs(1),
+            receiver.recv_from(&mut wire),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut decoded = Vec::new();
+        FrameVec::decode_into(&wire[..length], &mut decoded).unwrap();
+        assert_eq!(decoded.len(), 8);
+        for (value, frame) in decoded.iter().enumerate() {
+            assert_eq!(frame.data.as_ref(), &[0xfe, value as u8]);
+            assert_eq!(frame.sequence_number, decoded[0].sequence_number);
+        }
+        assert!(
+            timeout(
+                std::time::Duration::from_millis(20),
+                receiver.recv_from(&mut wire)
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_lock_contention_does_not_backdate_new_frames() {
+        timeout(std::time::Duration::from_secs(3), async {
+            let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let address = peer.local_addr().unwrap();
+            let (input, receiver) = channel(1);
+            let (collector, _collected) = channel(1);
+            let socket = RaknetSocket::from(
+                &address,
+                &udp,
+                receiver,
+                1400,
+                Arc::new(Mutex::new(collector)),
+                11,
+            )
+            .await;
+            let mut queue = socket.sendq.write().await;
+            // Keep maintenance retries outside the test while simulating contention.
+            queue.insert(Reliability::ReliableOrdered, &[0xfe]).unwrap();
+            queue.flush(0, &address);
+            queue.ack(0, 100_000);
+            for _ in 0..64 {
+                queue
+                    .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+                    .unwrap();
+            }
+            assert_eq!(queue.flush(monotonic_millis(), &address).len(), 64);
+            queue
+                .insert(Reliability::ReliableOrdered, &[0xfe, 2])
+                .unwrap();
+            let mut ack = Vec::new();
+            write_control_ranges_into(PacketID::Ack, &[(1, 64)], &mut ack).unwrap();
+            input.send(ack).await.unwrap();
+            // On this single-thread runtime, capacity is released before the
+            // ACK worker blocks on the held queue lock.
+            let _capacity = input.reserve().await.unwrap();
+            sleep(std::time::Duration::from_millis(20)).await;
+            let released_at = monotonic_millis();
+            drop(queue);
+            let mut queue = socket.sendq.write().await;
+            assert_eq!(queue.get_sent_queue_size(), 1);
+            let deadline = released_at + queue.get_rto() - 1;
+            assert!(
+                queue.flush(deadline, &address).is_empty(),
+                "new frames must use a timestamp taken after the queue lock"
+            );
+            drop(queue);
+            socket.close().await.unwrap();
+        })
+        .await
+        .expect("ACK lock contention test stalled");
+    }
+
+    #[tokio::test]
+    async fn earlier_deadline_wakes_active_maintenance() {
+        let maintenance = Maintenance::default();
+        maintenance.deadline_driven.store(true, Ordering::Release);
+        let mut queue = SendQ::new(1400);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &"127.0.0.1:19132".parse().unwrap());
+        #[cfg(feature = "recovery-policy")]
+        maintenance.publish(&queue, true);
+        assert_eq!(maintenance.deadline.load(Ordering::Acquire), 150);
+        timeout(
+            std::time::Duration::from_secs(1),
+            maintenance.wakeup.notified(),
+        )
+        .await
+        .unwrap();
+        #[cfg(feature = "recovery-policy")]
+        maintenance.publish(&queue, false);
+        queue.ack(0, 101);
+        queue.flush(101, &"127.0.0.1:19132".parse().unwrap());
+        #[cfg(feature = "recovery-policy")]
+        maintenance.publish(&queue, true);
+        assert_eq!(maintenance.deadline.load(Ordering::Acquire), i64::MAX);
+    }
+}
+
+#[cfg(all(test, feature = "recovery-policy"))]
+mod recovery_timer_tests {
+    use super::*;
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+
+    #[test]
+    fn later_deadlines_do_not_interrupt_an_earlier_armed_timer() {
+        let maintenance = Maintenance::default();
+        maintenance.deadline_driven.store(true, Ordering::Release);
+        maintenance.wake_at.store(140, Ordering::Release);
+        let address = "127.0.0.1:19132".parse().unwrap();
+        let mut queue = SendQ::new(1400);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &address);
+        #[cfg(feature = "recovery-policy")]
+        maintenance.publish(&queue, true);
+        let notified = maintenance.wakeup.notified();
+        tokio::pin!(notified);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(notified.as_mut().poll(&mut context).is_pending());
+        let mut earlier = SendQ::new(1400);
+        earlier
+            .insert(Reliability::ReliableOrdered, &[0xfe, 2])
+            .unwrap();
+        earlier.flush(80, &address);
+        #[cfg(feature = "recovery-policy")]
+        maintenance.publish(&earlier, true);
+        assert!(notified.as_mut().poll(&mut context).is_ready());
     }
 }

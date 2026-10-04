@@ -27,6 +27,7 @@
 - **异步客户端和服务端。** 基于 Tokio 的连接、监听、接收连接、收发接口，支持 IPv4 和 IPv6 地址编码。
 - **保留消息边界。** 接收完整应用消息，无需从字节流重建消息。较大的 `ReliableOrdered` 消息会自动分片和重组。
 - **丢包恢复。** 支持 ACK/NACK 区间、选择性重传和 ACK 缺口快速重传，结合 RTT 估计调整重传计时，并对重复重传进行退避。
+- **尾包丢失探测。** 可选 `recovery-policy` 设置可缩短孤立尾包丢失后的等待，完整数据报探测保留正常 RTO 回退，也可单独启用按期限重试。[设置与性能取舍](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy)。
 - **拥有所有权的缓冲区转发。** `Bytes` 收发接口与发送、重传队列共享不可变载荷，减少代理转发中的复制。
 - **有界队列和背压。** 发送记账、接收重排和分片重组均有限制；持续发送者会等待可用容量。
 - **可选发送策略。** `send-policy` feature 提供每连接在途限制、可靠/不可靠队列预算和单次发送预算。需要显式启用，实测影响见[策略对性能的影响](#策略对性能的影响)。
@@ -51,7 +52,7 @@
 
 ```toml
 [dependencies]
-rust-raknet = "1.1.0"
+rust-raknet = "1.2.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -131,7 +132,7 @@ async fn forward(source: &RaknetSocket, destination: &RaknetSocket) -> Result<()
 该接口从 1.1.0 起提供，请启用 `send-policy` feature：
 
 ```toml
-rust-raknet = { version = "1.1.0", features = ["send-policy"] }
+rust-raknet = { version = "1.2.0", features = ["send-policy"] }
 ```
 
 默认构建编译原有发送队列与反馈路径，不包含新策略的状态或检查。启用 `send-policy` 后，调用 `set_send_options` 才会为连接启用新策略。未配置的连接继续使用原有共享队列和 64 帧窗口，`send_options().await` 返回 `None`；配置后返回 `Some(options)`。
@@ -272,6 +273,28 @@ async fn listen() -> Result<RaknetListener> {
 - 默认连接接收队列长度为 128，可以在 `listen()` 前通过 `with_accept_backlog(NonZeroUsize)` 调整。队列满时，新的离线握手会延后到下一次重试；这不是活跃会话数量上限。
 
 </details>
+
+## 恢复策略
+
+启用 `recovery-policy` 后，为每个已连接或已接受的 socket 配置：
+
+```toml
+rust-raknet = { version = "1.2.0", features = ["recovery-policy"] }
+```
+
+```rust
+use rust_raknet::RecoveryOptions;
+use std::time::Duration;
+
+socket.set_recovery_options(RecoveryOptions {
+    tail_probe_min_delay: Some(Duration::from_millis(10)),
+    ..RecoveryOptions::default()
+}).await?;
+```
+
+所有选项默认关闭。探测隐含启用按期限维护，等待至少为设置下限与 1.5 倍平滑 RTT 中的较大值，并保留原 RTO 期限；10 ms 不是交付时间保证。提前恢复可以缩短孤立尾包丢失的等待，但可能降低持续吞吐或增加拥塞延迟。下方 benchmark 保留 **1.1.0 的实测数据**，未开启 recovery-policy。
+
+[恢复策略指南](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy)介绍仅期限重试、RTT 进展退避、关闭选项和实测取舍；[配置参数参考](https://github.com/b23r0/rust-raknet/wiki/Configuration-Reference)列出全部公开调优参数。
 
 ## 性能测试
 

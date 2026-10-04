@@ -833,6 +833,24 @@ struct SendScheduler {
     next_lane: usize,
 }
 
+#[cfg(feature = "recovery-policy")]
+#[derive(Clone, Copy)]
+struct ProbeFallback {
+    sequence: u32,
+    deadline: i64,
+}
+
+#[cfg(feature = "recovery-policy")]
+struct Recovery {
+    options: crate::RecoveryOptions,
+    last_progress: i64,
+    sampled_rtt: bool,
+    probed: bool,
+    probe_packed: bool,
+    pending_probe: Option<ProbeFallback>,
+    probe_replay: Option<u32>,
+}
+
 pub struct SendQ {
     mtu: u16,
     ack_sequence_number: u32,
@@ -847,6 +865,8 @@ pub struct SendQ {
     buffered_bytes: usize,
     rto: i64,
     srtt: i64,
+    #[cfg(feature = "recovery-policy")]
+    recovery: Option<Box<Recovery>>,
     sent_packet: Vec<(FrameSetPacket, bool, i64, u32, Vec<u32>)>,
     flight_order_dirty: bool,
     next_retry: i64,
@@ -893,7 +913,172 @@ impl SendQ {
 
             rto: SendQ::DEFAULT_TIMEOUT_MILLS,
             srtt: SendQ::DEFAULT_TIMEOUT_MILLS,
+            #[cfg(feature = "recovery-policy")]
+            recovery: None,
         }
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    pub(crate) fn set_recovery_options(&mut self, options: crate::RecoveryOptions, now: i64) {
+        let sampled_rtt = self.recovery.as_ref().is_some_and(|r| r.sampled_rtt);
+        let pending_probe = self.active_probe();
+        let probe_replay = self.recovery.as_ref().and_then(|r| r.probe_replay);
+        self.recovery = (options != crate::RecoveryOptions::default() || pending_probe.is_some())
+            .then(|| {
+                Box::new(Recovery {
+                    options,
+                    last_progress: now,
+                    sampled_rtt,
+                    probed: pending_probe.is_some(),
+                    probe_packed: false,
+                    pending_probe,
+                    probe_replay,
+                })
+            });
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    pub(crate) fn recovery_options(&self) -> crate::RecoveryOptions {
+        self.recovery
+            .as_ref()
+            .map_or_else(Default::default, |r| r.options)
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn acknowledge_progress(&mut self, now: i64, sampled_rtt: bool) {
+        let Some(recovery) = &mut self.recovery else {
+            return;
+        };
+        if recovery.pending_probe.is_some_and(|probe| {
+            !self.sent_packet.iter().any(|packet| {
+                packet.0.sequence_number == probe.sequence && packet.3 == 0 && !packet.4.is_empty()
+            })
+        }) {
+            recovery.pending_probe = None;
+        }
+        recovery.sampled_rtt |= sampled_rtt;
+        recovery.last_progress = now;
+        recovery.probed = false;
+        if recovery.options.reset_backoff_on_progress && sampled_rtt {
+            // Retain Karn's exclusion even after reducing the backoff.
+            for packet in &mut self.sent_packet {
+                packet.3 = packet.3.min(1);
+            }
+            self.next_retry = 0;
+        }
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn probe_deadline(&self) -> i64 {
+        let Some(recovery) = &self.recovery else {
+            return i64::MAX;
+        };
+        let Some(minimum) = recovery.options.tail_probe_min_delay else {
+            return i64::MAX;
+        };
+        if !recovery.sampled_rtt || recovery.probed || self.sent_packet.is_empty() {
+            return i64::MAX;
+        }
+        // Replay only a single complete datagram. Probing one member of a
+        // packed datagram would create artificial gaps for its other members.
+        if !self.packets.is_empty() || self.sent_packet.len() > Self::MAX_COALESCED_FRAMES {
+            return i64::MAX;
+        }
+        let sequence = self.sent_packet[0].0.sequence_number;
+        if self
+            .sent_packet
+            .iter()
+            .any(|p| !p.1 || p.3 != 0 || !p.4.is_empty() || p.0.sequence_number != sequence)
+        {
+            return i64::MAX;
+        }
+        #[cfg(feature = "send-policy")]
+        if let Some(scheduler) = &self.scheduler {
+            let charge: usize = self.sent_packet.iter().map(|p| p.0._size().unwrap()).sum();
+            if !scheduler.unreliable.is_empty() || charge > scheduler.options.flush_bytes {
+                return i64::MAX;
+            }
+        }
+        let minimum = i64::try_from(minimum.as_millis())
+            .unwrap_or(i64::MAX)
+            .max(1);
+        recovery
+            .last_progress
+            .saturating_add(minimum.max(self.srtt.saturating_mul(3).saturating_add(1) / 2))
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    pub(crate) fn recovery_deadline(&self) -> i64 {
+        if self.sent_packet.is_empty() {
+            return i64::MAX;
+        }
+        self.next_retry
+            .min(self.probe_deadline())
+            .min(self.probe_retry_deadline())
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn active_probe(&self) -> Option<ProbeFallback> {
+        self.recovery.as_ref()?.pending_probe.filter(|probe| {
+            self.sent_packet.iter().any(|packet| {
+                packet.0.sequence_number == probe.sequence && packet.3 == 0 && !packet.4.is_empty()
+            })
+        })
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn probe_retry_deadline(&self) -> i64 {
+        self.active_probe().map_or(i64::MAX, |probe| probe.deadline)
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn probe_tail(&mut self, now: i64) {
+        let deadline = self.probe_deadline();
+        // A delayed wakeup must retain normal timeout recovery and its packing fallback.
+        if deadline == i64::MAX || now < deadline || now >= self.next_retry {
+            return;
+        }
+        // Preserve every frame of the original datagram under one new ID.
+        // Existing alias ACK handling retires either transmission exactly once.
+        let fallback = self.sent_packet[0]
+            .2
+            .saturating_add(Self::retry_timeout(self.rto, self.sent_packet[0].3));
+        let previous = self.sent_packet[0].0.sequence_number;
+        let sequence = self.sequence_number;
+        self.sequence_number = sequence::next(sequence);
+        for packet in &mut self.sent_packet {
+            packet.0.sequence_number = sequence;
+            packet.1 = false;
+            if packet.4.len() == 64 {
+                packet.4.remove(0);
+            }
+            packet.4.push(previous);
+        }
+        let recovery = self.recovery.as_mut().unwrap();
+        recovery.probed = true;
+        recovery.probe_replay = Some(sequence);
+        recovery.pending_probe = Some(ProbeFallback {
+            sequence,
+            deadline: fallback,
+        });
+        recovery.probe_packed = self.sent_packet.len() > 1;
+        self.grouped_acks |= recovery.probe_packed;
+        self.flight_order_dirty = true;
+        self.retries_pending = true;
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn take_probe_replay(&mut self) -> Option<u32> {
+        self.recovery
+            .as_mut()
+            .and_then(|recovery| recovery.probe_replay.take())
+    }
+
+    #[cfg(feature = "recovery-policy")]
+    fn take_probe_packing(&mut self) -> bool {
+        self.recovery
+            .as_mut()
+            .is_some_and(|r| std::mem::take(&mut r.probe_packed))
     }
 
     fn required_bytes(&self, reliability: Reliability, len: usize) -> Result<usize> {
@@ -1224,6 +1409,8 @@ impl SendQ {
             return;
         };
         let item = self.sent_packet.remove(index);
+        #[cfg(feature = "recovery-policy")]
+        self.acknowledge_progress(tick, item.3 == 0 && item.4.is_empty());
         if self.grouped_acks && self.sent_packet.is_empty() {
             self.grouped_acks = false;
         }
@@ -1252,7 +1439,10 @@ impl SendQ {
             self.ack_sequence_number = sequence;
         }
         // A retransmitted frame has an ambiguous RTT sample (Karn's algorithm).
-        if item.3 == 0 {
+        let unambiguous = item.3 == 0;
+        #[cfg(feature = "recovery-policy")]
+        let unambiguous = unambiguous && item.4.is_empty();
+        if unambiguous {
             self.update_rto(tick.saturating_sub(item.2).max(0));
         }
     }
@@ -1280,6 +1470,8 @@ impl SendQ {
         let mut latency = (self.srtt, self.rto);
         let mut released_bytes = 0;
         let mut previous_sample = None;
+        #[cfg(feature = "recovery-policy")]
+        let mut sampled_rtt = false;
         self.sent_packet.retain_mut(|item| {
             let acknowledged_id = std::iter::once(item.0.sequence_number)
                 .chain(item.4.iter().copied())
@@ -1304,15 +1496,26 @@ impl SendQ {
             }
             // Initial members of a frame set are contiguous. Retransmitted
             // frames never contribute RTT samples (Karn's algorithm).
-            if item.3 == 0 && (!GROUPED || previous_sample != Some(id)) {
+            let unambiguous = item.3 == 0;
+            #[cfg(feature = "recovery-policy")]
+            let unambiguous = unambiguous && item.4.is_empty();
+            if unambiguous && (!GROUPED || previous_sample != Some(id)) {
                 if GROUPED {
                     previous_sample = Some(id);
+                }
+                #[cfg(feature = "recovery-policy")]
+                {
+                    sampled_rtt = true;
                 }
                 latency = Self::latency_sample(latency.0, tick.saturating_sub(item.2).max(0));
             }
             false
         });
         self.buffered_bytes -= released_bytes;
+        #[cfg(feature = "recovery-policy")]
+        if released_bytes != 0 {
+            self.acknowledge_progress(tick, sampled_rtt);
+        }
         if GROUPED && self.sent_packet.is_empty() {
             self.grouped_acks = false;
         }
@@ -1370,7 +1573,17 @@ impl SendQ {
     }
 
     fn tick(&mut self, tick: i64) {
-        if tick < self.next_retry {
+        #[cfg(feature = "recovery-policy")]
+        if self.recovery.is_some() {
+            self.probe_tail(tick);
+        }
+        #[cfg(feature = "recovery-policy")]
+        let probe = self.active_probe();
+        #[cfg(feature = "recovery-policy")]
+        let retry = self.next_retry.min(probe.map_or(i64::MAX, |p| p.deadline));
+        #[cfg(not(feature = "recovery-policy"))]
+        let retry = self.next_retry;
+        if tick < retry {
             return;
         }
         self.next_retry = i64::MAX;
@@ -1379,7 +1592,13 @@ impl SendQ {
 
             let cur_rto = Self::retry_timeout(self.rto, p.3);
 
-            if p.1 && tick - p.2 >= cur_rto {
+            let expired = tick - p.2 >= cur_rto;
+            #[cfg(feature = "recovery-policy")]
+            let expired = expired
+                || probe.is_some_and(|probe| {
+                    probe.sequence == p.0.sequence_number && tick >= probe.deadline
+                });
+            if p.1 && expired {
                 self.coalescing_allowed = false;
                 self.coalesce = false;
                 let previous = p.0.sequence_number;
@@ -1396,9 +1615,31 @@ impl SendQ {
                 self.next_retry = self.next_retry.min(p.2.saturating_add(cur_rto));
             }
         }
+        #[cfg(feature = "recovery-policy")]
+        if probe.is_some_and(|probe| tick >= probe.deadline) {
+            self.recovery.as_mut().unwrap().pending_probe = None;
+        }
     }
 
     pub fn flush(&mut self, tick: i64, peer_addr: &SocketAddr) -> OutgoingFrames {
+        #[cfg(feature = "recovery-policy")]
+        if self.sent_packet.is_empty() {
+            // A retired flight must not leave an obsolete deadline on the next one.
+            self.next_retry = i64::MAX;
+            if self
+                .recovery
+                .as_ref()
+                .is_some_and(|r| r.options == crate::RecoveryOptions::default())
+            {
+                self.recovery = None;
+            }
+            if let Some(recovery) = &mut self.recovery {
+                recovery.last_progress = tick;
+                recovery.probed = false;
+                recovery.pending_probe = None;
+                recovery.probe_replay = None;
+            }
+        }
         #[cfg(feature = "send-policy")]
         if self
             .scheduler
@@ -1416,6 +1657,10 @@ impl SendQ {
                 + self.queued_unreliable,
         );
         let mut ret = OutgoingFrames::with_capacity(capacity);
+        #[cfg(feature = "recovery-policy")]
+        {
+            ret.coalesced = self.take_probe_packing();
+        }
         // New sends preserve numeric order until the 24-bit sequence wraps.
         // ACK removal preserves it too; only resequencing requires sorting.
         if self.flight_order_dirty {
@@ -1424,6 +1669,8 @@ impl SendQ {
             self.flight_order_dirty = false;
         }
 
+        #[cfg(feature = "recovery-policy")]
+        let probe_sequence = self.take_probe_replay();
         if self.retries_pending {
             for packet in &mut self.sent_packet {
                 if !packet.1 {
@@ -1438,7 +1685,14 @@ impl SendQ {
                     ret.push(packet.0.clone());
                     packet.1 = true;
                     packet.2 = tick;
-                    packet.3 = packet.3.saturating_add(1);
+                    #[cfg(feature = "recovery-policy")]
+                    if probe_sequence != Some(packet.0.sequence_number) {
+                        packet.3 = packet.3.saturating_add(1);
+                    }
+                    #[cfg(not(feature = "recovery-policy"))]
+                    {
+                        packet.3 = packet.3.saturating_add(1);
+                    }
                     self.next_retry = self
                         .next_retry
                         .min(tick.saturating_add(Self::retry_timeout(self.rto, packet.3)));
@@ -1755,9 +2009,15 @@ impl SendQ {
                 .saturating_sub(self.sent_packet.len()),
         ) + scheduler.unreliable.len();
         let mut output = OutgoingFrames::with_capacity(capacity.min(256));
+        #[cfg(feature = "recovery-policy")]
+        {
+            output.coalesced = self.take_probe_packing();
+        }
         let quantum = usize::from(self.mtu) * 4;
         let mut bytes = 0;
         let mut unreliable_drained = false;
+        #[cfg(feature = "recovery-policy")]
+        let probe_sequence = self.take_probe_replay();
         let mut retry_cursor = 0;
         let mut group_sequence = None;
         let mut group_bytes = 0;
@@ -1820,7 +2080,14 @@ impl SendQ {
                             output.push(item.0.clone());
                             item.1 = true;
                             item.2 = tick;
-                            item.3 = item.3.saturating_add(1);
+                            #[cfg(feature = "recovery-policy")]
+                            if probe_sequence != Some(item.0.sequence_number) {
+                                item.3 = item.3.saturating_add(1);
+                            }
+                            #[cfg(not(feature = "recovery-policy"))]
+                            {
+                                item.3 = item.3.saturating_add(1);
+                            }
                             self.next_retry = self
                                 .next_retry
                                 .min(tick.saturating_add(Self::retry_timeout(self.rto, item.3)));

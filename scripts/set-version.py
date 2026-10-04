@@ -9,7 +9,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 SNIPPETS = ("README.md", "README.zh-CN.md", "src/lib.rs")
-DEPENDENCY = re.compile(r'(?m)^(?P<prefix>(?://! )?rust-raknet = ")(?P<version>[^"\n]+)(?P<suffix>"\s*)$')
+DEPENDENCY = re.compile(r'(?m)^(?P<prefix>(?://! )?rust-raknet = (?:\{\s*version = )?")(?P<version>[^"\n]+)(?P<suffix>"[^\n]*)$')
 PACKAGE = re.compile(r'(?m)^(?P<prefix>version = ")(?P<version>[^"\n]+)(?P<suffix>")$')
 RELEASE = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
 
@@ -35,7 +35,10 @@ def main():
     manifest_text = manifest.read_text(encoding="utf-8")
     current = tomllib.loads(manifest_text)["package"]["version"]
     documents = [(ROOT / name, (ROOT / name).read_text(encoding="utf-8")) for name in SNIPPETS]
-    entries = [(path, text, version_match(text, DEPENDENCY, path.name)) for path, text in documents]
+    entries = [(path, text, match) for path, text in documents for match in DEPENDENCY.finditer(text)]
+    for path, _ in documents:
+        if not any(entry[0] == path for entry in entries):
+            raise ValueError(f"{path.name}: no dependency version entry")
     if args.check:
         mismatches = [f"{path.relative_to(ROOT)}: {match['version']} (crate: {current})"
                       for path, _, match in entries if match["version"] != current]
@@ -45,11 +48,13 @@ def main():
         return
 
     package = version_match(manifest_text, PACKAGE, "Cargo.toml")
-    edits = [(manifest, manifest_text, package), *entries]
-    # Resolve every entry before writing any files. Dependency versions are untouched.
-    for path, text, match in edits:
-        updated = text[:match.start("version")] + args.version + text[match.end("version"):]
-        path.write_text(updated, encoding="utf-8")
+    edits = [(manifest, manifest_text, [package])]
+    edits.extend((path, text, list(DEPENDENCY.finditer(text))) for path, text in documents)
+    # Resolve entries first; replace from the end so earlier match offsets remain valid.
+    for path, text, matches in edits:
+        for match in reversed(matches):
+            text = text[:match.start("version")] + args.version + text[match.end("version"):]
+        path.write_text(text, encoding="utf-8")
     print(f"Updated crate and documented dependency versions: {current} -> {args.version}")
 
 

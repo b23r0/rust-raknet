@@ -1116,3 +1116,425 @@ mod send_policy_tests {
         assert!(send.is_empty());
     }
 }
+
+#[cfg(feature = "recovery-policy")]
+mod recovery_tests {
+    use super::*;
+    fn probe_queue(minimum: u64, backoff: bool) -> SendQ {
+        let mut q = SendQ::new(1400);
+        q.set_recovery_options(
+            crate::RecoveryOptions {
+                tail_probe_min_delay: Some(std::time::Duration::from_millis(minimum)),
+                reset_backoff_on_progress: backoff,
+                ..Default::default()
+            },
+            0,
+        );
+        // Warm with unambiguous feedback; keep the legacy estimator and floor.
+        for i in 0..40 {
+            q.insert(Reliability::ReliableOrdered, &[0xfe, i]).unwrap();
+            let frames = q.flush(i64::from(i) * 2, &peer());
+            q.ack(frames[0].sequence_number, i64::from(i) * 2 + 1);
+        }
+        q
+    }
+
+    #[test]
+    fn tail_probe_is_disabled_by_default_and_requires_rtt_feedback() {
+        let mut q = SendQ::new(1400);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 1]).unwrap();
+        q.flush(0, &peer());
+        assert!(q.flush(10, &peer()).is_empty());
+        q.set_recovery_options(
+            crate::RecoveryOptions {
+                tail_probe_min_delay: Some(std::time::Duration::from_millis(5)),
+                ..Default::default()
+            },
+            0,
+        );
+        assert!(q.flush(10, &peer()).is_empty());
+        assert_eq!(q.recovery_deadline(), 50);
+    }
+
+    #[test]
+    fn lost_tail_is_recovered_once_without_waiting_for_base_rto() {
+        let mut q = probe_queue(5, false);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 42]).unwrap();
+        let original = q.flush(100, &peer())[0].clone();
+        assert_eq!(q.recovery_deadline(), 105);
+        assert!(q.flush(104, &peer()).is_empty());
+        let retry = q.flush(105, &peer());
+        assert_eq!(retry.len(), 1);
+        assert_ne!(retry[0].sequence_number, original.sequence_number);
+        assert_eq!(retry[0].reliable_frame_index, original.reliable_frame_index);
+        assert!(q.flush(110, &peer()).is_empty());
+        q.ack(original.sequence_number, 111);
+        assert!(q.is_empty());
+        assert_eq!(q.recovery_deadline(), i64::MAX);
+    }
+
+    #[test]
+    fn lost_ack_probe_preserves_exactly_once_delivery_and_karn() {
+        let mut q = probe_queue(10, false);
+        let mut recv = RecvQ::new();
+        // This receiver starts after the training messages.
+        recv.reliable_window.next = q.reliable_frame_index;
+        recv.last_ordered_indexes
+            .insert(0, q.ordered_frame_indexes.get(0));
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 42]).unwrap();
+        let original = q.flush(100, &peer())[0].clone();
+        recv.insert(original).unwrap();
+        assert_eq!(recv.flush(&peer()).len(), 1);
+        let old_rto = q.rto;
+        let retry = q.flush(110, &peer())[0].clone();
+        recv.insert(retry.clone()).unwrap();
+        assert!(recv.flush(&peer()).is_empty());
+        q.ack(retry.sequence_number, 111);
+        assert!(q.is_empty());
+        assert_eq!(q.rto, old_rto);
+    }
+
+    #[test]
+    fn probe_replays_a_complete_packed_datagram_and_keeps_packing_available() {
+        let mut q = probe_queue(5, false);
+        q.enable_coalescing();
+        for i in 0..8 {
+            q.insert(Reliability::ReliableOrdered, &[0xfe, i]).unwrap();
+        }
+        assert_eq!(q.flush(100, &peer()).len(), 8);
+        let replay = q.flush(105, &peer());
+        assert_eq!(replay.len(), 8);
+        assert!(replay.coalesced);
+        assert!(
+            replay
+                .iter()
+                .all(|p| p.sequence_number == replay[0].sequence_number)
+        );
+        assert!(q.allows_coalescing());
+        assert!(q.flush(106, &peer()).is_empty());
+        // Normal timeout still recovers the remaining frames and disables packing.
+        assert!(!q.flush(180, &peer()).is_empty());
+        assert!(!q.allows_coalescing());
+    }
+
+    #[test]
+    fn stale_or_duplicate_acks_do_not_rearm_probe() {
+        let mut q = probe_queue(5, false);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 1]).unwrap();
+        q.flush(100, &peer());
+        q.flush(105, &peer());
+        q.ack(sequence::MASK, 106);
+        assert!(q.flush(110, &peer()).is_empty());
+        q.ack_ranges(&[(sequence::MASK, sequence::MASK)], 111);
+        assert!(q.flush(116, &peer()).is_empty());
+    }
+
+    #[test]
+    fn fresh_flight_after_idle_gets_a_fresh_probe_deadline() {
+        let mut q = probe_queue(5, false);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 1]).unwrap();
+        q.flush(10000, &peer());
+        assert_eq!(q.probe_deadline(), 10005);
+        assert!(q.flush(10004, &peer()).is_empty());
+    }
+
+    #[test]
+    fn disable_probe_cancels_early_deadline_without_discarding_data() {
+        let mut q = probe_queue(5, false);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 1]).unwrap();
+        q.flush(100, &peer());
+        q.set_recovery_options(Default::default(), 101);
+        assert_eq!(q.recovery_deadline(), 150);
+        assert!(q.flush(105, &peer()).is_empty());
+        assert_eq!(q.flush(150, &peer()).len(), 1);
+    }
+
+    #[test]
+    fn ack_progress_caps_backoff_without_allowing_ambiguous_rtt_samples() {
+        let mut q = probe_queue(5, true);
+        for i in 0..2 {
+            q.insert(Reliability::ReliableOrdered, &[0xfe, i]).unwrap();
+        }
+        let frames = q.flush(100, &peer());
+        q.sent_packet[1].3 = 8;
+        q.ack(frames[0].sequence_number, 101);
+        assert_eq!(q.sent_packet[0].3, 1);
+        let rto = q.rto;
+        q.ack(frames[1].sequence_number, 102);
+        assert_eq!(q.rto, rto);
+    }
+
+    #[test]
+    fn delayed_feedback_does_not_cause_a_probe_storm() {
+        let mut q = probe_queue(5, false);
+        q.insert(Reliability::ReliableOrdered, &[0xfe, 1]).unwrap();
+        q.flush(100, &peer());
+        let mut retries = 0;
+        for now in 101..900 {
+            retries += q.flush(now, &peer()).len();
+        }
+        assert!(retries > 1 && retries < 10, "retries: {retries}");
+    }
+
+    #[test]
+    fn early_probe_does_not_compete_with_a_full_flight() {
+        let mut queue = probe_queue(5, false);
+        for i in 0..16 {
+            queue
+                .insert(Reliability::ReliableOrdered, &[0xfe, i])
+                .unwrap();
+        }
+        queue.flush(100, &peer());
+        assert_eq!(queue.probe_deadline(), i64::MAX);
+        assert!(queue.flush(105, &peer()).is_empty());
+        assert_eq!(queue.flush(150, &peer()).len(), 16);
+    }
+
+    #[test]
+    fn ambiguous_ack_progress_does_not_reset_backoff() {
+        let mut queue = probe_queue(5, true);
+        for i in 0..2 {
+            queue
+                .insert(Reliability::ReliableOrdered, &[0xfe, i])
+                .unwrap();
+        }
+        let frames = queue.flush(100, &peer());
+        queue.sent_packet[0].3 = 1;
+        queue.sent_packet[1].3 = 8;
+        let previous = queue.rto;
+        queue.ack(frames[0].sequence_number, 900);
+        assert_eq!(queue.sent_packet[0].3, 8);
+        assert_eq!(queue.rto, previous);
+    }
+
+    #[test]
+    fn packed_tail_probe_survives_lost_datagram_or_ack_without_duplicate_delivery() {
+        for original_lost in [false, true] {
+            let mut queue = probe_queue(5, false);
+            let mut recv = RecvQ::new();
+            recv.reliable_window.next = queue.reliable_frame_index;
+            recv.last_ordered_indexes
+                .insert(0, queue.ordered_frame_indexes.get(0));
+            recv.sequence_number_ackset.next_expected = queue.sequence_number;
+            queue.enable_coalescing();
+            for id in 0..8 {
+                queue
+                    .insert(Reliability::ReliableOrdered, &[0xfe, id])
+                    .unwrap();
+            }
+            let original = queue.flush(100, &peer());
+            let mut wire = Vec::new();
+            if !original_lost {
+                FrameSetPacket::serialize_group_into(&original, &mut wire).unwrap();
+                for frame in FrameVec::new(&wire).unwrap().frames {
+                    recv.insert(frame).unwrap();
+                }
+                assert_eq!(recv.flush(&peer()).len(), 8);
+                recv.get_ack(); // The ACK is lost; the sender still owns the whole datagram.
+            }
+            let replay = queue.flush(105, &peer());
+            FrameSetPacket::serialize_group_into(&replay, &mut wire).unwrap();
+            for frame in FrameVec::new(&wire).unwrap().frames {
+                recv.insert(frame).unwrap();
+            }
+            assert_eq!(recv.flush(&peer()).len(), if original_lost { 8 } else { 0 });
+            queue.ack_ranges(&recv.get_ack(), 106);
+            assert!(queue.is_empty());
+            assert_eq!(queue.buffered_bytes, 0);
+            assert!(queue.allows_coalescing());
+        }
+    }
+
+    #[cfg(feature = "send-policy")]
+    #[test]
+    fn scheduled_probe_replays_every_packed_frame_in_one_flush() {
+        let mut queue = probe_queue(5, false);
+        queue
+            .set_send_options(
+                crate::SendOptions::default()
+                    .with_flush_budget(2048)
+                    .unwrap(),
+            )
+            .unwrap();
+        queue.enable_coalescing();
+        for id in 0..8 {
+            queue
+                .insert(Reliability::ReliableOrdered, &[0xfe, id])
+                .unwrap();
+        }
+        let original = queue.flush(100, &peer());
+        assert!(original.coalesced);
+        let replay = queue.flush(105, &peer());
+        assert!(replay.coalesced);
+        assert_eq!(replay.len(), 8);
+        assert!(
+            replay
+                .iter()
+                .all(|frame| frame.sequence_number == replay[0].sequence_number)
+        );
+        queue.ack(replay[0].sequence_number, 106);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn packed_tail_probe_and_late_acks_cross_sequence_wrap() {
+        for original_ack in [true, false] {
+            let mut queue = probe_queue(5, false);
+            queue.sequence_number = sequence::MASK;
+            queue.ack_sequence_number = sequence::MASK - 1;
+            queue.enable_coalescing();
+            for id in 0..8 {
+                queue
+                    .insert(Reliability::ReliableOrdered, &[0xfe, id])
+                    .unwrap();
+            }
+            let original = queue.flush(100, &peer());
+            assert_eq!(original[0].sequence_number, sequence::MASK);
+            let replay = queue.flush(105, &peer());
+            assert_eq!(replay[0].sequence_number, 0);
+            queue.ack(if original_ack { sequence::MASK } else { 0 }, 106);
+            assert!(queue.is_empty());
+            assert_eq!(queue.buffered_bytes, 0);
+            assert!(queue.allows_coalescing());
+        }
+    }
+
+    #[test]
+    fn late_maintenance_preserves_normal_rto_before_tail_probing() {
+        for now in [150, 300] {
+            let mut queue = probe_queue(10, false);
+            queue.enable_coalescing();
+            for id in 0..8 {
+                queue
+                    .insert(Reliability::ReliableOrdered, &[0xfe, id])
+                    .unwrap();
+            }
+            queue.flush(100, &peer());
+            let retry = queue.flush(now, &peer());
+            assert_eq!(retry.len(), 8);
+            assert!(!retry.coalesced);
+            assert!(!queue.allows_coalescing());
+            let unique: std::collections::HashSet<_> =
+                retry.iter().map(|p| p.sequence_number).collect();
+            assert_eq!(unique.len(), 8);
+        }
+    }
+    #[test]
+    fn a_lost_probe_does_not_delay_normal_rto_or_add_backoff() {
+        for packed in [false, true] {
+            let mut queue = probe_queue(10, false);
+            if packed {
+                queue.enable_coalescing();
+            }
+            let count = if packed { 8 } else { 1 };
+            for id in 0..count {
+                queue
+                    .insert(Reliability::ReliableOrdered, &[0xfe, id])
+                    .unwrap();
+            }
+            queue.flush(100, &peer());
+            let probe = queue.flush(110, &peer());
+            assert_eq!(probe.len(), usize::from(count));
+            assert!(
+                queue
+                    .sent_packet
+                    .iter()
+                    .all(|p| p.3 == 0 && !p.4.is_empty())
+            );
+            assert_eq!(queue.recovery_deadline(), 150);
+            assert!(queue.flush(149, &peer()).is_empty());
+            let retry = queue.flush(150, &peer());
+            assert_eq!(retry.len(), usize::from(count));
+            assert!(!retry.coalesced);
+            assert!(queue.sent_packet.iter().all(|p| p.3 == 1));
+            assert_eq!(queue.recovery_deadline(), 225);
+            assert!(queue.flush(151, &peer()).is_empty());
+        }
+    }
+
+    #[test]
+    fn late_normal_retry_is_not_immediately_probed_again() {
+        let mut queue = probe_queue(10, false);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &peer());
+        assert_eq!(queue.flush(150, &peer()).len(), 1);
+        assert!(queue.flush(151, &peer()).is_empty());
+        assert_eq!(queue.recovery_deadline(), 225);
+    }
+
+    #[test]
+    fn probe_fallback_only_retries_its_original_datagram() {
+        let mut queue = probe_queue(10, false);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &peer());
+        queue.flush(110, &peer());
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 2])
+            .unwrap();
+        let fresh = queue.flush(120, &peer())[0].clone();
+        let retry = queue.flush(150, &peer());
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].data.as_ref(), [0xfe, 1]);
+        assert!(
+            queue
+                .sent_packet
+                .iter()
+                .any(|p| p.0.sequence_number == fresh.sequence_number && p.3 == 0)
+        );
+    }
+
+    #[test]
+    fn disabling_probes_preserves_an_existing_fallback_deadline() {
+        let mut queue = probe_queue(10, false);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &peer());
+        queue.flush(110, &peer());
+        queue.set_recovery_options(crate::RecoveryOptions::default(), 115);
+        assert_eq!(queue.recovery_options(), crate::RecoveryOptions::default());
+        assert_eq!(queue.recovery_deadline(), 150);
+        assert!(queue.flush(149, &peer()).is_empty());
+        let retry = queue.flush(150, &peer());
+        assert_eq!(retry.len(), 1);
+        assert_eq!(queue.recovery_deadline(), 225);
+        queue.ack(retry[0].sequence_number, 151);
+        queue.flush(151, &peer());
+        assert!(queue.recovery.is_none());
+    }
+    #[test]
+    fn retiring_a_probe_clears_its_deadline_even_with_a_busy_flight() {
+        let mut queue = probe_queue(10, false);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &peer());
+        let probe = queue.flush(110, &peer())[0].clone();
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 2])
+            .unwrap();
+        queue.flush(120, &peer());
+        queue.ack(probe.sequence_number, 125);
+        assert_eq!(queue.sent_packet.len(), 1);
+        assert!(queue.recovery.as_ref().unwrap().pending_probe.is_none());
+        assert_eq!(queue.probe_retry_deadline(), i64::MAX);
+    }
+    #[test]
+    fn nack_with_a_reused_datagram_id_still_adds_normal_backoff() {
+        let mut queue = probe_queue(10, false);
+        queue
+            .insert(Reliability::ReliableOrdered, &[0xfe, 1])
+            .unwrap();
+        queue.flush(100, &peer());
+        let probe = queue.flush(110, &peer())[0].clone();
+        queue.sequence_number = probe.sequence_number;
+        queue.nack(probe.sequence_number, 115);
+        assert_eq!(queue.flush(115, &peer()).len(), 1);
+        assert_eq!(queue.sent_packet[0].3, 1);
+        assert_eq!(queue.probe_retry_deadline(), i64::MAX);
+    }
+}
