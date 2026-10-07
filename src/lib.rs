@@ -17,7 +17,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rust-raknet = "1.2.0"
+//! rust-raknet = "1.3.0"
 //! ```
 //!
 //! # Reliability modes
@@ -32,6 +32,8 @@
 //! See the [RakNet protocol reference](http://www.jenkinssoftware.com/raknet/manual/index.html).
 
 mod arq;
+#[cfg(feature = "blocking")]
+pub mod blocking;
 mod datatype;
 pub mod error;
 mod fragment;

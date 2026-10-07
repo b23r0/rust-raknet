@@ -25,6 +25,7 @@
 
 - **五种交付模式。** 支持尽力传输、丢弃过时状态、可靠事件传输，以及按独立通道有序交付。
 - **异步客户端和服务端。** 基于 Tokio 的连接、监听、接收连接、收发接口，支持 IPv4 和 IPv6 地址编码。
+- **同步客户端和服务端。** 可选 `blocking` feature 提供同步连接、监听、接收连接、收发及超时接口，多个连接共享 Tokio runtime；调用间隙仍持续处理 ACK 和重传。[使用方法](#同步-api)。
 - **保留消息边界。** 接收完整应用消息，无需从字节流重建消息。较大的 `ReliableOrdered` 消息会自动分片和重组。
 - **丢包恢复。** 支持 ACK/NACK 区间、选择性重传和 ACK 缺口快速重传，结合 RTT 估计调整重传计时，并对重复重传进行退避。
 - **尾包丢失探测。** 可选 `recovery-policy` 设置可缩短孤立尾包丢失后的等待，完整数据报探测保留正常 RTO 回退，也可单独启用按期限重试。[设置与性能取舍](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy)。
@@ -52,7 +53,7 @@
 
 ```toml
 [dependencies]
-rust-raknet = "1.2.0"
+rust-raknet = "1.3.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -108,6 +109,43 @@ async fn main() -> Result<()> {
 
 `send_with_order_channel`、`flush`、服务器发现和监听器配置等接口，见 [API 文档](https://docs.rs/rust-raknet/latest/rust_raknet/)。
 
+### 同步 API
+
+可选 `blocking` feature 提供同步包装。创建一个 `blocking::RaknetRuntime`，
+供多个客户端和监听器共享。调用间隙，网络工作线程仍持续处理 ACK、重传和心跳，
+不会为每条连接创建 runtime。默认使用一个工作线程，可通过
+`with_worker_threads` 调整。
+
+```toml
+rust-raknet = { version = "1.3.0", features = ["blocking"] }
+```
+
+```rust
+use rust_raknet::{blocking::RaknetRuntime, Reliability};
+use std::time::Duration;
+
+let runtime = RaknetRuntime::new()?;
+let socket = runtime.connect_timeout(
+    &"127.0.0.1:19132".parse()?,
+    Duration::from_secs(10),
+)?;
+socket.send(&[0xfe, 42], Reliability::ReliableOrdered)?;
+let reply = socket.recv_timeout(Duration::from_secs(5))?;
+socket.flush_timeout(Duration::from_secs(5))?;
+socket.close()?;
+```
+
+服务端使用 `runtime.bind(...)`，完成监听配置后调用 `listen()`，再使用
+`accept()` 或 `accept_timeout()` 接收连接。同步 socket 也支持拥有所有权的缓冲区、
+批量接口、排序通道，以及可选发送与恢复策略。
+
+这些方法会阻塞调用线程，不应在游戏更新系统或 Tokio 异步上下文中使用；
+后者返回 `blocking::Error::AsyncContext`。`send` 不等待对端确认，`flush` 才等待。
+发送超时后，已进入队列的数据仍可能发送；批量发送超时也可能已发送部分消息，
+重试可能造成重复。需要确认交付时应显式调用 `flush` 和 `close`；
+最后一个 runtime 所有者被释放后停止后台工作，不等待 ACK。
+同步包装尚未进行性能测试，下方表格测量的是异步 API。
+
 ### 转发拥有所有权的缓冲区
 
 通过 `recv_bytes()` 和 `send_bytes()`，代理可以与发送队列、重传队列共享不可变的消息缓冲区，避免再次复制应用数据：
@@ -132,7 +170,7 @@ async fn forward(source: &RaknetSocket, destination: &RaknetSocket) -> Result<()
 该接口从 1.1.0 起提供，请启用 `send-policy` feature：
 
 ```toml
-rust-raknet = { version = "1.2.0", features = ["send-policy"] }
+rust-raknet = { version = "1.3.0", features = ["send-policy"] }
 ```
 
 默认构建编译原有发送队列与反馈路径，不包含新策略的状态或检查。启用 `send-policy` 后，调用 `set_send_options` 才会为连接启用新策略。未配置的连接继续使用原有共享队列和 64 帧窗口，`send_options().await` 返回 `None`；配置后返回 `Some(options)`。
@@ -279,7 +317,7 @@ async fn listen() -> Result<RaknetListener> {
 启用 `recovery-policy` 后，为每个已连接或已接受的 socket 配置：
 
 ```toml
-rust-raknet = { version = "1.2.0", features = ["recovery-policy"] }
+rust-raknet = { version = "1.3.0", features = ["recovery-policy"] }
 ```
 
 ```rust

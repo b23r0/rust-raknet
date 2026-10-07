@@ -353,7 +353,7 @@ impl RaknetSocket {
 
     /// Create a RakNet socket for an established UDP connection.
     ///
-    /// This constructor is used internally by [`RaknetListener`].
+    /// This constructor is used internally by [`crate::RaknetListener`].
     pub async fn from(
         addr: &SocketAddr,
         s: &Arc<UdpSocket>,

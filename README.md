@@ -25,6 +25,7 @@
 
 - **Five delivery modes.** Send best-effort updates, discard stale state, deliver reliable events, or keep messages ordered on independent channels.
 - **Async client and server.** Tokio-based connect, listen, accept, send and receive APIs, with IPv4 and IPv6 address encoding.
+- **Blocking client and server.** The optional `blocking` feature provides synchronous connect, listen, accept, send, receive and timeout APIs backed by a shared Tokio runtime. Background workers keep ACKs and retries running between calls. [Usage](#blocking-api).
 - **Message boundaries.** Receive complete application messages rather than reconstructing them from a byte stream. Large `ReliableOrdered` messages are fragmented and reassembled automatically.
 - **Loss recovery.** ACK/NACK ranges, selective retries and ACK-gap fast retransmission, with RTT-based retry timers and retransmission backoff.
 - **Tail-loss probing.** Optional `recovery-policy` settings can reduce waits after isolated tail loss. Probe whole datagrams, retain normal RTO fallback, or enable deadline-driven retries independently. [Configuration and trade-offs](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy-EN).
@@ -56,7 +57,7 @@ it does not imply support for every feature of the original RakNet SDK.
 
 ```toml
 [dependencies]
-rust-raknet = "1.2.0"
+rust-raknet = "1.3.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -114,6 +115,45 @@ sending sustained bursts so the other end can make progress.
 See the [API docs](https://docs.rs/rust-raknet/latest/rust_raknet/) for
 `send_with_order_channel`, `flush`, discovery and listener options.
 
+### Blocking API
+
+The optional `blocking` feature provides synchronous adapters. Create one
+`blocking::RaknetRuntime` and share it across clients and listeners. Network
+workers keep ACKs, retries and heartbeats running between calls; no runtime is
+created per connection. The default worker count is one and can be configured
+with `with_worker_threads`.
+
+```toml
+rust-raknet = { version = "1.3.0", features = ["blocking"] }
+```
+
+```rust
+use rust_raknet::{blocking::RaknetRuntime, Reliability};
+use std::time::Duration;
+
+let runtime = RaknetRuntime::new()?;
+let socket = runtime.connect_timeout(
+    &"127.0.0.1:19132".parse()?,
+    Duration::from_secs(10),
+)?;
+socket.send(&[0xfe, 42], Reliability::ReliableOrdered)?;
+let reply = socket.recv_timeout(Duration::from_secs(5))?;
+socket.flush_timeout(Duration::from_secs(5))?;
+socket.close()?;
+```
+
+Use `runtime.bind(...)`, configure the listener, then call `listen()` and
+`accept()` or `accept_timeout()`. Owned buffers, batches, ordering channels and
+optional send/recovery policies are also available through the blocking socket.
+
+These methods block the calling thread. Do not use them in game update systems
+or Tokio async contexts; async-context calls return `blocking::Error::AsyncContext`.
+`send` does not wait for peer acknowledgement; `flush` does. A timed-out send may
+already have queued data, and a timed-out batch may have sent a prefix. Retrying
+can duplicate messages. Call `flush` and `close` explicitly when delivery matters;
+dropping the final runtime owner stops background work without waiting for ACKs.
+This adapter has not been benchmarked; the tables below measure the async API.
+
 ### Forwarding owned buffers
 
 `recv_bytes()` and `send_bytes()` let a relay share an immutable payload with
@@ -142,7 +182,7 @@ The benchmark tables below distinguish default builds from explicitly configured
 Available since 1.1.0. Enable the `send-policy` feature:
 
 ```toml
-rust-raknet = { version = "1.2.0", features = ["send-policy"] }
+rust-raknet = { version = "1.3.0", features = ["send-policy"] }
 ```
 
 Default builds compile the original send queue and feedback path without the new
@@ -381,7 +421,7 @@ example accepts `--idle-maintenance`.
 Enable `recovery-policy`, then configure each connected or accepted socket:
 
 ```toml
-rust-raknet = { version = "1.2.0", features = ["recovery-policy"] }
+rust-raknet = { version = "1.3.0", features = ["recovery-policy"] }
 ```
 
 ```rust
