@@ -496,7 +496,7 @@ Single-connection rust-raknet uses a 1,428 B nominal MTU, including 28 B of IPv4
 | Implementation / API | Median RTT (range) | 95th-percentile RTT (range) | 99th-percentile RTT (range) | Peak RSS: C / S (range) |
 | --- | --- | --- | --- | --- |
 | TCP | 13.00 µs (12.60–13.30 µs) | 26.80 µs (18.40–29.70 µs) | 66.10 µs (33.20–150.10 µs) | C: 3.91 MiB (3.87–3.93 MiB)<br>S: 3.56 MiB (3.49–3.67 MiB) |
-| rust-raknet (`send`) | 17.90 µs (17.30–18.10 µs) | 33.70 µs (30.20–35.70 µs) | 174.10 µs (46.30–264.40 µs) | C: 4.24 MiB (4.12–4.31 MiB)<br>S: 4.02 MiB (3.98–4.29 MiB) |
+| rust-raknet (`send`) | 17.90 µs (17.30–18.10 µs) | 33.70 µs (30.20–35.70 µs) | 73.10 µs (46.30–264.40 µs) | C: 4.24 MiB (4.12–4.31 MiB)<br>S: 4.02 MiB (3.98–4.29 MiB) |
 | rust-raknet (batch APIs) | 18.60 µs (17.50–18.80 µs) | 33.10 µs (31.40–36.70 µs) | 75.50 µs (47.30–111.20 µs) | C: 4.31 MiB (4.21–4.34 MiB)<br>S: 4.10 MiB (3.98–4.21 MiB) |
 | rust-raknet (`send` + `send-policy`) | 17.40 µs (17.10–17.60 µs) | 31.40 µs (30.10–34.70 µs) | 48.60 µs (43.60–110.00 µs) | C: 4.32 MiB (4.09–4.39 MiB)<br>S: 4.03 MiB (3.96–4.05 MiB) |
 | rust-raknet (batch APIs + `send-policy`) | 17.50 µs (17.20–18.30 µs) | 32.40 µs (21.80–35.50 µs) | 50.10 µs (46.30–205.50 µs) | C: 4.27 MiB (4.24–4.33 MiB)<br>S: 4.03 MiB (3.93–4.14 MiB) |
