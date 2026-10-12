@@ -26,7 +26,7 @@ cores = sorted(physical.values())
 cores = cores if len(cores) >= 8 else cpus
 sc = ','.join(map(str, cores[:4]))
 cc = ','.join(map(str, cores[-4:]))
-print(json.dumps({'metadata': {'date': datetime.now(timezone.utc).isoformat(), 'server_cpus': sc, 'client_cpus': cc, 'netns': os.readlink('/proc/self/ns/net'), 'kernel': os.uname().release, 'cpu': cmd('lscpu'), 'kcp_revision': (r / 'kcp/revision.txt').read_text(), 'rust': cmd('rustc', '--version').strip(), 'quic_go': 'v0.63.0', 'go': cmd(str(r / 'go/bin/go'), 'version').strip(), 'raknet': re.search(r'^version\s*=\s*"([^"]+)"', (r / 'work/Cargo.toml').read_text(), re.M)[1], 'source_revision': os.environ.get('RAKNET_REVISION', 'task copy; record its revision separately'), 'memory_method': 'Linux wait4 ru_maxrss, whole-process peak, client/server separately', 'loaded_rtt': os.environ.get('LOADED_RTT') == '1', 'explicit_batch': True, 'batch_policy': 'max 8 frames; permanent individual sends after actual NACK or reliable timeout', 'receive_batching': False, 'idle_maintenance': False}}), flush=True)
+print(json.dumps({'metadata': {'date': datetime.now(timezone.utc).isoformat(), 'server_cpus': sc, 'client_cpus': cc, 'netns': os.readlink('/proc/self/ns/net'), 'kernel': os.uname().release, 'cpu': cmd('lscpu'), 'kcp_revision': (r / 'kcp/revision.txt').read_text(), 'rust': cmd('rustc', '--version').strip(), 'quic_go': 'v0.63.0', 'go': cmd(str(r / 'go/bin/go'), 'version').strip(), 'raknet': re.search(r'^version\s*=\s*"([^"]+)"', (r / 'work/Cargo.toml').read_text(), re.M)[1], 'source_sha256_manifest': 'source-manifest.json', 'send_policy_columns': ['policy-send', 'policy-batch'], 'source_revision': os.environ.get('RAKNET_REVISION', 'task copy; record its revision separately'), 'memory_method': 'Linux wait4 ru_maxrss, whole-process peak, client/server separately', 'loaded_rtt': os.environ.get('LOADED_RTT') == '1', 'explicit_batch': True, 'batch_policy': 'max 8 frames; permanent individual sends after actual NACK or reliable timeout', 'receive_batching': False, 'idle_maintenance': False}}), flush=True)
 
 def counters():
     lines = pathlib.Path('/proc/net/snmp').read_text().splitlines()
@@ -41,8 +41,11 @@ def run(mode, profile, variant, repeat):
     cmd('tc', 'qdisc', 'add', 'dev', 'lo', 'root', 'netem', 'limit', '100000', *(['delay', str(delay) + 'ms'] if delay else []), 'loss', str(loss) + '%')
     before = counters()
     addr = '127.0.0.1:19342'
-    b = r / 'target/release'
+    b = r / ('target-policy/release' if variant.startswith('policy-') else 'target/release')
+    batched = variant in ['batch', 'policy-batch']
+    policy = variant.startswith('policy-')
     row = dict(mode=mode, payload=size, messages=count, loss=loss, delay_ms=delay, connections=n, variant=variant, repeat=repeat)
+    row['send_policy'] = 'SendOptions::default() on both endpoints' if policy else 'disabled'
     if mode == 'concurrent':
         common = [addr, str(n), str(count), str(size)]
         if variant in ['kcp', 'quic-go']:
@@ -55,8 +58,8 @@ def run(mode, profile, variant, repeat):
         else:
             server_binary = b / 'examples/sharded_echo'
             client_binary = b / 'examples/concurrency_benchmark'
-            sa = [str(server_binary), addr, '4', *(['--batch-messages'] if variant == 'batch' else [])]
-            ca = [str(client_binary), *(['--batch'] if variant == 'batch' else []), *common]
+            sa = [str(server_binary), addr, '4', *(['--batch-messages'] if batched else [])]
+            ca = [str(client_binary), *(['--batch'] if batched else []), *common]
         if os.environ.get('LOADED_RTT') == '1':
             ca += ['--loaded-rtt']
         sp = ['taskset', '-c', sc]
@@ -68,11 +71,11 @@ def run(mode, profile, variant, repeat):
             ca = [str(r / 'bin/quic-single'), 'single', addr, str(count), str(size), str(warmup), str(samples)]
         else:
             binary = r / 'bin/kcp-single' if variant == 'kcp' else b / 'test_benchmark'
-            protocol = 'raknet' if variant in ['base', 'default', 'batch'] else variant
+            protocol = 'raknet' if variant in ['base', 'default', 'batch', 'policy-send', 'policy-batch'] else variant
             common = [str(binary), '--protocol', protocol, '--address', addr, '--payload-size', str(size)]
-            if variant in ['base', 'default', 'batch']:
+            if variant in ['base', 'default', 'batch', 'policy-send', 'policy-batch']:
                 common += ['--raknet-mtu', '1428']
-            if variant == 'batch':
+            if batched:
                 common += ['--raknet-batch-size', '16']
             sa = common + ['--type', 'server']
             ca = common + ['--type', 'client', '--packets', str(count), '--warmup', str(warmup), '--latency-samples', str(samples)]
@@ -137,6 +140,19 @@ def run(mode, profile, variant, repeat):
     after = counters()
     row['udp_delta'] = {k: after[k] - before[k] for k in before}
     return row
+resume_path = os.environ.get('BENCH_RESUME_FILE')
+completed = set()
+def case_key(mode, profile, variant, repeat, loaded):
+    size, count, loss, delay, n = profile
+    return (mode, size, count, loss, delay, n, variant, repeat, loaded)
+if resume_path:
+    for line in pathlib.Path(resume_path).read_text().splitlines():
+        old = json.loads(line)
+        if 'metadata' in old:
+            continue
+        if old.get('returncode') != 0 or 'error' in old:
+            raise RuntimeError('Resume input contains a failed measurement; preserve and inspect it first')
+        completed.add((old['mode'], old['payload'], old['messages'], old['loss'], old['delay_ms'], old['connections'], old['variant'], old['repeat'], old['loaded_rtt']))
 mode = sys.argv[1]
 if mode == 'single':
     profiles = [(800, 200000, 0, 0, 1), (800, 50000, 1, 0, 1), (800, 50000, 5, 0, 1), (64, 300000, 0, 0, 1), (64, 100000, 1, 0, 1), (64, 100000, 5, 0, 1), (4096, 50000, 0, 0, 1), (800, 3000, 1, 5, 1)]
@@ -148,7 +164,7 @@ elif mode == 'concurrent':
     profiles = [(800, 1048576 // n, loss, 0, n) for loss in [0, 1] for n in [64, 256, 1024, 2048]] + [(64, 1048576 // n, loss, 0, n) for loss in [0, 1] for n in [64, 1024]]
 else:
     raise SystemExit('mode must be single, concurrent or latency')
-variants = ['tcp', 'default', 'batch', 'kcp', 'quic-go']
+variants = ['tcp', 'default', 'batch', 'policy-send', 'policy-batch', 'kcp', 'quic-go']
 if os.environ.get('SMOKE') == '1':
     profiles = [(64, 64, 1, 0, 64)] if mode == 'concurrent' else [(800, 1000, 0, 0, 1)]
 for index, profile in enumerate(profiles):
@@ -156,6 +172,8 @@ for index, profile in enumerate(profiles):
         offset = (index + repeat) % len(variants)
         order = variants[offset:] + variants[:offset]
         for variant in order:
+            if case_key(mode, profile, variant, repeat, os.environ.get('LOADED_RTT') == '1') in completed:
+                continue
             row = run(mode, profile, variant, repeat)
             print(json.dumps(row), flush=True)
             if 'error' in row:

@@ -48,6 +48,6 @@ a batch call is not a guarantee of higher throughput. Compare latency and
 memory as well as throughput before choosing the API. The larger async counts
 are a transport echo workload, not a blocking scalability claim. This baseline
 uses a different single-connection window and loaded-RTT instrumentation from
-the [historical comparison in the main README](../../README.md#historical-cross-protocol-comparison), so it is not a controlled version comparison.
+the [cross-protocol comparison in the main README](../../README.md#benchmarks), so it is not a controlled version comparison.
 
 [Drivers and reproduction instructions](README.md#async-and-blocking-api-baseline).

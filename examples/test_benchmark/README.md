@@ -307,3 +307,51 @@ client/server RSS includes startup, warmup, load and per-message RTT samples.
 Every failed measurement is retained in JSONL and stops the run. The full
 matrix rotates API/batch order, repeats each profile three times and produces
 120 measured records, separately from eight smoke records.
+
+
+## Seven-column comparison matrix
+
+The README comparison uses `run_comparison.py` with TCP, ordinary and batch
+`rust-raknet` sends, the same APIs with an explicit send policy, official C KCP
+and quic-go. Prepare all binaries in a task directory before entering its private
+user/network namespace. The runner never builds or downloads dependencies.
+
+The unconfigured Rust build belongs in `$TASK_ROOT/target`. Create a second
+source copy at `$TASK_ROOT/policy` and build it into `$TASK_ROOT/target-policy`.
+In that copy only, add `set_send_options(rust_raknet::SendOptions::default()).await?`
+after each RakNet client connects and each server accepts in the single driver,
+`concurrency_benchmark.rs` and `sharded_echo.rs`. Compile the root examples with
+`--features send-policy` and the single driver with
+`--features rust-raknet/send-policy`. Keep the library source and dependency
+versions identical in both builds.
+
+Place the C/Go executables and `measure-process` in `$TASK_ROOT/bin`, the pinned
+C KCP source and `revision.txt` in `$TASK_ROOT/kcp`, and the task-local Go toolchain
+in `$TASK_ROOT/go`. Capture source revisions, resolved lockfiles and source/binary
+checksums in `source-manifest.json`. Use task-local Cargo/Go homes and caches;
+set `GOTOOLCHAIN=local` to prevent automatic toolchain installation elsewhere.
+The October 12, 2026 run used rust-raknet 1.4.0, Tokio 1.53.2, Go 1.27.2,
+quic-go 0.63.0 and C KCP commit `b1a7a2101dcbb96017681a500d6b82bbe5a88766`.
+
+Inside the sandbox, set `TASK_ROOT`, `HOME=$TASK_ROOT/home`,
+`CARGO_HOME=$TASK_ROOT/cargo` and `TASK_HOST_NETNS` to the namespace ID captured
+before entering it. Run from `$TASK_ROOT/work`:
+
+```sh
+python3 examples/test_benchmark/run_comparison.py single > "$TASK_ROOT/single.jsonl"
+python3 examples/test_benchmark/run_comparison.py concurrent > "$TASK_ROOT/concurrent.jsonl"
+LOADED_RTT=1 python3 examples/test_benchmark/run_comparison.py concurrent > "$TASK_ROOT/loaded.jsonl"
+python3 examples/test_benchmark/run_comparison.py latency > "$TASK_ROOT/latency.jsonl"
+```
+
+Use `SMOKE=1` first to check all seven columns. Full runs produce 168 single,
+252 concurrent, 168 loaded-latency and 35 sparse-latency records. Preserve
+failed records; the runner exits nonzero on a failed echo or measurement.
+
+
+If an execution environment stops between completed cases, preserve its logs
+and interruption record. Set `BENCH_RESUME_FILE` to the validated JSONL and
+append output to that file using the same mode, binaries and settings. The
+runner skips matching completed cases and records the new namespace metadata;
+it refuses resume input containing a failed measurement. This does not reduce
+message counts or repetitions.

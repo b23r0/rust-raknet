@@ -10,7 +10,7 @@ go build -o /path/to/task/bin/quic-single ./single
 go build -o /path/to/task/bin/quic-concurrent ./concurrent
 ```
 
-The measured build used Go 1.27.1. Populate dependencies inside the isolated
+The October 12, 2026 measured build used Go 1.27.2. Populate dependencies inside the isolated
 environment before running benchmarks; do not let Go install a toolchain into
 the host cache.
 
