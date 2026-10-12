@@ -267,3 +267,43 @@ also retain all RTT samples, so their memory belongs in a separate table.
 
 For each profile, report the median of three process peaks alongside throughput.
 RSS ranges and throughput ranges are useful when comparing close results.
+
+## Async and blocking API baseline
+
+`examples/blocking_benchmark.rs` mirrors the RakNet part of
+`examples/concurrency_benchmark.rs`. Both use `ReliableOrdered`, a sliding
+16-message application window, 20 verified warmup echoes per connection, a
+common start gate, connection/message IDs and complete-payload validation.
+`--loaded-rtt` timestamps every measured echo. Batch mode submits only messages
+already ready to send; it does not wait to fill a batch.
+
+The server is the same async `sharded_echo` process for both clients. Each
+process has four Tokio workers. The blocking client shares one runtime across
+connections and additionally uses one application thread per connection; the
+async client uses Tokio tasks. This comparison includes that scheduling cost,
+rather than measuring `block_on` in isolation. The blocking driver caps the
+application thread count at 256. Use the async driver for larger connection
+counts.
+
+Build the examples with `--features blocking` in a disposable task copy, and
+compile `measure_process.c` to `$TASK_ROOT/measure-process`. Place the executables
+in `$TASK_ROOT/target/release/examples`. Set a task-local `HOME`, `CARGO_HOME`,
+`RUSTUP_HOME`, `CARGO_TARGET_DIR` and `TMPDIR`. Inside a private user/network
+namespace with UID 0 mapped only to the task user, run:
+
+```sh
+python3 examples/test_benchmark/run_api_comparison.py --smoke > "$TASK_ROOT/smoke.jsonl"
+python3 examples/test_benchmark/run_api_comparison.py > "$TASK_ROOT/api.jsonl"
+```
+
+The runner requires `TASK_ROOT`, `HOME=$TASK_ROOT/home` and
+`RAKNET_PARENT_NETNS` containing the network namespace ID captured before
+entering the sandbox. It rejects the host network namespace and never creates
+one implicitly. It requires eight available CPUs: server CPUs 0–3 and client
+CPUs 4–7 in that affinity list. `ip`, `tc`, `taskset`, `nice`, Python 3.11+ and the
+prebuilt drivers are required. Network settings apply only to the private
+loopback. Throughput counts verified application bytes in one direction;
+client/server RSS includes startup, warmup, load and per-message RTT samples.
+Every failed measurement is retained in JSONL and stops the run. The full
+matrix rotates API/batch order, repeats each profile three times and produces
+120 measured records, separately from eight smoke records.

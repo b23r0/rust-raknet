@@ -25,28 +25,29 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Check documented crate version
         if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
-        run: python3 scripts/set-version.py --check
+        run: python scripts/set-version.py --check
       - name: Select Rust toolchain
-        run: rustup toolchain install ${{ matrix.rust }} --profile minimal && rustup default ${{ matrix.rust }}
-      - name: Run tests
-        run: cargo test --all-targets --verbose
-      - name: Test optional send policy
-        run: cargo test --all-targets --features send-policy --verbose
+        run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component rustfmt && rustup default ${{ matrix.rust }}
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo fmt --all -- --check
+      - name: Test every feature combination and documentation
+        run: python scripts/test-features.py
       - name: Test RakNet proxy forwarding
         run: cargo test --manifest-path examples/proxy/Cargo.toml
-      - name: Test proxy with optional send policy
-        run: cargo test --manifest-path examples/proxy/Cargo.toml --features rust-raknet/send-policy
-      - name: Test documentation
-        run: cargo test --doc
-      - name: Test optional send policy documentation
-        run: cargo test --doc --features send-policy
+      - name: Test proxy with all transport features
+        run: cargo test --manifest-path examples/proxy/Cargo.toml --features rust-raknet/blocking,rust-raknet/send-policy,rust-raknet/recovery-policy
       - name: Check examples
         shell: bash
         run: |
           for manifest in examples/*/Cargo.toml; do
             cargo check --all-targets --manifest-path "$manifest"
+            cargo check --all-targets --manifest-path "$manifest" --features rust-raknet/blocking,rust-raknet/send-policy,rust-raknet/recovery-policy
           done
       - name: Check package
         if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'

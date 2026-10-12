@@ -53,7 +53,7 @@
 
 ```toml
 [dependencies]
-rust-raknet = "1.3.0"
+rust-raknet = "1.4.0"
 tokio = { version = "1.38", features = ["full"] }
 ```
 
@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
 `with_worker_threads` 调整。
 
 ```toml
-rust-raknet = { version = "1.3.0", features = ["blocking"] }
+rust-raknet = { version = "1.4.0", features = ["blocking"] }
 ```
 
 ```rust
@@ -170,7 +170,7 @@ async fn forward(source: &RaknetSocket, destination: &RaknetSocket) -> Result<()
 该接口从 1.1.0 起提供，请启用 `send-policy` feature：
 
 ```toml
-rust-raknet = { version = "1.3.0", features = ["send-policy"] }
+rust-raknet = { version = "1.4.0", features = ["send-policy"] }
 ```
 
 默认构建编译原有发送队列与反馈路径，不包含新策略的状态或检查。启用 `send-policy` 后，调用 `set_send_options` 才会为连接启用新策略。未配置的连接继续使用原有共享队列和 64 帧窗口，`send_options().await` 返回 `None`；配置后返回 `Some(options)`。
@@ -317,7 +317,7 @@ async fn listen() -> Result<RaknetListener> {
 启用 `recovery-policy` 后，为每个已连接或已接受的 socket 配置：
 
 ```toml
-rust-raknet = { version = "1.3.0", features = ["recovery-policy"] }
+rust-raknet = { version = "1.4.0", features = ["recovery-policy"] }
 ```
 
 ```rust
@@ -335,6 +335,53 @@ socket.set_recovery_options(RecoveryOptions {
 [恢复策略指南](https://github.com/b23r0/rust-raknet/wiki/Recovery-Policy)介绍仅期限重试、RTT 进展退避、关闭选项和实测取舍；[配置参数参考](https://github.com/b23r0/rust-raknet/wiki/Configuration-Reference)列出全部公开调优参数。
 
 ## 性能测试
+
+### 1.4.0 异步与 blocking 性能基线
+
+**测试日期：2026 年 10 月 12 日。** Intel Core i7-9700F、Linux x86_64、
+Rust 1.98.1、Tokio 1.53.1；release 构建，使用独立网络命名空间。
+两种客户端连接同一个异步回显服务端。服务端绑定 CPU 0–3，客户端绑定 CPU 4–7，
+每个进程使用四个 Tokio 工作线程。blocking 客户端共享一个 runtime，另为每条连接
+使用一个应用线程；异步客户端使用 Tokio task。blocking 测量 1 和 64 条连接，
+更多连接使用异步 API。
+
+两种驱动均启用 `blocking`，未启用发送/恢复策略、收包批处理和空闲维护。
+使用协议版本 11、默认 1,400 B 名义 MTU、`ReliableOrdered`、每连接 20 次预热，
+应用滑动窗口为 16 条消息。batch 调用只提交已经就绪的消息。
+每条实测消息记录时间戳，校验连接编号、消息编号和完整载荷。吞吐计时不含连接和预热；
+RSS 包含整个进程生命周期和 RTT 样本存储。**120 次实测均通过回显校验**，
+另有八次 smoke 测量。
+
+每格依次为 **吞吐 / 99% RTT / 峰值 RSS（C：客户端，S：服务端）**。
+数据为三轮中位数，括号为最小–最大范围，每项均带单位。
+丢包作用于两个方向的数据包和控制包；注入 RTT 是单向延迟的两倍，不包含处理时间。
+
+| 连接 / 消息 / 丢包 / RTT 注入 | Async send | Async batch | Blocking send | Blocking batch |
+|---|---|---|---|---|
+| 1 / 64 B / 0% / 0 ms | 14.16 MiB/s (14.10–14.49 MiB/s)<br>99% RTT: 0.14 ms (0.12–0.15 ms)<br>C: 12.48 MiB (12.26–12.54 MiB)<br>S: 4.09 MiB (3.91–4.10 MiB) | 34.12 MiB/s (33.10–34.60 MiB/s)<br>99% RTT: 0.12 ms (0.07–0.13 ms)<br>C: 12.45 MiB (12.44–12.57 MiB)<br>S: 4.07 MiB (3.91–4.13 MiB) | 14.33 MiB/s (14.32–15.01 MiB/s)<br>99% RTT: 0.19 ms (0.14–0.19 ms)<br>C: 12.70 MiB (12.61–12.82 MiB)<br>S: 4.05 MiB (3.95–4.23 MiB) | 24.94 MiB/s (13.93–28.59 MiB/s)<br>99% RTT: 0.21 ms (0.11–0.36 ms)<br>C: 12.55 MiB (12.50–12.69 MiB)<br>S: 4.21 MiB (4.06–4.31 MiB) |
+| 1 / 800 B / 0% / 0 ms | 163.70 MiB/s (162.01–164.56 MiB/s)<br>99% RTT: 0.18 ms (0.16–0.18 ms)<br>C: 9.47 MiB (9.39–9.60 MiB)<br>S: 4.18 MiB (3.97–4.21 MiB) | 167.31 MiB/s (163.20–167.68 MiB/s)<br>99% RTT: 0.14 ms (0.14–0.17 ms)<br>C: 9.64 MiB (9.60–9.72 MiB)<br>S: 4.20 MiB (4.10–4.21 MiB) | 159.25 MiB/s (158.92–160.04 MiB/s)<br>99% RTT: 0.23 ms (0.22–0.26 ms)<br>C: 9.62 MiB (9.59–9.64 MiB)<br>S: 4.15 MiB (4.14–4.21 MiB) | 161.11 MiB/s (159.53–166.21 MiB/s)<br>99% RTT: 0.21 ms (0.16–0.23 ms)<br>C: 9.66 MiB (9.66–9.67 MiB)<br>S: 4.33 MiB (4.13–4.38 MiB) |
+| 1 / 4096 B / 0% / 0 ms | 279.75 MiB/s (269.33–282.15 MiB/s)<br>99% RTT: 0.81 ms (0.58–0.93 ms)<br>C: 5.42 MiB (5.42–5.57 MiB)<br>S: 4.67 MiB (4.67–4.70 MiB) | 281.25 MiB/s (134.40–290.35 MiB/s)<br>99% RTT: 0.83 ms (0.55–0.89 ms)<br>C: 5.50 MiB (5.47–5.61 MiB)<br>S: 4.60 MiB (4.55–4.62 MiB) | 306.42 MiB/s (300.28–308.43 MiB/s)<br>99% RTT: 0.68 ms (0.42–0.80 ms)<br>C: 5.38 MiB (5.22–5.68 MiB)<br>S: 4.45 MiB (4.32–4.71 MiB) | 321.48 MiB/s (318.85–324.94 MiB/s)<br>99% RTT: 0.61 ms (0.60–0.75 ms)<br>C: 5.59 MiB (5.49–5.75 MiB)<br>S: 4.52 MiB (4.46–4.55 MiB) |
+| 1 / 800 B / 1% / 0 ms | 88.94 MiB/s (69.95–90.01 MiB/s)<br>99% RTT: 0.46 ms (0.41–0.62 ms)<br>C: 5.11 MiB (5.08–5.28 MiB)<br>S: 4.27 MiB (4.27–4.31 MiB) | 58.47 MiB/s (51.93–62.68 MiB/s)<br>99% RTT: 0.63 ms (0.54–0.64 ms)<br>C: 5.12 MiB (4.99–5.16 MiB)<br>S: 4.30 MiB (4.23–4.39 MiB) | 130.09 MiB/s (127.19–131.23 MiB/s)<br>99% RTT: 0.44 ms (0.43–0.48 ms)<br>C: 5.28 MiB (5.20–5.28 MiB)<br>S: 4.35 MiB (4.34–4.49 MiB) | 123.31 MiB/s (119.37–127.34 MiB/s)<br>99% RTT: 0.45 ms (0.44–0.51 ms)<br>C: 5.34 MiB (5.02–5.43 MiB)<br>S: 4.25 MiB (4.14–4.32 MiB) |
+| 1 / 800 B / 5% / 0 ms | 11.23 MiB/s (10.81–24.34 MiB/s)<br>99% RTT: 1.39 ms (0.96–1.41 ms)<br>C: 4.27 MiB (4.16–4.39 MiB)<br>S: 4.20 MiB (4.16–4.35 MiB) | 11.86 MiB/s (11.46–14.42 MiB/s)<br>99% RTT: 1.39 ms (1.32–1.43 ms)<br>C: 4.23 MiB (4.14–4.36 MiB)<br>S: 4.48 MiB (4.32–4.48 MiB) | 31.45 MiB/s (31.05–79.81 MiB/s)<br>99% RTT: 0.96 ms (0.69–1.00 ms)<br>C: 4.16 MiB (4.15–4.31 MiB)<br>S: 4.32 MiB (4.21–4.51 MiB) | 22.10 MiB/s (12.18–26.82 MiB/s)<br>99% RTT: 1.16 ms (0.94–1.33 ms)<br>C: 4.54 MiB (4.09–4.56 MiB)<br>S: 4.35 MiB (4.31–4.46 MiB) |
+| 1 / 800 B / 1% / 10 ms | 0.96 MiB/s (0.96–0.99 MiB/s)<br>99% RTT: 21.18 ms (21.11–31.35 ms)<br>C: 3.76 MiB (3.54–3.79 MiB)<br>S: 4.14 MiB (3.89–4.34 MiB) | 1.00 MiB/s (0.98–1.01 MiB/s)<br>99% RTT: 21.70 ms (21.34–30.65 ms)<br>C: 3.87 MiB (3.79–4.01 MiB)<br>S: 4.27 MiB (4.15–4.29 MiB) | 0.98 MiB/s (0.97–1.01 MiB/s)<br>99% RTT: 31.18 ms (21.26–31.39 ms)<br>C: 3.64 MiB (3.40–3.64 MiB)<br>S: 4.26 MiB (4.07–4.30 MiB) | 1.01 MiB/s (0.92–1.01 MiB/s)<br>99% RTT: 21.34 ms (21.18–31.39 ms)<br>C: 3.77 MiB (3.73–3.97 MiB)<br>S: 4.17 MiB (4.04–4.22 MiB) |
+| 64 / 64 B / 0% / 0 ms | 53.40 MiB/s (51.95–54.12 MiB/s)<br>99% RTT: 2.93 ms (2.63–2.96 ms)<br>C: 35.49 MiB (35.43–35.54 MiB)<br>S: 6.01 MiB (5.91–6.04 MiB) | 98.92 MiB/s (95.09–101.14 MiB/s)<br>99% RTT: 1.70 ms (1.62–2.43 ms)<br>C: 35.61 MiB (35.47–35.69 MiB)<br>S: 6.32 MiB (6.18–6.51 MiB) | 44.30 MiB/s (42.14–44.59 MiB/s)<br>99% RTT: 4.96 ms (4.79–5.91 ms)<br>C: 36.84 MiB (36.83–37.10 MiB)<br>S: 6.20 MiB (6.14–6.25 MiB) | 62.60 MiB/s (62.40–62.93 MiB/s)<br>99% RTT: 3.90 ms (3.73–3.99 ms)<br>C: 38.09 MiB (37.93–38.13 MiB)<br>S: 6.59 MiB (6.52–6.77 MiB) |
+| 64 / 800 B / 0% / 0 ms | 572.85 MiB/s (564.49–587.24 MiB/s)<br>99% RTT: 3.60 ms (3.39–3.69 ms)<br>C: 36.87 MiB (36.84–36.93 MiB)<br>S: 7.51 MiB (7.34–7.83 MiB) | 586.66 MiB/s (580.31–593.13 MiB/s)<br>99% RTT: 3.18 ms (3.06–3.29 ms)<br>C: 36.96 MiB (36.91–36.97 MiB)<br>S: 7.77 MiB (7.65–7.80 MiB) | 483.01 MiB/s (481.94–485.09 MiB/s)<br>99% RTT: 5.45 ms (5.26–5.55 ms)<br>C: 39.91 MiB (39.83–40.17 MiB)<br>S: 8.21 MiB (8.17–8.23 MiB) | 505.20 MiB/s (500.12–517.84 MiB/s)<br>99% RTT: 4.90 ms (4.87–5.29 ms)<br>C: 40.82 MiB (40.73–41.26 MiB)<br>S: 8.47 MiB (8.14–8.68 MiB) |
+| 64 / 800 B / 1% / 0 ms | 499.96 MiB/s (441.68–560.00 MiB/s)<br>99% RTT: 4.35 ms (4.14–5.61 ms)<br>C: 16.93 MiB (16.82–17.07 MiB)<br>S: 7.49 MiB (7.41–8.09 MiB) | 506.62 MiB/s (500.55–525.80 MiB/s)<br>99% RTT: 4.33 ms (4.02–4.94 ms)<br>C: 17.30 MiB (17.04–17.36 MiB)<br>S: 7.77 MiB (7.59–8.02 MiB) | 410.91 MiB/s (378.90–425.06 MiB/s)<br>99% RTT: 5.73 ms (5.34–5.75 ms)<br>C: 20.43 MiB (20.35–20.46 MiB)<br>S: 8.16 MiB (7.98–8.30 MiB) | 436.15 MiB/s (426.11–449.83 MiB/s)<br>99% RTT: 5.54 ms (5.33–5.85 ms)<br>C: 21.32 MiB (21.13–21.35 MiB)<br>S: 8.37 MiB (8.32–8.40 MiB) |
+| 128 / 800 B / 0% / 0 ms | 589.86 MiB/s (530.06–590.06 MiB/s)<br>99% RTT: 5.56 ms (5.48–7.78 ms)<br>C: 69.32 MiB (69.20–69.43 MiB)<br>S: 10.69 MiB (10.45–10.77 MiB) | 564.39 MiB/s (552.13–582.06 MiB/s)<br>99% RTT: 6.20 ms (5.50–6.20 ms)<br>C: 69.78 MiB (69.63–69.94 MiB)<br>S: 10.77 MiB (10.50–10.79 MiB) | — | — |
+| 512 / 800 B / 0% / 0 ms | 519.76 MiB/s (518.14–539.63 MiB/s)<br>99% RTT: 88.71 ms (29.90–90.20 ms)<br>C: 106.16 MiB (106.02–106.53 MiB)<br>S: 26.50 MiB (25.35–26.54 MiB) | 518.33 MiB/s (515.69–540.13 MiB/s)<br>99% RTT: 84.06 ms (33.42–93.48 ms)<br>C: 107.73 MiB (107.17–108.13 MiB)<br>S: 27.57 MiB (27.50–27.64 MiB) | — | — |
+
+单连接发送量：64 B 为 300,000 条，800 B 无丢包为 200,000 条，4,096 B 或 1% 丢包
+为 50,000 条，5% 丢包为 20,000 条，10 ms/1% 场景为 3,000 条。
+并发场景每连接发送 30,000 条；1% 丢包和 512 连接场景为每连接 10,000 条。
+
+blocking 的开销受线程调度和每次调用中就绪消息数量影响，调用 batch 不保证吞吐增加。
+选择 API 时应同时比较吞吐、延迟和内存。更高并发的异步数据是传输回显负载，不能用来
+声称 blocking 在同等连接数量下的表现。本基线与下方历史横向测试的单连接窗口和
+持续负载 RTT 采样方式不同，不能直接当作受控的版本性能变化。
+
+[测试驱动及复现说明](examples/test_benchmark/README.md#async-and-blocking-api-baseline)。
+
+### 历史横向性能对比
 
 以下对比的是 **rust-raknet 的具体实现**，与 TCP、官方 C KCP 核心和 quic-go 对比。普通发送和批量接口分别测试默认构建与显式启用 `send-policy` 的配置。这些数据不代表 RakNet 协议本身的通用性能。
 
@@ -467,7 +514,7 @@ RSS 使用 Linux `wait4` 记录整进程峰值，覆盖启动、建连、预热�
 ```sh
 cargo fmt --all -- --check
 cargo build --all-targets
-cargo test --all-targets
+python3 scripts/test-features.py
 ```
 
 请说明执行了哪些检查。涉及传输或性能的改动，还应提供测试负载和足够的复现信息。
