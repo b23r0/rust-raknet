@@ -3105,3 +3105,7 @@ mod owned_payload_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "arq_stress_tests.rs"]
+mod stress;
